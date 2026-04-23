@@ -101,9 +101,15 @@ func Load(path string) (*Config, error) {
 
 // Save writes the config atomically: writes to a sibling .tmp file then
 // renames into place so a power loss mid-write can't leave a half-formatted
-// YAML file. Directory is created with 0o755 (world-readable) since the file
-// holds no secrets and other users on the same Windows box (service account,
-// user account) need to be able to read it.
+// YAML file.
+//
+// File mode is 0o600 — owner-only read/write. The config doesn't hold the
+// HMAC secret (that's in the keyring), but it does hold connection_id +
+// server URL, which together with a leaked bearer token would let an
+// attacker forge ingest requests. Narrower-by-default keeps the same-box
+// threat model smaller on Unix. Windows ignores the mode argument and
+// inherits ACLs from %ProgramData% — Windows-specific hardening lands in
+// the MSI installer (A9) where we can set explicit DACLs.
 func Save(path string, c *Config) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -114,7 +120,7 @@ func Save(path string, c *Config) error {
 		return fmt.Errorf("config: marshal: %w", err)
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, body, 0o644); err != nil {
+	if err := os.WriteFile(tmp, body, 0o600); err != nil {
 		return fmt.Errorf("config: write temp %s: %w", tmp, err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
