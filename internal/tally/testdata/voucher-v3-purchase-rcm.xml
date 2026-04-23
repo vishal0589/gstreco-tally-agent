@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <STATUS>1</STATUS>
+  </HEADER>
+  <BODY>
+    <DATA>
+      <COLLECTION>
+        <VOUCHER VCHTYPE="GST Purchase" ACTION="Create">
+          <DATE>20260420</DATE>
+          <GUID>fixture-purchase-rcm-0001</GUID>
+          <ALTERID>12600</ALTERID>
+          <VOUCHERTYPENAME>GST Purchase - RCM</VOUCHERTYPENAME>
+          <VOUCHERNUMBER>RCM/007/26-27</VOUCHERNUMBER>
+          <REFERENCE>GTA/APR/77</REFERENCE>
+          <PARTYLEDGERNAME>MNO Transport</PARTYLEDGERNAME>
+          <PARTYGSTIN></PARTYGSTIN>
+          <PLACEOFSUPPLY>Karnataka</PLACEOFSUPPLY>
+          <ISINVOICE>Yes</ISINVOICE>
+          <ISCANCELLED>No</ISCANCELLED>
+          <ISRCMAPPLICABLE>Yes</ISRCMAPPLICABLE>
+          <NARRATION>Freight inward — RCM self-invoice @ 5%</NARRATION>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>MNO Transport</LEDGERNAME>
+            <AMOUNT>-10000.00</AMOUNT>
+            <BILLALLOCATIONS.LIST>
+              <NAME>GTA/APR/77</NAME>
+              <AMOUNT>-10000.00</AMOUNT>
+              <BILLTYPE>New Ref</BILLTYPE>
+            </BILLALLOCATIONS.LIST>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>Freight Inward</LEDGERNAME>
+            <AMOUNT>10000.00</AMOUNT>
+          </ALLLEDGERENTRIES.LIST>
+        </VOUCHER>
+      </COLLECTION>
+    </DATA>
+  </BODY>
+</ENVELOPE>

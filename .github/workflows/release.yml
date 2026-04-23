@@ -1,0 +1,46 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: cross-compile + publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: build release artifacts
+        run: make release
+
+      - name: package
+        run: |
+          cd dist
+          for plat in windows-amd64 linux-amd64 darwin-arm64; do
+            (cd "$plat" && zip -r "../gstreco-tally-agent-${GITHUB_REF_NAME}-$plat.zip" .)
+          done
+
+      - name: compute checksums
+        run: |
+          cd dist
+          sha256sum gstreco-tally-agent-*.zip > SHA256SUMS
+
+      - name: create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/gstreco-tally-agent-*.zip
+            dist/SHA256SUMS
+          draft: true
+          generate_release_notes: true
