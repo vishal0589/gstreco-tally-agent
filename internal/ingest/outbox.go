@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver; CGO_ENABLED=0 friendly
@@ -44,6 +45,15 @@ type Entry struct {
 // Open connects to (or creates) the outbox DB at path. WAL mode is enabled
 // so a power loss mid-write can't corrupt the main DB file. busy_timeout
 // gives the single reader/writer a 5s grace window if two goroutines race.
+//
+// File mode is tightened to 0o600 on Unix after SQLite creates the file —
+// the queued batches contain IngestRequestBody JSON (vendor names, GSTINs,
+// line amounts) which is business-sensitive. The default umask-derived
+// 0o644 would let other users on the same machine read the queue.
+// Windows ignores the chmod; file-level hardening on that platform is
+// handled by the MSI installer (A9) setting explicit DACLs on the agent's
+// %ProgramData% directory. The corresponding -wal and -shm sidecars are
+// tightened on every Open so newer writes don't regress the mode.
 func Open(path string) (*Outbox, error) {
 	// modernc.org/sqlite uses a "file:" DSN prefix; adding _pragma params
 	// keeps the opening in sync with our durability expectations.
@@ -61,7 +71,29 @@ func Open(path string) (*Outbox, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	// Tighten modes on the DB + WAL sidecar files. Ignore "not exist" errors
+	// from sidecars that SQLite hasn't created yet on a fresh DB — the WAL
+	// and SHM files only appear after the first write; they'll inherit the
+	// next Open() tightening.
+	for _, sfx := range []string{"", "-wal", "-shm"} {
+		if err := chmodIfExists(path+sfx, 0o600); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("outbox: chmod %s: %w", path+sfx, err)
+		}
+	}
 	return o, nil
+}
+
+// chmodIfExists sets file mode only when the file exists. Used for SQLite's
+// optional WAL and SHM sidecars so a fresh DB doesn't fail on their absence.
+func chmodIfExists(path string, mode os.FileMode) error {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	return os.Chmod(path, mode)
 }
 
 // Close closes the underlying DB handle. Safe to call multiple times.

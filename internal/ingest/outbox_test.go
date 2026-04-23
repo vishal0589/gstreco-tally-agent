@@ -2,7 +2,9 @@ package ingest
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/vishal0589/gstreco-tally-agent/internal/tally"
@@ -146,6 +148,46 @@ func TestOutbox_Count(t *testing.T) {
 	}
 	if n != 3 {
 		t.Errorf("Count = %d, want 3", n)
+	}
+}
+
+func TestOutbox_FileModeIsOwnerOnlyOnUnix(t *testing.T) {
+	// SQLite queues contain IngestRequestBody JSON — vendor names, GSTINs,
+	// amounts. Must not be world-readable on a shared-user Unix host.
+	// Windows ignores Unix file modes; that platform's hardening is the
+	// MSI installer's job (A9).
+	if runtime.GOOS == "windows" {
+		t.Skip("file modes are a Unix concept; Windows ACLs handled by installer")
+	}
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "outbox.db")
+	o, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	// Force WAL sidecars to exist by doing a write, then reopen to trigger
+	// the sidecar-chmod pass.
+	_, _ = o.Enqueue(ctx, sampleBody("permcheck", false))
+	_ = o.Close()
+
+	o2, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = o2.Close() })
+
+	for _, sfx := range []string{"", "-wal", "-shm"} {
+		p := path + sfx
+		info, err := os.Stat(p)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("stat %s: %v", p, err)
+		}
+		if mode := info.Mode().Perm(); mode != 0o600 {
+			t.Errorf("%s mode = %o, want 0o600", p, mode)
+		}
 	}
 }
 
