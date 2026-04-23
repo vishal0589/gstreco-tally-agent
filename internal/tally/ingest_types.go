@@ -74,19 +74,3 @@ type IngestRequestBody struct {
 	RunKind   string `json:"run_kind,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
 }
-
-// Ptr is a small helper so callers can write optional-string fields inline:
-//
-//	row.VendorGSTIN = tally.Ptr(v.PartyGSTIN)
-//
-// Returns nil when the input is the zero value (empty string / zero number /
-// zero time), keeping the serialised JSON clean — the server treats missing
-// and empty-string equivalently, but omitting the field costs less bytes and
-// matches what TypeScript's `undefined` would produce.
-func Ptr[T comparable](v T) *T {
-	var zero T
-	if v == zero {
-		return nil
-	}
-	return &v
-}

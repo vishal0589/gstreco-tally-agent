@@ -71,7 +71,18 @@ func NewClient(baseURL, connectionID, bearer, secretB64 string, opts ...Option) 
 	if c.http == nil {
 		// 120s timeout: day-book batches can be ~500 rows @ a few KB each; a
 		// slow-network push takes a couple of seconds; 120s is conservative.
-		c.http = &http.Client{Timeout: 120 * time.Second}
+		c.http = &http.Client{
+			Timeout: 120 * time.Second,
+			// Never follow redirects on a signed POST. The HMAC signature is
+			// bound to the original path; a 301/302/307/308 would hit a new
+			// endpoint the signature doesn't cover, silently either dropping
+			// the body (301/302 → GET) or presenting a canonical path that
+			// mismatches the new URL. Surface any redirect as an error so
+			// operators see it instead of puzzling over 401s at a mirror.
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
 	}
 	return c, nil
 }

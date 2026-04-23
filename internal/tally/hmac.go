@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -43,9 +44,15 @@ const NonceBytes = 16
 // CanonicalString builds the string to HMAC. Separated from Sign so tests
 // can assert the canonical shape without a real secret. Body bytes are
 // hashed (not included raw) so the signature fits in a header.
+//
+// Method is uppercased defensively: the server's canonicalString calls
+// `req.method.toUpperCase()` before joining, so a caller passing "post"
+// here would produce a signature the server never verifies. Go's stdlib
+// constants (http.MethodPost) are already uppercase, so this is insurance
+// for future callers that might not be.
 func CanonicalString(method, path, timestamp, nonce string, body []byte) string {
 	sum := sha256.Sum256(body)
-	return method + "\n" + path + "\n" + timestamp + "\n" + nonce + "\n" + hex.EncodeToString(sum[:])
+	return strings.ToUpper(method) + "\n" + path + "\n" + timestamp + "\n" + nonce + "\n" + hex.EncodeToString(sum[:])
 }
 
 // Sign returns the hex-encoded HMAC-SHA256 of the canonical string. Caller

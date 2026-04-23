@@ -61,6 +61,22 @@ func TestSignIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestSignUppercasesMethodToMatchServer(t *testing.T) {
+	// Server's src/lib/tally/hmac.ts calls req.method.toUpperCase() before
+	// building the canonical string. If we pass a lowercase method here
+	// and the server uppercases its copy, the signatures won't match.
+	// CanonicalString must uppercase defensively so caller casing doesn't
+	// matter.
+	secret := []byte("k")
+	body := []byte(`{}`)
+	upper := Sign(secret, "POST", "/p", "1", "n", body)
+	lower := Sign(secret, "post", "/p", "1", "n", body)
+	mixed := Sign(secret, "Post", "/p", "1", "n", body)
+	if upper != lower || upper != mixed {
+		t.Errorf("Sign must uppercase method: POST=%s post=%s Post=%s", upper, lower, mixed)
+	}
+}
+
 func TestNewNonceShape(t *testing.T) {
 	seen := map[string]bool{}
 	for i := 0; i < 16; i++ {
