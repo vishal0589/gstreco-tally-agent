@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <STATUS>1</STATUS>
+  </HEADER>
+  <BODY>
+    <DATA>
+      <COMPANY>
+        <NAME>Acme Retail Pvt Ltd</NAME>
+        <GUID>company-guid-acme-001</GUID>
+      </COMPANY>
+      <COMPANY>
+        <NAME>Acme Manufacturing Ltd</NAME>
+        <GUID>company-guid-acme-mfg-002</GUID>
+      </COMPANY>
+      <COMPANY>
+        <NAME>  Acme Retail Pvt Ltd  </NAME>
+        <GUID>duplicate-that-should-be-deduped</GUID>
+      </COMPANY>
+      <COMPANYONDISK>
+        <COMPANYNAME>Acme Old (do not use)</COMPANYNAME>
+      </COMPANYONDISK>
+    </DATA>
+  </BODY>
+</ENVELOPE>

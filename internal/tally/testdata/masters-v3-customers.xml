@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <STATUS>1</STATUS>
+  </HEADER>
+  <BODY>
+    <DATA>
+      <COLLECTION>
+        <LEDGER>
+          <NAME>XYZ Retailers</NAME>
+          <GUID>fixture-ledger-customer-001</GUID>
+          <ALTERID>6001</ALTERID>
+          <PARENT>Sundry Debtors</PARENT>
+          <PARTYGSTIN>29XYZAB5678K2L1</PARTYGSTIN>
+          <GSTREGISTRATIONTYPE>Regular</GSTREGISTRATIONTYPE>
+          <STATENAME>Karnataka</STATENAME>
+          <EMAIL>finance@xyzretail.example</EMAIL>
+          <LEDGERMOBILE>9988776655</LEDGERMOBILE>
+          <LEDGERMAILINGNAME.LIST>
+            <MAILINGNAME>XYZ Retailers LLP</MAILINGNAME>
+          </LEDGERMAILINGNAME.LIST>
+          <ADDRESS.LIST>
+            <ADDRESS>HSR Layout</ADDRESS>
+            <ADDRESS>Bengaluru 560102</ADDRESS>
+          </ADDRESS.LIST>
+        </LEDGER>
+        <LEDGER>
+          <NAME>Walk-in Customer</NAME>
+          <GUID>fixture-ledger-customer-002</GUID>
+          <ALTERID>6002</ALTERID>
+          <PARENT>Sundry Debtors</PARENT>
+          <GSTREGISTRATIONTYPE>Consumer</GSTREGISTRATIONTYPE>
+        </LEDGER>
+      </COLLECTION>
+    </DATA>
+  </BODY>
+</ENVELOPE>
