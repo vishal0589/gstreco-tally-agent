@@ -1,0 +1,28 @@
+# Build output
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# Go
+/vendor/
+coverage.out
+coverage.html
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# Runtime state (never commit — lives in %ProgramData%\GST Reco\agent\ on Windows)
+config.yaml
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# Local dev fixtures captured from real Tally installs (may contain customer data)
+fixtures/local/
