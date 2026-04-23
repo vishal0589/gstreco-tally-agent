@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <STATUS>1</STATUS>
+  </HEADER>
+  <BODY>
+    <DATA>
+      <COLLECTION>
+        <VOUCHER VCHTYPE="Debit Note" ACTION="Create">
+          <DATE>20260425</DATE>
+          <GUID>fixture-debit-note-purchase-0001</GUID>
+          <ALTERID>13200</ALTERID>
+          <VOUCHERTYPENAME>Debit Note</VOUCHERTYPENAME>
+          <VOUCHERNUMBER>DN/004/26-27</VOUCHERNUMBER>
+          <REFERENCE>SUPP-INV-5501</REFERENCE>
+          <PARTYLEDGERNAME>ABC Vendors Ltd</PARTYLEDGERNAME>
+          <PARTYGSTIN>29ABCDE1234F1Z5</PARTYGSTIN>
+          <PLACEOFSUPPLY>Karnataka</PLACEOFSUPPLY>
+          <ISINVOICE>Yes</ISINVOICE>
+          <ISCANCELLED>No</ISCANCELLED>
+          <ISRCMAPPLICABLE>No</ISRCMAPPLICABLE>
+          <NARRATION>Purchase return — short-supplied items from SUPP-INV-5501</NARRATION>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>ABC Vendors Ltd</LEDGERNAME>
+            <AMOUNT>23600.00</AMOUNT>
+            <BILLALLOCATIONS.LIST>
+              <NAME>DN/004/26-27</NAME>
+              <AMOUNT>23600.00</AMOUNT>
+              <BILLTYPE>Agst Ref</BILLTYPE>
+            </BILLALLOCATIONS.LIST>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>Purchase Returns @ 18%</LEDGERNAME>
+            <AMOUNT>-20000.00</AMOUNT>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>IGST @ 18%</LEDGERNAME>
+            <AMOUNT>-3600.00</AMOUNT>
+            <GSTCLASS>IGST@18</GSTCLASS>
+          </ALLLEDGERENTRIES.LIST>
+        </VOUCHER>
+      </COLLECTION>
+    </DATA>
+  </BODY>
+</ENVELOPE>
