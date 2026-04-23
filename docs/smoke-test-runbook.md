@@ -100,7 +100,6 @@ package main
 
 import (
     "context"
-    "encoding/base64"
     "fmt"
     "os"
     "time"
@@ -147,8 +146,6 @@ func main() {
         IsFinal:   true,
         RequestID: fmt.Sprintf("smoke-%d-1", time.Now().Unix()),
     }
-    _ = base64.StdEncoding // reference so compiler doesn't complain on trimmed imports
-
     if err := c.Send(context.Background(), body); err != nil {
         fmt.Fprintln(os.Stderr, "send:", err)
         os.Exit(1)
