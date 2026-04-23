@@ -1,0 +1,92 @@
+package tally
+
+// Server-side ingest types mirrored from GST_Reco's src/lib/tally/
+// ingest-types.ts. Keep struct tags and field types in lock-step with the
+// TypeScript source — the two files have no codegen and drift is caught only
+// by targeted unit tests on both sides.
+
+// IngestKind is the voucher category the agent is shipping in this batch.
+// Mirrors the server's IngestKind union.
+type IngestKind string
+
+const (
+	IngestKindPurchase       IngestKind = "purchase"
+	IngestKindSales          IngestKind = "sales"
+	IngestKindCreditNote     IngestKind = "credit_note"
+	IngestKindDebitNote      IngestKind = "debit_note"
+	IngestKindRCMSelfInvoice IngestKind = "rcm_self_invoice"
+)
+
+// IngestSide tells the server which books this credit/debit note belongs to.
+// Only meaningful for note kinds; purchase/sales infer from kind alone.
+type IngestSide string
+
+const (
+	IngestSidePurchase IngestSide = "purchase"
+	IngestSideSales    IngestSide = "sales"
+)
+
+// IngestVoucherRow is one voucher as seen by the server. Numeric fields are
+// typed here (the server trusts the agent's coercion), so the agent MUST
+// parse Tally's string-first XML into real numbers before submitting.
+type IngestVoucherRow struct {
+	TallyVoucherGUID *string `json:"tally_voucher_guid,omitempty"`
+	VendorGSTIN      *string `json:"vendor_gstin,omitempty"`
+	VendorName       *string `json:"vendor_name,omitempty"`
+	CustomerGSTIN    *string `json:"customer_gstin,omitempty"`
+	CustomerName     *string `json:"customer_name,omitempty"`
+	RecipientGSTIN   *string `json:"recipient_gstin,omitempty"`
+	InvoiceNumber    string  `json:"invoice_number"`
+	InvoiceDate      string  `json:"invoice_date"` // YYYY-MM-DD
+	InvoiceValue     float64 `json:"invoice_value"`
+	TaxableValue     float64 `json:"taxable_value"`
+	IGST             float64 `json:"igst"`
+	CGST             float64 `json:"cgst"`
+	SGST             float64 `json:"sgst"`
+	CESS             float64 `json:"cess"`
+	TaxRate          *float64 `json:"tax_rate,omitempty"`
+	PlaceOfSupply    *string  `json:"place_of_supply,omitempty"`
+	ReverseCharge    *bool    `json:"reverse_charge,omitempty"`
+	// ParentRef is the Tally VoucherGuid when this row is one slice of a
+	// consolidated voucher (pain #8). The server persists parent_ref as-is;
+	// the inline-unique index on (company_id, gstin, invoice_number_normalized,
+	// invoice_date) keeps each bill ref from landing twice.
+	ParentRef *string `json:"parent_ref,omitempty"`
+	// Side pins the note to purchase or sales books when Tally's voucher
+	// doesn't make the direction obvious. For purchase/sales kinds the
+	// server ignores the field; for credit_note/debit_note the agent sets
+	// it from the party ledger's group in Tally.
+	Side *IngestSide `json:"side,omitempty"`
+}
+
+// IngestRequestBody is the full request shape. One run_id can span many
+// batches (each is_final=false), with the last batch carrying is_final=true.
+type IngestRequestBody struct {
+	RunID        string             `json:"run_id"`
+	Kind         IngestKind         `json:"kind"`
+	TallyCompany string             `json:"tally_company"`
+	Batch        []IngestVoucherRow `json:"batch"`
+	CursorBefore any                `json:"cursor_before,omitempty"`
+	CursorAfter  any                `json:"cursor_after,omitempty"`
+	IsFinal      bool               `json:"is_final,omitempty"`
+	// RunKind is "full" | "incremental" | "manual". The server stamps it on
+	// the first batch of a run and ignores it on subsequent batches.
+	RunKind   string `json:"run_kind,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
+}
+
+// Ptr is a small helper so callers can write optional-string fields inline:
+//
+//	row.VendorGSTIN = tally.Ptr(v.PartyGSTIN)
+//
+// Returns nil when the input is the zero value (empty string / zero number /
+// zero time), keeping the serialised JSON clean — the server treats missing
+// and empty-string equivalently, but omitting the field costs less bytes and
+// matches what TypeScript's `undefined` would produce.
+func Ptr[T comparable](v T) *T {
+	var zero T
+	if v == zero {
+		return nil
+	}
+	return &v
+}
