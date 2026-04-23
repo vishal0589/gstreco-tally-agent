@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <STATUS>1</STATUS>
+  </HEADER>
+  <BODY>
+    <DATA>
+      <COLLECTION>
+        <VOUCHER VCHTYPE="GST Purchase" ACTION="Create">
+          <DATE>20260418</DATE>
+          <GUID>fixture-purchase-consolidated-0001</GUID>
+          <ALTERID>12500</ALTERID>
+          <VOUCHERTYPENAME>GST Purchase</VOUCHERTYPENAME>
+          <VOUCHERNUMBER>PI/019/26-27</VOUCHERNUMBER>
+          <REFERENCE>BULK/APR/26</REFERENCE>
+          <PARTYLEDGERNAME>PQR Distributors</PARTYLEDGERNAME>
+          <PARTYGSTIN>07PQRSD9988G1H0</PARTYGSTIN>
+          <PLACEOFSUPPLY>Delhi</PLACEOFSUPPLY>
+          <ISINVOICE>Yes</ISINVOICE>
+          <ISCANCELLED>No</ISCANCELLED>
+          <ISRCMAPPLICABLE>No</ISRCMAPPLICABLE>
+          <NARRATION>Two vendor bills billed together</NARRATION>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>PQR Distributors</LEDGERNAME>
+            <AMOUNT>-1,18,000.00</AMOUNT>
+            <BILLALLOCATIONS.LIST>
+              <NAME>PQR/APR/101</NAME>
+              <AMOUNT>-70800.00</AMOUNT>
+              <BILLTYPE>New Ref</BILLTYPE>
+            </BILLALLOCATIONS.LIST>
+            <BILLALLOCATIONS.LIST>
+              <NAME>PQR/APR/102</NAME>
+              <AMOUNT>-47200.00</AMOUNT>
+              <BILLTYPE>New Ref</BILLTYPE>
+            </BILLALLOCATIONS.LIST>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>Purchase @ 18%</LEDGERNAME>
+            <AMOUNT>1,00,000.00</AMOUNT>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>IGST @ 18%</LEDGERNAME>
+            <AMOUNT>18000.00</AMOUNT>
+            <GSTCLASS>IGST@18</GSTCLASS>
+          </ALLLEDGERENTRIES.LIST>
+        </VOUCHER>
+      </COLLECTION>
+    </DATA>
+  </BODY>
+</ENVELOPE>
