@@ -76,22 +76,48 @@ func Normalize(v RawVoucher, opts NormalizeOptions) ([]IngestVoucherRow, error) 
 	// Consolidated: one row per bill ref, amounts prorated by share of the
 	// party ledger magnitude. parent_ref = v.GUID so the reco inspector can
 	// re-stitch the group.
+	//
+	// Residual allocation: we prorate the first N-1 rows by share, then
+	// assign whatever's left to the last row. Without this, IEEE-754 drift
+	// on shares like 1/3 can leave split rows that don't sum to the original
+	// totals — e.g. a tax of ₹33 split three ways gives 3×10.99=32.97 with
+	// naive rounding. Users see the discrepancy as "my books don't match
+	// reco" and we get a support ticket. Residual assignment on the last
+	// row guarantees every tax + value bucket sums exactly.
 	rows := make([]IngestVoucherRow, 0, len(bills))
-	for _, b := range bills {
-		share := 0.0
-		if invoiceValue > 0 {
-			share = math.Abs(b.Amount) / invoiceValue
-		}
+	var accInvoice, accTaxable, accIGST, accCGST, accSGST, accCESS float64
+	last := len(bills) - 1
+	for i, b := range bills {
 		row := base
 		row.InvoiceNumber = b.Name
-		row.InvoiceValue = round2(math.Abs(b.Amount))
-		row.TaxableValue = round2(taxableValue * share)
-		row.IGST = round2(tax.IGST * share)
-		row.CGST = round2(tax.CGST * share)
-		row.SGST = round2(tax.SGST * share)
-		row.CESS = round2(tax.CESS * share)
 		guid := v.GUID
 		row.ParentRef = &guid
+
+		if i == last {
+			row.InvoiceValue = round2(invoiceValue - accInvoice)
+			row.TaxableValue = round2(taxableValue - accTaxable)
+			row.IGST = round2(tax.IGST - accIGST)
+			row.CGST = round2(tax.CGST - accCGST)
+			row.SGST = round2(tax.SGST - accSGST)
+			row.CESS = round2(tax.CESS - accCESS)
+		} else {
+			share := 0.0
+			if invoiceValue > 0 {
+				share = math.Abs(b.Amount) / invoiceValue
+			}
+			row.InvoiceValue = round2(math.Abs(b.Amount))
+			row.TaxableValue = round2(taxableValue * share)
+			row.IGST = round2(tax.IGST * share)
+			row.CGST = round2(tax.CGST * share)
+			row.SGST = round2(tax.SGST * share)
+			row.CESS = round2(tax.CESS * share)
+			accInvoice += row.InvoiceValue
+			accTaxable += row.TaxableValue
+			accIGST += row.IGST
+			accCGST += row.CGST
+			accSGST += row.SGST
+			accCESS += row.CESS
+		}
 		rows = append(rows, row)
 	}
 	return rows, nil

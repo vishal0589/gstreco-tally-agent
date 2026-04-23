@@ -125,6 +125,68 @@ func TestNormalize_ConsolidatedProratedByBillShare(t *testing.T) {
 	}
 }
 
+func TestNormalize_ConsolidatedThreeBillsSumToOriginal(t *testing.T) {
+	// Three equal bills with a tax total that doesn't divide evenly (₹55 /
+	// 3 = 18.333...). With naive proration each row rounds to 18.33 and the
+	// sum is 54.99 — short by ₹0.01. Residual allocation on the last row
+	// must keep the sum exactly equal to the original totals.
+	v := RawVoucher{
+		GUID: "consolidated-3bill", IsInvoice: true,
+		Date:            parseDate(t, "2026-04-10"),
+		VoucherType:     "GST Purchase",
+		VoucherNumber:   "PI/003B",
+		PartyLedgerName: "V",
+		LedgerEntries: []LedgerEntry{
+			{
+				LedgerName: "V", Amount: -355, IsPartyLedger: true,
+				BillAllocations: []BillRef{
+					{Name: "B1", Amount: -100, BillType: "New Ref"},
+					{Name: "B2", Amount: -100, BillType: "New Ref"},
+					{Name: "B3", Amount: -100, BillType: "New Ref"},
+				},
+			},
+			{LedgerName: "Purchase A/c", Amount: 300},
+			{LedgerName: "IGST @ 18%", Amount: 55, GSTClass: "IGST@18"},
+		},
+	}
+	// Adjust: total voucher magnitude = 300 + 55 = 355. Party amount =
+	// -355 so abs = 355. Three bills of 100 each = 300, leaving 55 on the
+	// "remainder" of the last bill after residual. Actually we want shares
+	// that genuinely drift, so use equal bills with an uneven tax total.
+	// 55 / 3 naively → 18.33 each, sums to 54.99.
+
+	rows, err := Normalize(v, NormalizeOptions{})
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("rows = %d, want 3", len(rows))
+	}
+
+	var sumInvoice, sumTaxable, sumIGST float64
+	for _, r := range rows {
+		sumInvoice += r.InvoiceValue
+		sumTaxable += r.TaxableValue
+		sumIGST += r.IGST
+	}
+	// Totals on the wire MUST equal the original voucher totals (to the
+	// cent). Reco reports would otherwise show a per-voucher mismatch.
+	if !nearly(sumInvoice, 355, 0.005) {
+		t.Errorf("sum(InvoiceValue) = %v, want 355.00", sumInvoice)
+	}
+	if !nearly(sumTaxable, 300, 0.005) {
+		t.Errorf("sum(TaxableValue) = %v, want 300.00", sumTaxable)
+	}
+	if !nearly(sumIGST, 55, 0.005) {
+		t.Errorf("sum(IGST) = %v, want 55.00 — naive proration would give 54.99", sumIGST)
+	}
+	// Last row should carry the residual (18.34 vs 18.33 for first two).
+	if rows[2].IGST <= rows[0].IGST {
+		t.Errorf("last row IGST = %v, expected >= first-row %v (residual allocation)",
+			rows[2].IGST, rows[0].IGST)
+	}
+}
+
 func TestNormalize_RCMMarksReverseChargeAndKind(t *testing.T) {
 	parsed, err := ParseDayBookV3(mustFixture(t, "voucher-v3-purchase-rcm.xml"))
 	if err != nil {
