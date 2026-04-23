@@ -9,12 +9,16 @@ import "time"
 
 // VoucherKind is the filtered slice of the day-book the agent is asking for.
 // Tally exposes many voucher types (Journal, Payment, Receipt, Contra, …);
-// A2a only handles Purchase and Sales. A2c adds the rest.
+// for V1 the agent handles purchase, sales, credit_note, and debit_note —
+// the four kinds the server's /api/tally/ingest accepts. Journal and
+// payment vouchers ship to separate endpoints (S9, not yet built).
 type VoucherKind string
 
 const (
-	VoucherPurchase VoucherKind = "purchase"
-	VoucherSales    VoucherKind = "sales"
+	VoucherPurchase   VoucherKind = "purchase"
+	VoucherSales      VoucherKind = "sales"
+	VoucherCreditNote VoucherKind = "credit_note"
+	VoucherDebitNote  VoucherKind = "debit_note"
 )
 
 // RawVoucher is the unnormalised shape of a Tally voucher. Every field is

@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <STATUS>1</STATUS>
+  </HEADER>
+  <BODY>
+    <DATA>
+      <COLLECTION>
+        <VOUCHER VCHTYPE="Credit Note" ACTION="Create">
+          <DATE>20260422</DATE>
+          <GUID>fixture-credit-note-sales-0001</GUID>
+          <ALTERID>13100</ALTERID>
+          <VOUCHERTYPENAME>Credit Note</VOUCHERTYPENAME>
+          <VOUCHERNUMBER>CN/007/26-27</VOUCHERNUMBER>
+          <REFERENCE>INV/0042/26-27</REFERENCE>
+          <PARTYLEDGERNAME>XYZ Retailers</PARTYLEDGERNAME>
+          <PARTYGSTIN>29XYZAB5678K2L1</PARTYGSTIN>
+          <PLACEOFSUPPLY>Karnataka</PLACEOFSUPPLY>
+          <ISINVOICE>Yes</ISINVOICE>
+          <ISCANCELLED>No</ISCANCELLED>
+          <ISRCMAPPLICABLE>No</ISRCMAPPLICABLE>
+          <NARRATION>Sales return — damaged goods against INV/0042/26-27</NARRATION>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>XYZ Retailers</LEDGERNAME>
+            <AMOUNT>-11800.00</AMOUNT>
+            <BILLALLOCATIONS.LIST>
+              <NAME>CN/007/26-27</NAME>
+              <AMOUNT>-11800.00</AMOUNT>
+              <BILLTYPE>Agst Ref</BILLTYPE>
+            </BILLALLOCATIONS.LIST>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>Sales Returns @ 18%</LEDGERNAME>
+            <AMOUNT>10000.00</AMOUNT>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>Output CGST @ 9%</LEDGERNAME>
+            <AMOUNT>900.00</AMOUNT>
+            <GSTCLASS>CGST@9</GSTCLASS>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>Output SGST @ 9%</LEDGERNAME>
+            <AMOUNT>900.00</AMOUNT>
+            <GSTCLASS>SGST@9</GSTCLASS>
+          </ALLLEDGERENTRIES.LIST>
+        </VOUCHER>
+      </COLLECTION>
+    </DATA>
+  </BODY>
+</ENVELOPE>

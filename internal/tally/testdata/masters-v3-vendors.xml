@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <STATUS>1</STATUS>
+  </HEADER>
+  <BODY>
+    <DATA>
+      <COLLECTION>
+        <LEDGER>
+          <NAME>ABC Vendors Ltd</NAME>
+          <GUID>fixture-ledger-vendor-001</GUID>
+          <ALTERID>5001</ALTERID>
+          <PARENT>Sundry Creditors</PARENT>
+          <PARTYGSTIN>29ABCDE1234F1Z5</PARTYGSTIN>
+          <GSTREGISTRATIONTYPE>Regular</GSTREGISTRATIONTYPE>
+          <STATENAME>Karnataka</STATENAME>
+          <EMAIL>accounts@abcvendors.example</EMAIL>
+          <LEDGERPHONE>080-1234-5678</LEDGERPHONE>
+          <LEDGERMOBILE>9876543210</LEDGERMOBILE>
+          <LEDGERCONTACT>Ravi Kumar</LEDGERCONTACT>
+          <MAILINGNAME.LIST>
+            <MAILINGNAME>ABC Vendors Private Limited</MAILINGNAME>
+          </MAILINGNAME.LIST>
+          <ADDRESS.LIST>
+            <ADDRESS>No. 42, Industrial Layout</ADDRESS>
+            <ADDRESS>Koramangala</ADDRESS>
+            <ADDRESS>Bengaluru 560095</ADDRESS>
+          </ADDRESS.LIST>
+        </LEDGER>
+        <LEDGER>
+          <NAME>PQR Distributors</NAME>
+          <GUID>fixture-ledger-vendor-002</GUID>
+          <ALTERID>5002</ALTERID>
+          <PARENT>Sundry Creditors</PARENT>
+          <PARTYGSTIN>07PQRSD9988G1H0</PARTYGSTIN>
+          <GSTREGISTRATIONTYPE>Regular</GSTREGISTRATIONTYPE>
+          <STATENAME>Delhi</STATENAME>
+          <EMAIL></EMAIL>
+          <MAILINGNAME.LIST>
+            <MAILINGNAME>PQR Distribution Services</MAILINGNAME>
+          </MAILINGNAME.LIST>
+          <ADDRESS.LIST>
+            <ADDRESS>D-12 Connaught Place</ADDRESS>
+            <ADDRESS>New Delhi 110001</ADDRESS>
+          </ADDRESS.LIST>
+        </LEDGER>
+        <LEDGER>
+          <NAME>MNO Transport</NAME>
+          <GUID>fixture-ledger-vendor-003</GUID>
+          <ALTERID>5003</ALTERID>
+          <PARENT>Sundry Creditors</PARENT>
+          <PARTYGSTIN></PARTYGSTIN>
+          <GSTREGISTRATIONTYPE>Unregistered</GSTREGISTRATIONTYPE>
+          <STATENAME>Karnataka</STATENAME>
+        </LEDGER>
+      </COLLECTION>
+    </DATA>
+  </BODY>
+</ENVELOPE>
