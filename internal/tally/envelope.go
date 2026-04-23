@@ -126,6 +126,14 @@ func filterForKind(k VoucherKind) (name, expr string, err error) {
 		return "IsGstrecoPurchase", "$$IsPurchase:$VoucherTypeName", nil
 	case VoucherSales:
 		return "IsGstrecoSales", "$$IsSales:$VoucherTypeName", nil
+	case VoucherCreditNote:
+		// $$IsCreditNote picks up user-defined types that inherit from Credit
+		// Note (Tally lets users name them "Sales Return" or similar). The
+		// side (purchase vs sales) is inferred downstream from the party
+		// ledger's group — this filter only narrows the collection.
+		return "IsGstrecoCreditNote", "$$IsCreditNote:$VoucherTypeName", nil
+	case VoucherDebitNote:
+		return "IsGstrecoDebitNote", "$$IsDebitNote:$VoucherTypeName", nil
 	default:
 		return "", "", fmt.Errorf("tally: unsupported voucher kind %q", k)
 	}
