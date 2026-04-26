@@ -32,12 +32,14 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/rs/zerolog"
 
 	"github.com/vishal0589/gstreco-tally-agent/internal/config"
+	"github.com/vishal0589/gstreco-tally-agent/internal/heartbeat"
 	"github.com/vishal0589/gstreco-tally-agent/internal/ingest"
 	"github.com/vishal0589/gstreco-tally-agent/internal/keyring"
 	"github.com/vishal0589/gstreco-tally-agent/internal/log"
@@ -182,9 +184,22 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 		return 0
 	}
 
+	// Wrap parent ctx with a child we own so the heartbeat handler
+	// can cancel the whole daemon on a "revoke" action without
+	// reaching into the caller's signal/service context.
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+
+	// Tick state is shared between the scheduler-driven sync loop
+	// (writes) and the heartbeat poller's LastTickReporter (reads).
+	// Atomic-style updates via mutex; the body is small enough that
+	// there's no measurable contention.
+	tickState := newTickState()
+	tickFnTracked := wrapTickWithState(tickFn, tickState)
+
 	sched, err := scheduler.New(scheduler.Options{
 		Spec:            scheduleSpec,
-		TickFunc:        tickFn,
+		TickFunc:        tickFnTracked,
 		PerTickDeadline: 30 * time.Minute,
 		Logger:          logger,
 		Location:        time.Local,
@@ -196,15 +211,117 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 	sched.Start()
 	defer sched.Stop()
 
+	hbHandler := &daemonHeartbeatHandler{
+		sched:     sched,
+		logger:    logger,
+		cancelRun: cancelRun,
+	}
+	poller, err := heartbeat.New(heartbeat.Options{
+		Client:           client,
+		Handler:          hbHandler,
+		Logger:           logger,
+		AgentVersion:     version.Version,
+		LastTickReporter: tickState.report,
+	})
+	if err != nil {
+		logger.Error().Err(err).Msg("heartbeat poller init failed")
+		return 1
+	}
+	poller.Start(runCtx)
+	defer poller.Stop()
+
 	logger.Info().
 		Str("server", cfg.Server).
 		Str("connection_id", cfg.ConnectionID).
 		Str("schedule", sched.Spec()).
 		Msg("daemon ready")
 
-	<-ctx.Done()
+	<-runCtx.Done()
 	logger.Info().Msg("daemon stopping (ctx done)")
 	return 0
+}
+
+// daemonHeartbeatHandler implements heartbeat.Handler by routing each
+// action to the corresponding daemon primitive.
+type daemonHeartbeatHandler struct {
+	sched     *scheduler.Scheduler
+	logger    zerolog.Logger
+	cancelRun context.CancelFunc
+}
+
+func (h *daemonHeartbeatHandler) OnSyncNow(ctx context.Context) error {
+	h.logger.Info().Msg("heartbeat sync_now: firing scheduler.RunNow")
+	return h.sched.RunNow(ctx)
+}
+
+func (h *daemonHeartbeatHandler) OnPause(_ context.Context) error {
+	// Server-side `tally_connections.status` flip already rejects
+	// future ingest at HTTP 403; agent keeps polling heartbeat to
+	// learn when status flips back (resume = OnRevoke's inverse).
+	// V1 logs the action; explicit local pause lands when the
+	// pilot reveals operators expect the scheduler to actually
+	// stop ticking.
+	h.logger.Warn().Msg("heartbeat pause: server-side status flip in effect; agent keeps heartbeating")
+	return nil
+}
+
+func (h *daemonHeartbeatHandler) OnRevoke(_ context.Context) error {
+	h.logger.Warn().Msg("heartbeat revoke: cancelling daemon — exiting")
+	h.cancelRun()
+	return nil
+}
+
+func (h *daemonHeartbeatHandler) OnRefetchMappings(_ context.Context) error {
+	// No-op for V1: each scheduler tick fetches a fresh mapping list
+	// via /mappings/active anyway. The action stays in the protocol
+	// for future use (e.g. when we add a local mapping cache for
+	// faster ticks).
+	h.logger.Info().Msg("heartbeat refetch_mappings: noop (next tick fetches fresh)")
+	return nil
+}
+
+func (h *daemonHeartbeatHandler) OnScheduleChanged(_ context.Context, newCron string) error {
+	h.logger.Warn().
+		Str("new_cron", newCron).
+		Msg("heartbeat schedule_changed: server cron differs from local; restart daemon to pick up (V1)")
+	return nil
+}
+
+// tickState shares last-successful-tick state between the scheduler
+// (writer) and the heartbeat poller (reader).
+type tickState struct {
+	mu       sync.Mutex
+	lastAt   time.Time
+	lastStat string
+}
+
+func newTickState() *tickState { return &tickState{} }
+
+func (s *tickState) record(at time.Time, status string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastAt = at
+	s.lastStat = status
+}
+
+func (s *tickState) report() (time.Time, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastAt, s.lastStat
+}
+
+// wrapTickWithState wraps the bare tick function with state-recording
+// hooks. Status mapping: nil error = "ok", non-nil = "error".
+func wrapTickWithState(fn scheduler.TickFunc, state *tickState) scheduler.TickFunc {
+	return func(ctx context.Context) error {
+		err := fn(ctx)
+		status := "ok"
+		if err != nil {
+			status = "error"
+		}
+		state.record(time.Now().UTC(), status)
+		return err
+	}
 }
 
 // makeTickFunc returns the closure the scheduler fires on each tick.
