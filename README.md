@@ -17,6 +17,14 @@ The pair modal in `/settings/tally` now has an optional "Tally port(s)" field th
 
 A fresh customer install: paste one PowerShell line, type your Tally port (or leave blank), wait ~60s. Agent finds the companies, populates the mapping UI, the operator maps GSTINs to companies in the web app, scheduled syncs run.
 
+**v0.1.3 — Tally Prime 6.x discovery hardening.** The PLLUM pilot install on Tally Prime 6.1 surfaced three protocol assumptions baked into v0.1.2's discovery path that only held for Tally Prime 3.x:
+
+- **Company-list `<TYPE>Data</TYPE>` rejected.** Tally Prime 6.x is strict — built-in reports like "List of Companies" must be requested with `<TYPE>Collection</TYPE>` (cross-checked against the Manual2AI Python adapter, which has shipped against the same Tally Prime 6.1 install since 2026-04-19).
+- **`$$Version` Function probe doesn't answer reliably.** Tally Prime 6.x returns `STATUS=0 + DESC not found` for the `<TYPE>Function</TYPE><ID>$$Version</ID>` shape. v0.1.3 trusts the company-list response as the authoritative "is this Tally" signal and treats the version probe as best-effort telemetry.
+- **V3-only filter dropped Tally Prime 4.x+.** The HTTP/XML protocol for the queries this agent issues is identical across Tally Prime 3.x/4.x/5.x/6.x. v0.1.3 keeps every probe result that responds with a parseable Tally envelope.
+
+Voucher fetch + ingest hardening (UTF-16LE response decoding, inline-TDL voucher collections, strict-OK ingest predicate, voucher-type-name configurability) is queued for v0.1.4. v0.1.3 unblocks discovery; v0.1.4 will harden the actual sync path.
+
 ## Layout
 
 ```

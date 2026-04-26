@@ -252,9 +252,18 @@ func TestRunDiscover_V4OnlyExits2WithWarning(t *testing.T) {
 	cfgPath := filepath.Join(tmp, "config.yaml")
 	_ = config.Save(cfgPath, &config.Config{Server: "https://x", ConnectionID: "c"})
 
+	// v0.1.3: V4 endpoint is no longer filtered out, so the discover
+	// flow now reaches the catalog-push step. Pre-populate the
+	// keyring with the expected secret material so the push doesn't
+	// fall over reading missing entries.
+	ks := keyring.NewMemoryStore()
+	hmacKey, bearerKey := keyring.ConnectionKeys("c")
+	_ = ks.Set(keyring.ServiceName, hmacKey, "hmac-secret")
+	_ = ks.Set(keyring.ServiceName, bearerKey, "bearer-token")
+
 	deps := discoverDeps{
 		now:          time.Now,
-		newOSKeyring: func() keyring.Store { return keyring.NewMemoryStore() },
+		newOSKeyring: func() keyring.Store { return ks },
 		discover: stubDiscover([]tally.ProbeResult{
 			{
 				Endpoint:   "http://127.0.0.1:9000",
@@ -263,7 +272,7 @@ func TestRunDiscover_V4OnlyExits2WithWarning(t *testing.T) {
 				Version:    tally.VersionV4,
 				VersionStr: "Release 4.1",
 				Companies:  []tally.TallyCompany{{Name: "X"}},
-				Warnings:   []string{"Tally Prime 4.x detected — agent's parser_v3 cannot fetch from this endpoint until A7 ships."},
+				Warnings:   []string{"Tally Prime 4.x detected — parser compatibility not guaranteed."},
 			},
 		}),
 		newCatalogClient: func(_, _, _, _ string) (catalogSender, error) { return &fakeCatalogSender{}, nil },
@@ -273,16 +282,17 @@ func TestRunDiscover_V4OnlyExits2WithWarning(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := runDiscover(&stdout, &stderr, []string{"--config", cfgPath}, deps)
-	if code != 2 {
-		t.Fatalf("exit=%d, want 2 (V4-only is not pilotable yet)", code)
-	}
-	// Summary must surface the V4 status and the warning so the user
-	// sees WHY no usable Tally was found.
-	if !strings.Contains(stdout.String(), "v4 (parser pending — A7)") {
-		t.Errorf("stdout missing V4 status: %s", stdout.String())
+	// Pre-v0.1.3 we exited 2 here ("V4-only is not pilotable"). v0.1.3
+	// treats Tally Prime 3.x/4.x/5.x/6.x as protocol-identical for the
+	// HTTP/XML queries this agent issues — verified against the
+	// production-shipping Manual2AI Python adapter, which doesn't
+	// version-gate at all. Expectation now: exit 0, V4 endpoint
+	// surfaces in the catalog along with its warning.
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0 (v0.1.3: any reachable Tally is pilotable)", code)
 	}
 	if !strings.Contains(stdout.String(), "4.x detected") {
-		t.Errorf("stdout missing V4 warning: %s", stdout.String())
+		t.Errorf("stdout missing V4 warning (operator should still see version note): %s", stdout.String())
 	}
 }
 

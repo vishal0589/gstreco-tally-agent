@@ -131,7 +131,7 @@ func runDiscover(stdout, stderr io.Writer, args []string, deps discoverDeps) int
 
 	printSummary(stdout, results)
 
-	v3Reachable := filterV3Reachable(results)
+	v3Reachable := filterReachableTally(results)
 	if len(v3Reachable) == 0 {
 		fmt.Fprintln(stderr, "\nagentctl discover: no Tally Prime 3.x instances found.")
 		fmt.Fprintln(stderr, "Check that Tally is running, that ODBC HTTP server is enabled (F1 → Settings → Connectivity → Client/Server),")
@@ -279,10 +279,16 @@ func statusFor(r tally.ProbeResult) string {
 	return "unknown"
 }
 
-func filterV3Reachable(results []tally.ProbeResult) []tally.ProbeResult {
+// filterReachableTally keeps every probe result we identified as a
+// real Tally endpoint. Pre-v0.1.3 this was V3-only ("filterV3-
+// Reachable"); the version-probe gate has been relaxed because the
+// actual HTTP/XML protocol is identical across Tally Prime 3.x-6.x
+// for the queries this agent issues, and because Tally Prime 6.x
+// often doesn't answer the `$$Version` Function probe at all.
+func filterReachableTally(results []tally.ProbeResult) []tally.ProbeResult {
 	out := make([]tally.ProbeResult, 0, len(results))
 	for _, r := range results {
-		if r.IsTally && r.Version == tally.VersionV3 {
+		if r.IsTally {
 			out = append(out, r)
 		}
 	}

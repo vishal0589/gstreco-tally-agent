@@ -144,7 +144,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		return Result{SkippedReason: "ctx cancelled mid-sweep"}, ctx.Err()
 	}
 
-	v3 := filterV3(probes)
+	v3 := filterReachableTally(probes)
 	if len(v3) == 0 {
 		return Result{
 			SkippedReason: "no Tally Prime 3.x instances reachable on default port range",
@@ -249,10 +249,17 @@ func Loop(ctx context.Context, interval time.Duration, opts Options) {
 	}
 }
 
-func filterV3(probes []tally.ProbeResult) []tally.ProbeResult {
+// filterReachableTally keeps every probe result we identified as a
+// real Tally endpoint. Pre-v0.1.3 this was V3-only because we paired
+// the version probe (now relaxed; see discover.go) with hard parser
+// gating; the actual Tally HTTP/XML protocol is identical across
+// Prime 3.x/4.x/5.x/6.x for the queries this agent issues, so
+// filtering on a version string the agent can't reliably read just
+// dropped real customers' Tallys.
+func filterReachableTally(probes []tally.ProbeResult) []tally.ProbeResult {
 	out := make([]tally.ProbeResult, 0, len(probes))
 	for _, p := range probes {
-		if p.IsTally && p.Version == tally.VersionV3 {
+		if p.IsTally {
 			out = append(out, p)
 		}
 	}
