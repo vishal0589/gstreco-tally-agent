@@ -6,9 +6,16 @@ See `~/GST_Reco/docs/plans/2026-04-tally-agent/master-plan.md` for the full arch
 
 ## Status
 
-Phase A + Phase B + boot-discover shipped. Daemon auto-discovers Tally instances on the loopback port range at startup (before the scheduler ticks) and on a 1-hour refresh Loop, so a fresh install needs zero CLI commands beyond pairing — the customer's IT pastes the one-liner from `/settings/tally`, the agent finds the Tally companies on its own, and the operator maps GSTINs in the web UI.
+Phase A + Phase B + v0.1.2 shipped. Pilot install on PLLUM uncovered four pre-existing install-path bugs (TLS 1.2 not forced; `2>$null` not suppressing native errors under `ErrorActionPreference=Stop`; `$env:ProgramFiles` resolving to `(x86)` under 32-bit PowerShell; Windows Credential Manager scoped per-user so `LocalSystem`-running service couldn't read what `Administrator`-running pair wrote). v0.1.2 fixes all four:
 
-`agentctl discover` is still available for diagnostics ("show me what discovery would find on this box right now"), but it is no longer required for setup.
+- New `internal/secretstore` package replaces the per-user OS keyring with a file-based AES-GCM store at `%ProgramData%\GST Reco\agent\secrets\`, key derived via HKDF-SHA256 from the machine ID. Cross-user accessible by design, so the service-as-LocalSystem reads what pair-as-Administrator wrote. ACL'd to SYSTEM + Administrators on first write via `icacls`.
+- `internal/autodiscover` now honours `cfg.TallyEndpoints` first (set by `agentctl discover --ports` or by the install-time `GSTRECO_TALLY_PORTS` env var), falls back to the default port range only when the config is empty.
+- Default discovery range widened from 9000–9009 to 9000–9020 plus alternates `2026, 8989` to cover the common non-default ports we've seen in pilot installs.
+- `install.ps1` (in the GST_Reco repo) prepends TLS 1.2, uses `Get-Service` existence check before stop/uninstall, hardcodes the install dir to `C:\Program Files\GST Reco Agent`, and accepts `GSTRECO_TALLY_PORTS` for non-default-port customers.
+
+The pair modal in `/settings/tally` now has an optional "Tally port(s)" field that bakes the value into the install one-liner.
+
+A fresh customer install: paste one PowerShell line, type your Tally port (or leave blank), wait ~60s. Agent finds the companies, populates the mapping UI, the operator maps GSTINs to companies in the web app, scheduled syncs run.
 
 ## Layout
 

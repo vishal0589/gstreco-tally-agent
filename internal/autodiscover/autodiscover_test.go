@@ -305,6 +305,61 @@ func TestRun_NilCfg_Errors(t *testing.T) {
 	}
 }
 
+func TestRun_HonoursCfgTallyEndpoints(t *testing.T) {
+	// When cfg has explicit endpoints, Run must pass them through to
+	// tally.Discover instead of falling back to the default port-range
+	// scan. This is the fix for v0.1.2: customer Tally on
+	// non-default port (e.g. 2026) gets picked up via the cfg field
+	// without needing to widen the global port range.
+	cfg := &config.Config{
+		TallyEndpoints: []string{"http://127.0.0.1:2026"},
+	}
+	gotOpts := tally.DiscoverOptions{} // captured
+	_, err := Run(context.Background(), Options{
+		Cfg:    cfg,
+		Logger: quietLogger(),
+		Now:    fixedNow,
+		DiscoverFn: func(_ context.Context, opts tally.DiscoverOptions) ([]tally.ProbeResult, error) {
+			gotOpts = opts
+			return []tally.ProbeResult{
+				{
+					Endpoint: "http://127.0.0.1:2026", Reachable: true, IsTally: true, Version: tally.VersionV3,
+					Companies: []tally.TallyCompany{{Name: "Co"}},
+				},
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run err = %v", err)
+	}
+	if !equalSlices(gotOpts.Endpoints, []string{"http://127.0.0.1:2026"}) {
+		t.Errorf("DiscoverOptions.Endpoints = %v, want [http://127.0.0.1:2026]", gotOpts.Endpoints)
+	}
+}
+
+func TestRun_EmptyCfgEndpoints_FallsBackToDefaultRange(t *testing.T) {
+	// With cfg.TallyEndpoints empty, Run must NOT pre-set Endpoints
+	// on tally.DiscoverOptions — leaving it zero-valued lets the
+	// resolver use DefaultDiscoverPortRange + alternates.
+	cfg := &config.Config{}
+	var gotOpts tally.DiscoverOptions
+	_, err := Run(context.Background(), Options{
+		Cfg:    cfg,
+		Logger: quietLogger(),
+		Now:    fixedNow,
+		DiscoverFn: func(_ context.Context, opts tally.DiscoverOptions) ([]tally.ProbeResult, error) {
+			gotOpts = opts
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run err = %v", err)
+	}
+	if len(gotOpts.Endpoints) != 0 {
+		t.Errorf("expected empty Endpoints (falls back to range scan), got %v", gotOpts.Endpoints)
+	}
+}
+
 func TestRun_DiffEndpoints_AddedAndGone(t *testing.T) {
 	cfg := &config.Config{
 		TallyEndpoints: []string{"http://127.0.0.1:9000", "http://127.0.0.1:9001"},

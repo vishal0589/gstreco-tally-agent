@@ -1,16 +1,22 @@
-// Package keyring stores agent secrets (HMAC key, bearer token) in the OS
-// keyring rather than on disk. On Windows this is the Credential Manager, on
-// macOS the Keychain, on Linux the Secret Service API (gnome-keyring / KDE
-// Wallet). The Store interface lets tests inject an in-memory backend so CI
-// runners without a configured keyring still exercise the calling code.
+// Package keyring defines the Store interface used by the pair flow and
+// daemon to read/write agent secrets, plus the connection-id-keyed key
+// names and the in-memory test backend.
+//
+// Production secret storage lives in internal/secretstore, which is a
+// file-based AES-GCM store with cross-user access on Windows. The
+// per-user OS keyring (Windows Credential Manager / macOS Keychain /
+// Linux Secret Service) was tried in v0.1.0 and removed because it
+// doesn't share between the pair-running user and the LocalSystem-
+// running service — see the v0.1.2 PR for the full post-mortem.
+//
+// This package is now a thin definitions-only module retained so test
+// code can import keyring.MemoryStore and so the Store interface is
+// importable without taking a dep on secretstore's crypto.
 package keyring
 
 import (
 	"errors"
-	"fmt"
 	"sync"
-
-	zk "github.com/zalando/go-keyring"
 )
 
 // ServiceName is the label the agent presents to the OS keyring. Using a
@@ -25,59 +31,13 @@ const ServiceName = "gstreco-tally-agent"
 // to the user.
 var ErrNotFound = errors.New("keyring: secret not found")
 
-// Store is the narrow surface the rest of the agent uses. Two implementations
-// ship: OSKeyring (production) and MemoryStore (tests + CI).
+// Store is the narrow surface the rest of the agent uses. Production
+// implementations live in internal/secretstore (file-based AES-GCM);
+// tests use MemoryStore below.
 type Store interface {
 	Set(service, key, value string) error
 	Get(service, key string) (string, error)
 	Delete(service, key string) error
-}
-
-// OSKeyring is the production backend. Safe for concurrent use — the
-// underlying zalando/go-keyring is thread-safe on all three supported OSes.
-type OSKeyring struct{}
-
-// NewOSKeyring returns the default production Store. Callers don't need a
-// constructor; OSKeyring{} is equivalent. The constructor exists so future
-// platform-specific configuration (e.g. keychain group ACLs) has somewhere
-// to live without breaking call sites.
-func NewOSKeyring() *OSKeyring { return &OSKeyring{} }
-
-// Set writes (or overwrites) a secret under the given service+key. Limits
-// vary by OS — Windows Credential Manager caps at 2560 bytes per entry, macOS
-// Keychain allows much more. The agent's largest secret is a 32-byte HMAC
-// key base64-encoded (~44 bytes), so the limit never bites us in practice.
-func (OSKeyring) Set(service, key, value string) error {
-	if err := zk.Set(service, key, value); err != nil {
-		return fmt.Errorf("keyring set %s/%s: %w", service, key, err)
-	}
-	return nil
-}
-
-// Get reads a secret. Returns ErrNotFound if the entry doesn't exist, or a
-// wrapped error on infrastructure failure.
-func (OSKeyring) Get(service, key string) (string, error) {
-	v, err := zk.Get(service, key)
-	if err != nil {
-		if errors.Is(err, zk.ErrNotFound) {
-			return "", ErrNotFound
-		}
-		return "", fmt.Errorf("keyring get %s/%s: %w", service, key, err)
-	}
-	return v, nil
-}
-
-// Delete removes a secret. Idempotent: deleting a non-existent entry is not
-// an error, which simplifies the unpair flow (revoke can call Delete
-// unconditionally without checking existence first).
-func (OSKeyring) Delete(service, key string) error {
-	if err := zk.Delete(service, key); err != nil {
-		if errors.Is(err, zk.ErrNotFound) {
-			return nil
-		}
-		return fmt.Errorf("keyring delete %s/%s: %w", service, key, err)
-	}
-	return nil
 }
 
 // MemoryStore is an in-process keyring used by tests and any build that can't

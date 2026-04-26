@@ -37,12 +37,12 @@ import (
 //	2 — user-fixable: agent not paired, no Tally reachable, bad flags
 func discoverCmd(args []string) int {
 	return runDiscover(os.Stdout, os.Stderr, args, discoverDeps{
-		now:           time.Now,
-		newOSKeyring:  func() keyring.Store { return keyring.NewOSKeyring() },
-		discover:      tally.Discover,
+		now:              time.Now,
+		newOSKeyring:     defaultSecretStore,
+		discover:         tally.Discover,
 		newCatalogClient: defaultNewCatalogClient,
-		loadConfig:    config.Load,
-		saveConfig:    config.Save,
+		loadConfig:       config.Load,
+		saveConfig:       config.Save,
 	})
 }
 

@@ -3,6 +3,7 @@ package tally
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -202,12 +203,46 @@ func TestResolveEndpoints_PortRangeFromZeroValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveEndpoints: %v", err)
 	}
-	want := DefaultDiscoverPortRange[1] - DefaultDiscoverPortRange[0] + 1
+	rangeCount := DefaultDiscoverPortRange[1] - DefaultDiscoverPortRange[0] + 1
+	want := rangeCount + len(DefaultDiscoverAlternates)
 	if len(endpoints) != want {
-		t.Errorf("len=%d, want %d", len(endpoints), want)
+		t.Errorf("len=%d, want %d (range %d + alternates %d)",
+			len(endpoints), want, rangeCount, len(DefaultDiscoverAlternates))
 	}
 	if !strings.HasPrefix(endpoints[0], "http://"+DefaultDiscoverHost+":9000") {
 		t.Errorf("first endpoint = %s", endpoints[0])
+	}
+	// Alternates appear after the port-range block.
+	hasPort := func(port int) bool {
+		needle := fmt.Sprintf(":%d", port)
+		for _, e := range endpoints {
+			if strings.Contains(e, needle) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, alt := range DefaultDiscoverAlternates {
+		if !hasPort(alt) {
+			t.Errorf("expected alternate port %d in default sweep, got %v", alt, endpoints)
+		}
+	}
+}
+
+func TestResolveEndpoints_NarrowRange_NoAlternates(t *testing.T) {
+	// A caller who passes an explicit narrow port range like 5000-5010
+	// should NOT get the default alternates grafted in.
+	endpoints, err := resolveEndpoints(DiscoverOptions{PortRange: [2]int{5000, 5002}})
+	if err != nil {
+		t.Fatalf("resolveEndpoints: %v", err)
+	}
+	if len(endpoints) != 3 {
+		t.Errorf("len=%d, want 3 (just the explicit range)", len(endpoints))
+	}
+	for _, e := range endpoints {
+		if strings.Contains(e, ":2026") || strings.Contains(e, ":8989") {
+			t.Errorf("explicit narrow range should not include alternate ports: %s", e)
+		}
 	}
 }
 

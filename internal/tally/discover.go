@@ -11,11 +11,21 @@ import (
 
 // DefaultDiscoverPortRange is the inclusive [start, end] port range
 // `agentctl discover` scans by default. 9000 is Tally Prime's
-// default; 9009 covers the typical "5–6 instances side by side"
-// install pattern with a couple of slots to spare. Operators can
-// widen via DiscoverOptions.PortRange or pass explicit endpoints
-// for unusual setups.
-var DefaultDiscoverPortRange = [2]int{9000, 9009}
+// default; widening to 9020 catches a typical "10+ instances side by
+// side" install pattern (each Tally Prime company needs its own port
+// when run as a service). Operators can widen further via
+// DiscoverOptions.PortRange or pass explicit endpoints for unusual
+// setups (DefaultDiscoverAlternates covers the common non-9000-range
+// defaults — e.g. 2026 — that we've seen in pilot installs).
+var DefaultDiscoverPortRange = [2]int{9000, 9020}
+
+// DefaultDiscoverAlternates are well-known Tally ports outside the
+// 9000-range default. Probed in addition to the port range when the
+// caller doesn't supply explicit endpoints. Add to this list as
+// pilots surface new "house default" ports.
+//   - 2026: PLLUM pilot (Tally configured pre-Prime, port carried over)
+//   - 8989: legacy Tally 9 (some shops still run it for archival)
+var DefaultDiscoverAlternates = []int{2026, 8989}
 
 // DefaultDiscoverHost is the loopback-only default. Tally's HTTP
 // server binds to all interfaces by default but we only ever speak
@@ -286,9 +296,25 @@ func resolveEndpoints(opts DiscoverOptions) ([]string, error) {
 	if endPort < startPort {
 		return nil, fmt.Errorf("tally: PortRange end (%d) before start (%d)", endPort, startPort)
 	}
-	out := make([]string, 0, endPort-startPort+1)
+	out := make([]string, 0, endPort-startPort+1+len(DefaultDiscoverAlternates))
+	seen := make(map[int]struct{}, endPort-startPort+1+len(DefaultDiscoverAlternates))
 	for p := startPort; p <= endPort; p++ {
 		out = append(out, fmt.Sprintf("http://%s:%d", host, p))
+		seen[p] = struct{}{}
+	}
+	// Append alternates (only when we're using the default port
+	// range — a caller who passes an explicit narrow range like
+	// 5000-5010 doesn't want 2026 grafted in). The dedup map
+	// protects against future cases where an alternate falls inside
+	// a widened DefaultDiscoverPortRange.
+	usingDefaults := startPort == DefaultDiscoverPortRange[0] && endPort == DefaultDiscoverPortRange[1]
+	if usingDefaults {
+		for _, p := range DefaultDiscoverAlternates {
+			if _, dup := seen[p]; dup {
+				continue
+			}
+			out = append(out, fmt.Sprintf("http://%s:%d", host, p))
+		}
 	}
 	return out, nil
 }

@@ -38,7 +38,7 @@ import (
 func syncAllCmd(args []string) int {
 	return runSyncAll(os.Stdout, os.Stderr, args, syncAllDeps{
 		now:          time.Now,
-		newOSKeyring: func() keyring.Store { return keyring.NewOSKeyring() },
+		newOSKeyring: defaultSecretStore,
 		newTallyClient: func(endpoint string) tallyPoster {
 			return tally.NewClient(endpoint)
 		},
