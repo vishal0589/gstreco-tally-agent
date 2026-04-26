@@ -189,6 +189,70 @@ func TestRunOne_ProgressCallbackEmitsExpectedStages(t *testing.T) {
 	}
 }
 
+func TestRunOne_AbortsCleanlyOnCtxCancellation(t *testing.T) {
+	// Stub response with 3 vouchers so multiple batches fire (with
+	// BatchSize=1). cancellingSender succeeds the first send then
+	// cancels the parent ctx so the next loop iteration sees
+	// ctx.Done() and breaks cleanly — no false "network error" for
+	// the remaining batches.
+	const threeVouchers = `<ENVELOPE>
+      <HEADER><STATUS>1</STATUS></HEADER>
+      <BODY><DATA><COLLECTION>
+        <VOUCHER><DATE>20260410</DATE><GUID>g-1</GUID><VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME><VOUCHERNUMBER>P1</VOUCHERNUMBER><PARTYLEDGERNAME>V Ltd</PARTYLEDGERNAME><PARTYGSTIN>29ABCDE1234F1Z5</PARTYGSTIN><ISINVOICE>Yes</ISINVOICE><ISCANCELLED>No</ISCANCELLED>
+          <ALLLEDGERENTRIES.LIST><LEDGERNAME>V Ltd</LEDGERNAME><AMOUNT>11800</AMOUNT></ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST><LEDGERNAME>P A/c</LEDGERNAME><AMOUNT>-10000</AMOUNT></ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST><LEDGERNAME>IGST 18</LEDGERNAME><GSTCLASS>IGST@18</GSTCLASS><AMOUNT>-1800</AMOUNT></ALLLEDGERENTRIES.LIST>
+        </VOUCHER>
+        <VOUCHER><DATE>20260411</DATE><GUID>g-2</GUID><VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME><VOUCHERNUMBER>P2</VOUCHERNUMBER><PARTYLEDGERNAME>V Ltd</PARTYLEDGERNAME><PARTYGSTIN>29ABCDE1234F1Z5</PARTYGSTIN><ISINVOICE>Yes</ISINVOICE><ISCANCELLED>No</ISCANCELLED>
+          <ALLLEDGERENTRIES.LIST><LEDGERNAME>V Ltd</LEDGERNAME><AMOUNT>11800</AMOUNT></ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST><LEDGERNAME>P A/c</LEDGERNAME><AMOUNT>-10000</AMOUNT></ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST><LEDGERNAME>IGST 18</LEDGERNAME><GSTCLASS>IGST@18</GSTCLASS><AMOUNT>-1800</AMOUNT></ALLLEDGERENTRIES.LIST>
+        </VOUCHER>
+        <VOUCHER><DATE>20260412</DATE><GUID>g-3</GUID><VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME><VOUCHERNUMBER>P3</VOUCHERNUMBER><PARTYLEDGERNAME>V Ltd</PARTYLEDGERNAME><PARTYGSTIN>29ABCDE1234F1Z5</PARTYGSTIN><ISINVOICE>Yes</ISINVOICE><ISCANCELLED>No</ISCANCELLED>
+          <ALLLEDGERENTRIES.LIST><LEDGERNAME>V Ltd</LEDGERNAME><AMOUNT>11800</AMOUNT></ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST><LEDGERNAME>P A/c</LEDGERNAME><AMOUNT>-10000</AMOUNT></ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST><LEDGERNAME>IGST 18</LEDGERNAME><GSTCLASS>IGST@18</GSTCLASS><AMOUNT>-1800</AMOUNT></ALLLEDGERENTRIES.LIST>
+        </VOUCHER>
+      </COLLECTION></DATA></BODY>
+    </ENVELOPE>`
+	tly := &fakeTally{resp: []byte(threeVouchers)}
+	ctx, cancel := context.WithCancel(context.Background())
+	snd := &cancellingSender{cancel: cancel}
+
+	req := makeReq()
+	req.BatchSize = 1
+	res, err := RunOne(ctx, tly, snd, req, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
+	if res.BatchesSent != 1 {
+		t.Errorf("BatchesSent = %d, want 1", res.BatchesSent)
+	}
+	if res.BatchesFailed != 0 {
+		t.Errorf("BatchesFailed = %d, want 0 (clean abort, no false network errors)", res.BatchesFailed)
+	}
+	if len(res.BatchErrors) != 0 {
+		t.Errorf("BatchErrors = %d, want 0", len(res.BatchErrors))
+	}
+}
+
+// cancellingSender succeeds the first Send, then cancels the parent
+// ctx so the next loop iteration sees ctx.Done() and breaks cleanly.
+// Used to simulate a user Ctrl+C between batches.
+type cancellingSender struct {
+	cancel context.CancelFunc
+	calls  int
+}
+
+func (c *cancellingSender) Send(_ context.Context, _ tally.IngestRequestBody) error {
+	c.calls++
+	if c.calls == 1 {
+		c.cancel()
+		return nil
+	}
+	return errors.New("cancellingSender: should not be called after ctx cancel")
+}
+
 func TestRunOne_NoVouchersStillEmitsCompleteEvent(t *testing.T) {
 	tly := &fakeTally{resp: []byte(`<ENVELOPE><HEADER><STATUS>1</STATUS></HEADER><BODY><DATA></DATA></BODY></ENVELOPE>`)}
 	snd := &fakeSender{}

@@ -208,6 +208,18 @@ func RunOne(
 		req.TallyCompany, req.RunKind, chunks)
 
 	for i, body := range batches {
+		// Honour ctx cancellation between batches. Without this, a
+		// user Ctrl+C mid-sync produces N "network error" entries in
+		// BatchErrors (each subsequent Send fails with ctx.Err()
+		// wrapped in ErrorKindNetwork). Checking here gives a clean
+		// abort: the loop exits, BatchesSent reflects what actually
+		// landed, and the caller sees no false "the server is down"
+		// noise.
+		if err := ctx.Err(); err != nil {
+			emit("complete", fmt.Sprintf("aborted: %v (sent=%d, remaining=%d)",
+				err, res.BatchesSent, len(batches)-i))
+			return res, err
+		}
 		emitBatch("batch_sending", i+1, len(batches),
 			fmt.Sprintf("batch %d/%d (%d rows, request_id=%s, is_final=%t)",
 				i+1, len(batches), len(body.Batch), body.RequestID, body.IsFinal),
