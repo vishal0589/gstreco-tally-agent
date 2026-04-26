@@ -30,8 +30,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -44,6 +46,7 @@ import (
 	"github.com/vishal0589/gstreco-tally-agent/internal/keyring"
 	"github.com/vishal0589/gstreco-tally-agent/internal/log"
 	"github.com/vishal0589/gstreco-tally-agent/internal/scheduler"
+	"github.com/vishal0589/gstreco-tally-agent/internal/selfupdate"
 	"github.com/vishal0589/gstreco-tally-agent/internal/syncrun"
 	"github.com/vishal0589/gstreco-tally-agent/internal/tally"
 	"github.com/vishal0589/gstreco-tally-agent/internal/version"
@@ -229,6 +232,32 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 	}
 	poller.Start(runCtx)
 	defer poller.Stop()
+
+	// Self-update notifier (B5). Polls /api/tally/agent/version every
+	// 6 hours; logs at warn level when a newer version is available
+	// so the operator's `journalctl` / Event Viewer surfaces it. The
+	// future tray UI reads this via IPC.
+	updateChecker, err := selfupdate.New(selfupdate.Options{
+		HTTPClient:     http.DefaultClient,
+		VersionURL:     strings.TrimRight(cfg.Server, "/") + "/api/tally/agent/version",
+		CurrentVersion: version.Version,
+		Handler: func(n selfupdate.Notification) {
+			logger.Warn().
+				Str("current", n.CurrentVersion).
+				Str("latest", n.LatestVersion).
+				Str("released_at", n.ReleasedAt).
+				Msg("self-update available — rerun install.ps1 on this PC to upgrade")
+		},
+		Logger: logger,
+	})
+	if err != nil {
+		// Self-update is non-essential — log + skip. The daemon
+		// keeps running without it.
+		logger.Warn().Err(err).Msg("self-update checker init failed; daemon continues without update notifications")
+	} else {
+		updateChecker.Start(runCtx)
+		defer updateChecker.Stop()
+	}
 
 	logger.Info().
 		Str("server", cfg.Server).
