@@ -33,6 +33,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -47,6 +48,7 @@ import (
 	"github.com/vishal0589/gstreco-tally-agent/internal/keyring"
 	"github.com/vishal0589/gstreco-tally-agent/internal/log"
 	"github.com/vishal0589/gstreco-tally-agent/internal/scheduler"
+	"github.com/vishal0589/gstreco-tally-agent/internal/secretstore"
 	"github.com/vishal0589/gstreco-tally-agent/internal/selfupdate"
 	"github.com/vishal0589/gstreco-tally-agent/internal/syncrun"
 	"github.com/vishal0589/gstreco-tally-agent/internal/tally"
@@ -147,10 +149,13 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 		return 2
 	}
 
-	// Resolve ingest client once. Keyring read at startup, not on
-	// every tick — keeps tick latency low and the keyring API
-	// invocation count bounded.
-	ks := keyring.NewOSKeyring()
+	// Resolve ingest client once. Secret store read at startup, not
+	// on every tick — keeps tick latency low and the file-system
+	// read count bounded.
+	ks := secretstore.NewFileStore(
+		secretstore.DefaultDir(filepath.Dir(cfgPath)),
+		secretstore.ReadMachineID,
+	)
 	hmacKey, bearerKey := keyring.ConnectionKeys(cfg.ConnectionID)
 	secret, err := ks.Get(keyring.ServiceName, hmacKey)
 	if err != nil {

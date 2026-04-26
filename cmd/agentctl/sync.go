@@ -33,7 +33,7 @@ import (
 func syncCmd(args []string) int {
 	return runSync(os.Stdout, os.Stderr, args, syncDeps{
 		now:           time.Now,
-		newOSKeyring:  func() keyring.Store { return keyring.NewOSKeyring() },
+		newOSKeyring:  defaultSecretStore,
 		newTallyClient: func(endpoint string) tallyPoster {
 			return tally.NewClient(endpoint)
 		},

@@ -126,7 +126,17 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		now = time.Now
 	}
 
-	probes, err := discover(ctx, tally.DiscoverOptions{})
+	// If config has explicit endpoints (set by `agentctl discover`
+	// previously, or by the install.ps1 GSTRECO_TALLY_PORTS hook),
+	// honour them — most customer Tally installs are on
+	// non-default ports and a port-range scan would miss them.
+	// Empty endpoint list falls back to the default port-range
+	// scan from tally.DiscoverOptions's zero value.
+	discoverOpts := tally.DiscoverOptions{}
+	if explicit := opts.Cfg.ResolveTallyEndpoints(""); len(explicit) > 0 {
+		discoverOpts.Endpoints = explicit
+	}
+	probes, err := discover(ctx, discoverOpts)
 	if err != nil {
 		return Result{}, fmt.Errorf("autodiscover: probe sweep: %w", err)
 	}

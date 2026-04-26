@@ -16,8 +16,20 @@ import (
 	"github.com/vishal0589/gstreco-tally-agent/internal/config"
 	"github.com/vishal0589/gstreco-tally-agent/internal/keyring"
 	"github.com/vishal0589/gstreco-tally-agent/internal/pair"
+	"github.com/vishal0589/gstreco-tally-agent/internal/secretstore"
 	"github.com/vishal0589/gstreco-tally-agent/internal/version"
 )
+
+// defaultSecretStore returns the production secret backend used by every
+// agentctl command. Built once per command invocation, never cached —
+// secretstore.fileStore is cheap to construct and stateless across calls
+// (the backing files are the only state).
+func defaultSecretStore() keyring.Store {
+	return secretstore.NewFileStore(
+		secretstore.DefaultDir(config.DefaultDir()),
+		secretstore.ReadMachineID,
+	)
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -72,7 +84,7 @@ func pairCmd(args []string) int {
 		Server:       *server,
 		Code:         *code,
 		ConfigPath:   *configPath,
-		Keyring:      keyring.NewOSKeyring(),
+		Keyring:      defaultSecretStore(),
 		AgentVersion: version.Version,
 	})
 	if err != nil {
