@@ -60,6 +60,13 @@ type daemonOptions struct {
 }
 
 func main() {
+	// Service control subcommand. Lives before flag.Parse() because
+	// "service" is a positional argument, not a flag — flag.Parse
+	// would otherwise reject it and exit 2.
+	if len(os.Args) > 1 && os.Args[1] == "service" {
+		os.Exit(serviceControlMain(os.Args[2:]))
+	}
+
 	opts := parseFlags()
 
 	if opts.showVersion {
@@ -70,8 +77,21 @@ func main() {
 	logger := log.New(log.Options{Level: opts.logLevel, Console: opts.console})
 	logger.Info().Str("version", version.String()).Msg("agent starting")
 
-	exitCode := run(opts, logger)
-	os.Exit(exitCode)
+	// kardianos/service auto-detects whether the process was started
+	// by an SCM/launchd/systemd or interactively. In service mode it
+	// drives Start/Stop on our daemonProgram; in console mode it
+	// effectively passes through to runDaemonViaService → which calls
+	// Start (kicks off the daemon goroutine), waits for SIGINT, and
+	// then calls Stop.
+	//
+	// run-once is a separate path that doesn't go through the service
+	// machinery at all — it's just a one-shot tick + exit, useful for
+	// smoke testing without registering the service.
+	if opts.runOnceAndExit {
+		os.Exit(run(opts, logger))
+	}
+
+	os.Exit(runDaemonViaService(opts, logger))
 }
 
 func parseFlags() daemonOptions {
@@ -88,7 +108,21 @@ func parseFlags() daemonOptions {
 
 // run is main() minus os.Exit so tests can drive it without exiting
 // the test binary. Returns the process exit code.
+//
+// run uses signalContext for graceful shutdown (SIGINT/SIGTERM). The
+// service-driven path uses runWithCtx instead — Stop() cancels a
+// service-level ctx and the daemon drains via that.
 func run(opts daemonOptions, logger zerolog.Logger) int {
+	ctx, cancel := signalContext()
+	defer cancel()
+	return runWithCtx(ctx, opts, logger)
+}
+
+// runWithCtx is run() with an injected ctx so the service-driven path
+// can wire kardianos's Stop into ctx cancellation without relying on
+// signal handlers (Windows SCM doesn't deliver SIGINT). Tests use
+// runWithCtx directly so they don't have to send real signals.
+func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) int {
 	cfgPath := opts.configPath
 	if cfgPath == "" {
 		cfgPath = config.DefaultPath()
@@ -168,10 +202,8 @@ func run(opts daemonOptions, logger zerolog.Logger) int {
 		Str("schedule", sched.Spec()).
 		Msg("daemon ready")
 
-	ctx, cancel := signalContext()
-	defer cancel()
 	<-ctx.Done()
-	logger.Info().Msg("daemon stopping (signal)")
+	logger.Info().Msg("daemon stopping (ctx done)")
 	return 0
 }
 
