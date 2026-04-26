@@ -54,6 +54,14 @@ type Config struct {
 	TallyEndpoints []string `yaml:"tally_endpoints,omitempty"`
 	// LogLevel is "debug" | "info" | "warn" | "error". Blank = info.
 	LogLevel string `yaml:"log_level,omitempty"`
+	// ScheduleCron is the cron expression the daemon (A5) uses for
+	// scheduled syncs. Empty = scheduler.DefaultSpec ("0 2 * * *").
+	// Interpreted in the agent's local timezone (typically IST for
+	// the CA market we serve). Server-side
+	// `tally_connections.schedule_cron` is the authoritative source;
+	// the agent will sync this from heartbeat once B3 ships, but for
+	// V1 the local override here is the only knob.
+	ScheduleCron string `yaml:"schedule_cron,omitempty"`
 }
 
 // ResolveTallyEndpoints returns the effective list of Tally HTTP

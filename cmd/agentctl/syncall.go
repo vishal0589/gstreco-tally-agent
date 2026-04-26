@@ -158,80 +158,59 @@ func runSyncAll(stdout, stderr io.Writer, args []string, deps syncAllDeps) int {
 		len(mappings.Mappings), mappings.ConnectionID, mappings.FetchedAt)
 	fmt.Fprintf(stdout, "  window: %s..%s · kinds: %s · dry-run: %t\n\n",
 		from.Format("2006-01-02"), to.Format("2006-01-02"),
-		strings.Join(kindsFlagNames(kinds), ","), *dryRun)
+		strings.Join(kindNamesFromResolved(kinds), ","), *dryRun)
+
+	var sender syncrun.IngestSender = client
+	if *dryRun {
+		sender = noopSender{}
+	}
 
 	runIDPrefix := fmt.Sprintf("syncall-%d", deps.now().Unix())
-	totalRows := 0
-	totalBatchesSent := 0
-	totalBatchesFailed := 0
-	fatalErrors := 0
-	mappingsRun := 0
-
-	// Iterate by (mapping, kind). Sequential by design — multi-port
-	// hosts run independent Tally processes per port so concurrency
-	// would help, but adding parallelism here while we don't yet have
-	// a way to throttle the GST Reco rate-limit is a footgun. The
-	// daemon (A5 proper) will introduce a worker-pool + rate-limit
-	// stanza together.
-	for mIdx, m := range mappings.Mappings {
-		var sender syncrun.IngestSender = client
-		if *dryRun {
-			sender = noopSender{}
-		}
-		tallyClient := deps.newTallyClient(m.TallyEndpoint)
-		mappingHeader := fmt.Sprintf("[%d/%d] %s @ %s",
-			mIdx+1, len(mappings.Mappings), m.TallyCompanyName, m.TallyEndpoint)
-		fmt.Fprintln(stdout, mappingHeader)
-
-		mappingRan := false
-		for _, kind := range kinds {
-			tallyKind, ingestKind := kind.tally, kind.ingest
-			runID := fmt.Sprintf("%s-%s-%d", runIDPrefix, kind.name, mIdx+1)
-
-			progress := makeSyncAllProgress(stdout, stderr, kind.name)
-			runCtx, cancelRun := context.WithTimeout(context.Background(), 10*time.Minute)
-			res, runErr := syncrun.RunOne(runCtx, tallyClient, sender, syncrun.Request{
-				TallyCompany: m.TallyCompanyName,
-				TallyKind:    tallyKind,
-				IngestKind:   ingestKind,
-				From:         from,
-				To:           to,
-				RunID:        runID,
-				RunKind:      "manual",
-				BatchSize:    *batchSize,
-			}, progress)
-			cancelRun()
-
-			if runErr != nil {
-				fmt.Fprintf(stderr, "  ✗ %s: %v\n", kind.name, runErr)
-				fatalErrors++
-				if !*continueOnError {
-					fmt.Fprintln(stderr, "stopping (--continue-on-error=false)")
-					return 1
-				}
-				continue
+	res := syncrun.WalkAll(context.Background(), syncrun.WalkOptions{
+		Mappings:        mappings.Mappings,
+		Kinds:           kindsResolvedToWalk(kinds),
+		From:            from,
+		To:              to,
+		BatchSize:       *batchSize,
+		RunIDPrefix:     runIDPrefix,
+		RunKind:         "manual",
+		PerRunTimeout:   10 * time.Minute,
+		ContinueOnError: *continueOnError,
+		NewTallyClient: func(endpoint string) syncrun.TallyPoster {
+			return deps.newTallyClient(endpoint)
+		},
+		Sender: sender,
+		PerMappingHook: func(idx, total int, m ingest.ActiveMapping) {
+			fmt.Fprintf(stdout, "[%d/%d] %s @ %s\n",
+				idx+1, total, m.TallyCompanyName, m.TallyEndpoint)
+		},
+		PerKindResultHook: func(m ingest.ActiveMapping, k syncrun.KindPair, r syncrun.Result, fatalErr error) {
+			if fatalErr != nil {
+				fmt.Fprintf(stderr, "  ✗ %s: %v\n", k.Name, fatalErr)
+				return
 			}
-			mappingRan = true
-			totalRows += res.RowCount
-			totalBatchesSent += res.BatchesSent
-			totalBatchesFailed += res.BatchesFailed
 			fmt.Fprintf(stdout, "    %s: rows=%d sent=%d failed=%d\n",
-				kind.name, res.RowCount, res.BatchesSent, res.BatchesFailed)
-			for _, w := range res.ParseWarnings {
+				k.Name, r.RowCount, r.BatchesSent, r.BatchesFailed)
+			for _, w := range r.ParseWarnings {
 				fmt.Fprintf(stdout, "      ⚠ %s\n", w)
 			}
-		}
-		if mappingRan {
-			mappingsRun++
-		}
-		fmt.Fprintln(stdout)
+		},
+		PerRunProgress: func(_ ingest.ActiveMapping, k syncrun.KindPair) syncrun.Progress {
+			return makeSyncAllProgress(stdout, stderr, k.Name)
+		},
+	})
+
+	if res.StoppedEarly {
+		fmt.Fprintln(stderr, "stopping (--continue-on-error=false)")
+		return 1
 	}
 
 	fmt.Fprintf(stdout,
-		"summary: %d/%d mapping(s) ran · rows=%d · batches sent=%d failed=%d · fatal errors=%d\n",
-		mappingsRun, len(mappings.Mappings), totalRows, totalBatchesSent, totalBatchesFailed, fatalErrors)
+		"\nsummary: %d/%d mapping(s) ran · rows=%d · batches sent=%d failed=%d · fatal errors=%d\n",
+		res.MappingsRun, len(mappings.Mappings), res.TotalRows,
+		res.TotalBatchesSent, res.TotalBatchesFailed, res.FatalErrors)
 
-	if fatalErrors > 0 || totalBatchesFailed > 0 {
+	if res.FatalErrors > 0 || res.TotalBatchesFailed > 0 {
 		return 1
 	}
 	if *dryRun {
@@ -240,6 +219,30 @@ func runSyncAll(stdout, stderr io.Writer, args []string, deps syncAllDeps) int {
 		fmt.Fprintln(stdout, "✓ sync-all complete")
 	}
 	return 0
+}
+
+// kindsResolvedToWalk maps the CLI's local kindResolved struct onto
+// syncrun.KindPair so WalkAll consumes a single canonical type. Kept
+// as a small adapter rather than collapsing the two — the CLI's
+// kindResolved still drives flag parsing here, while syncrun.KindPair
+// is the package-public contract for downstream callers (daemon, A5
+// scheduler).
+func kindsResolvedToWalk(kinds []kindResolved) []syncrun.KindPair {
+	out := make([]syncrun.KindPair, len(kinds))
+	for i, k := range kinds {
+		out[i] = syncrun.KindPair{Name: k.name, Tally: k.tally, Ingest: k.ingest}
+	}
+	return out
+}
+
+// kindNamesFromResolved returns just the names — used for the
+// "kinds: purchase,sales,..." header.
+func kindNamesFromResolved(kinds []kindResolved) []string {
+	out := make([]string, len(kinds))
+	for i, k := range kinds {
+		out[i] = k.name
+	}
+	return out
 }
 
 // kindResolved is a kind string + its tally + ingest enums. Resolved
@@ -276,17 +279,6 @@ func parseKinds(s string) ([]kindResolved, error) {
 		return nil, errors.New("--kinds is empty after parsing (use a comma-separated list of: purchase, sales, credit_note, debit_note)")
 	}
 	return out, nil
-}
-
-// kindsFlagNames extracts the canonical name list from resolved kinds
-// for the run-summary output line. Plain []string — the caller joins
-// once and discards.
-func kindsFlagNames(kinds []kindResolved) []string {
-	names := make([]string, len(kinds))
-	for i, k := range kinds {
-		names[i] = k.name
-	}
-	return names
 }
 
 // makeSyncAllProgress returns a progress callback that prefixes its
