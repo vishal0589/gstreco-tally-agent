@@ -87,9 +87,21 @@ func NewClient(baseURL, connectionID, bearer, secretB64 string, opts ...Option) 
 	return c, nil
 }
 
-// Send posts one batch. Returns SendError on non-2xx so the outbox layer can
-// decide between retry and give-up based on the server's status code.
+// Send posts one ingest batch to /api/tally/ingest. Thin wrapper over
+// PostJSONTo kept as the public surface so existing callers (the smoke
+// runbook, A4 outbox runner, A5-1 agentctl sync) don't have to learn
+// about path routing.
 func (c *Client) Send(ctx context.Context, body tally.IngestRequestBody) error {
+	return c.PostJSONTo(ctx, Path, body)
+}
+
+// PostJSONTo signs and POSTs an arbitrary JSON body to a server path.
+// Same HMAC + bearer scheme as Send, just decoupled from the /ingest
+// path so A5-2's catalog upsert and future endpoints (heartbeat,
+// rotate-secret) reuse the canonical signing logic. Returns
+// SendError on non-2xx so the same retryable/give-up classification
+// works regardless of which endpoint is being called.
+func (c *Client) PostJSONTo(ctx context.Context, path string, body any) error {
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("ingest: marshal: %w", err)
@@ -100,9 +112,9 @@ func (c *Client) Send(ctx context.Context, body tally.IngestRequestBody) error {
 		return err
 	}
 	ts := tally.NowTimestamp(c.now())
-	sig := tally.Sign(c.secret, http.MethodPost, Path, ts, nonce, payload)
+	sig := tally.Sign(c.secret, http.MethodPost, path, ts, nonce, payload)
 
-	url := c.baseURL + Path
+	url := c.baseURL + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("ingest: build request: %w", err)

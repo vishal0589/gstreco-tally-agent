@@ -32,6 +32,8 @@ func main() {
 		os.Exit(statusCmd(os.Args[2:]))
 	case "sync":
 		os.Exit(syncCmd(os.Args[2:]))
+	case "discover":
+		os.Exit(discoverCmd(os.Args[2:]))
 	case "version", "--version", "-v":
 		fmt.Println("agentctl " + version.String())
 	case "help", "--help", "-h":
@@ -158,6 +160,14 @@ Usage:
                 [--batch-size N] [--dry-run]
       one-shot fetch from a Tally endpoint → parse → ingest a single window.
       KIND is one of: purchase, sales, credit_note, debit_note.
+
+  agentctl discover [--ports START-END] [--host HOST] [--endpoint URL]...
+                    [--timeout DURATION] [--concurrency N]
+                    [--no-push] [--no-save] [--dry-run]
+                    [--server <URL>] [--config <PATH>]
+      probe localhost (or --host) for Tally instances, persist the
+      discovered endpoints to config, and push the company catalog
+      to the server's mapping list. Default port range: 9000-9009.
 
   agentctl version
       print version and exit
