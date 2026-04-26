@@ -122,6 +122,18 @@ func (c *Client) GetJSONFrom(ctx context.Context, path string, out any) error {
 	return c.signedRequest(ctx, http.MethodGet, path, nil, "", out)
 }
 
+// PostJSONExpect signs + POSTs a JSON body and decodes the response
+// into out. Identical to PostJSONTo except it expects the response
+// body — used by endpoints that return state (heartbeat,
+// rotate-secret). When out is nil this behaves like PostJSONTo.
+func (c *Client) PostJSONExpect(ctx context.Context, path string, body any, out any) error {
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("ingest: marshal: %w", err)
+	}
+	return c.signedRequest(ctx, http.MethodPost, path, payload, "application/json", out)
+}
+
 // signedRequest is the shared HMAC + bearer + nonce request path.
 // Body == nil means GET (no Content-Type header). Out, when non-nil,
 // is JSON-decoded from the response body on 2xx.
