@@ -1,5 +1,14 @@
 # Smoke test runbook — agent end-to-end
 
+> **Phase A note (2026-04-26):** for the **multi-port remote-server pilot**
+> with 5–6 Tally Prime instances on different ports, follow
+> [`pilot-remote-install.md`](./pilot-remote-install.md) instead. That doc
+> uses the new `agentctl pair → discover → sync-all` flow shipped in
+> A5-1/A5-2/A5-3 plus server S14/S15. THIS runbook validates the
+> pre-Phase-A baseline (hand-crafted Go program against /api/tally/ingest)
+> and is still the right tool for verifying A4-era ingest primitives in
+> isolation.
+
 Once PRs A1–A4 land on `dev`, this runbook validates the full pairing → sign → ingest loop against a live GST Reco server. It's the minimum check that the 6 agent PRs wire together correctly before A5 (scheduler) starts driving them.
 
 **Pre-requisites:** A1, A2a, A2b, A3, A4 merged to `dev`. Server S1–S7 already live on GST_Reco `dev`. Don't attempt this until the stack is complete — partial merges miss pieces (e.g. without A4 there's no HMAC client, without A3 there's no keyring).

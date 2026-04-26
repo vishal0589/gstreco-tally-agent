@@ -106,20 +106,48 @@ func (c *Client) PostJSONTo(ctx context.Context, path string, body any) error {
 	if err != nil {
 		return fmt.Errorf("ingest: marshal: %w", err)
 	}
+	return c.signedRequest(ctx, http.MethodPost, path, payload, "application/json", nil)
+}
 
+// GetJSONFrom signs and GETs a server path, decoding the response body
+// into out. Same HMAC + bearer scheme; canonical method is GET so a
+// POST-signed request can't be replayed against the GET form of the
+// same path (server's verifyAgentRequest signs against request.method
+// since S15). Empty body — sha256("") is part of the canonical string.
+//
+// Used by A5-3 to fetch the active mapping list from
+// /api/tally/connections/[id]/mappings/active. Tooling for other GET
+// endpoints (sync-status polling, log tail) can reuse this primitive.
+func (c *Client) GetJSONFrom(ctx context.Context, path string, out any) error {
+	return c.signedRequest(ctx, http.MethodGet, path, nil, "", out)
+}
+
+// signedRequest is the shared HMAC + bearer + nonce request path.
+// Body == nil means GET (no Content-Type header). Out, when non-nil,
+// is JSON-decoded from the response body on 2xx.
+func (c *Client) signedRequest(ctx context.Context, method, path string, body []byte, contentType string, out any) error {
 	nonce, err := tally.NewNonce()
 	if err != nil {
 		return err
 	}
 	ts := tally.NowTimestamp(c.now())
-	sig := tally.Sign(c.secret, http.MethodPost, path, ts, nonce, payload)
+	// CanonicalString hashes the body bytes — for GET we still hash
+	// the empty slice, and the server's verifier does the same. The
+	// concrete value (sha256("")) is the well-known constant
+	// e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.
+	sig := tally.Sign(c.secret, method, path, ts, nonce, body)
 
-	url := c.baseURL + path
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	var bodyReader io.Reader
+	if body != nil {
+		bodyReader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bodyReader)
 	if err != nil {
 		return fmt.Errorf("ingest: build request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
 	req.Header.Set(tally.HeaderAuth, "Bearer "+c.bearer)
 	req.Header.Set(tally.HeaderConnectionID, c.connectionID)
 	req.Header.Set(tally.HeaderTimestamp, ts)
@@ -133,7 +161,17 @@ func (c *Client) PostJSONTo(ctx context.Context, path string, body any) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		_, _ = io.Copy(io.Discard, resp.Body)
+		if out == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			return nil
+		}
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+		if readErr != nil {
+			return fmt.Errorf("ingest: read response: %w", readErr)
+		}
+		if err := json.Unmarshal(respBody, out); err != nil {
+			return fmt.Errorf("ingest: decode response: %w", err)
+		}
 		return nil
 	}
 
