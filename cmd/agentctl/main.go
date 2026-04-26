@@ -30,6 +30,8 @@ func main() {
 		os.Exit(pairCmd(os.Args[2:]))
 	case "status":
 		os.Exit(statusCmd(os.Args[2:]))
+	case "sync":
+		os.Exit(syncCmd(os.Args[2:]))
 	case "version", "--version", "-v":
 		fmt.Println("agentctl " + version.String())
 	case "help", "--help", "-h":
@@ -149,6 +151,13 @@ Usage:
 
   agentctl status [--config <PATH>]
       print local pairing state
+
+  agentctl sync --tally-company <NAME> --kind <KIND>
+                (--period MMYYYY | --from YYYY-MM-DD --to YYYY-MM-DD)
+                [--tally-url <URL>] [--server <URL>] [--config <PATH>]
+                [--batch-size N] [--dry-run]
+      one-shot fetch from a Tally endpoint → parse → ingest a single window.
+      KIND is one of: purchase, sales, credit_note, debit_note.
 
   agentctl version
       print version and exit
