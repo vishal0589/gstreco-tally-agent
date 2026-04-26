@@ -14,9 +14,11 @@ func ActiveMappingsPathFor(connectionID string) string {
 
 // ActiveMapping is one row the agent's daemon walks per scheduled
 // sync. Mirrors the server's TallyActiveMappingItem (S15). Optional
-// GUID is a string here (not *string) because Go's JSON omitempty
-// works correctly on the empty-string sentinel for this field — the
-// server sends "" rather than null in the legacy case.
+// GUID is a `string` (not `*string`) because Go's JSON decoder maps
+// the server's `null` (legacy rows where Tally didn't expose a GUID)
+// to the zero value (empty string), and downstream code only ever
+// asks `if guid != ""`. Using `*string` would force every caller to
+// nil-check for no behavioural benefit.
 type ActiveMapping struct {
 	MappingID        string `json:"mapping_id"`
 	TallyEndpoint    string `json:"tally_endpoint"`

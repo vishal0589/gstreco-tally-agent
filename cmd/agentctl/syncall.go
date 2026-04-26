@@ -158,7 +158,7 @@ func runSyncAll(stdout, stderr io.Writer, args []string, deps syncAllDeps) int {
 		len(mappings.Mappings), mappings.ConnectionID, mappings.FetchedAt)
 	fmt.Fprintf(stdout, "  window: %s..%s · kinds: %s · dry-run: %t\n\n",
 		from.Format("2006-01-02"), to.Format("2006-01-02"),
-		strings.Join(*kindsFlagNames(kinds), ","), *dryRun)
+		strings.Join(kindsFlagNames(kinds), ","), *dryRun)
 
 	runIDPrefix := fmt.Sprintf("syncall-%d", deps.now().Unix())
 	totalRows := 0
@@ -279,14 +279,14 @@ func parseKinds(s string) ([]kindResolved, error) {
 }
 
 // kindsFlagNames extracts the canonical name list from resolved kinds
-// for the run-summary output line. Returned as *[]string so the
-// caller can join without an extra allocation.
-func kindsFlagNames(kinds []kindResolved) *[]string {
+// for the run-summary output line. Plain []string — the caller joins
+// once and discards.
+func kindsFlagNames(kinds []kindResolved) []string {
 	names := make([]string, len(kinds))
 	for i, k := range kinds {
 		names[i] = k.name
 	}
-	return &names
+	return names
 }
 
 // makeSyncAllProgress returns a progress callback that prefixes its
