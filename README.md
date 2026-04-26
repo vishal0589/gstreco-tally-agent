@@ -6,7 +6,9 @@ See `~/GST_Reco/docs/plans/2026-04-tally-agent/master-plan.md` for the full arch
 
 ## Status
 
-Week 1 bootstrap. A1 scaffolds the Go module, `cmd/` layout, cross-compile Makefile, and GitHub Actions. Real Tally HTTP calls, pairing, HMAC signing, and the SQLite outbox land in A2–A4.
+Phase A + Phase B + boot-discover shipped. Daemon auto-discovers Tally instances on the loopback port range at startup (before the scheduler ticks) and on a 1-hour refresh Loop, so a fresh install needs zero CLI commands beyond pairing — the customer's IT pastes the one-liner from `/settings/tally`, the agent finds the Tally companies on its own, and the operator maps GSTINs in the web UI.
+
+`agentctl discover` is still available for diagnostics ("show me what discovery would find on this box right now"), but it is no longer required for setup.
 
 ## Layout
 

@@ -40,6 +40,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/vishal0589/gstreco-tally-agent/internal/autodiscover"
 	"github.com/vishal0589/gstreco-tally-agent/internal/config"
 	"github.com/vishal0589/gstreco-tally-agent/internal/heartbeat"
 	"github.com/vishal0589/gstreco-tally-agent/internal/ingest"
@@ -167,6 +168,38 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 		return 1
 	}
 
+	// Boot-time auto-discovery. Runs synchronously before the
+	// scheduler starts so the first scheduled tick sees mappings.
+	// Cheap when there's nothing new (probe sweep is bounded by
+	// 5s × concurrency); always-on so a customer who later adds a
+	// new Tally instance gets it picked up at the next service
+	// restart even if the periodic Loop has been napping.
+	//
+	// Best-effort: failure here doesn't stop the daemon. The
+	// scheduler still starts and FetchActiveMappings will return
+	// whatever mappings the server already has. Operator sees the
+	// non-fatal warning in Event Viewer / journalctl.
+	bootCtx, bootCancel := context.WithTimeout(ctx, 90*time.Second)
+	bootRes, bootErr := autodiscover.Run(bootCtx, autodiscover.Options{
+		Cfg:     cfg,
+		CfgPath: cfgPath,
+		Sender:  client,
+		Logger:  logger,
+	})
+	bootCancel()
+	if bootErr != nil {
+		logger.Warn().Err(bootErr).Msg("boot autodiscover errored (non-fatal)")
+	} else if bootRes.SkippedReason != "" {
+		logger.Info().Str("reason", bootRes.SkippedReason).Msg("boot autodiscover skipped")
+	} else {
+		logger.Info().
+			Strs("endpoints", bootRes.Endpoints).
+			Int("companies_pushed", bootRes.CompaniesPushed).
+			Bool("catalog_pushed", bootRes.CatalogPushed).
+			Bool("config_saved", bootRes.ConfigSaved).
+			Msg("boot autodiscover complete")
+	}
+
 	scheduleSpec := opts.scheduleOverride
 	if scheduleSpec == "" {
 		scheduleSpec = cfg.ScheduleCron
@@ -213,6 +246,18 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 	}
 	sched.Start()
 	defer sched.Stop()
+
+	// Periodic re-discovery in a background goroutine. Picks up new
+	// Tally instances added after the daemon started — common when
+	// a customer opens a second company file on a fresh port. The
+	// loop does NOT fire immediately; we already ran one synchronous
+	// sweep above before scheduler.Start.
+	go autodiscover.Loop(runCtx, autodiscover.DefaultPeriodicInterval, autodiscover.Options{
+		Cfg:     cfg,
+		CfgPath: cfgPath,
+		Sender:  client,
+		Logger:  logger,
+	})
 
 	hbHandler := &daemonHeartbeatHandler{
 		sched:     sched,
@@ -375,7 +420,7 @@ func makeTickFunc(
 			return fmt.Errorf("fetch active mappings: %w", err)
 		}
 		if len(mappings.Mappings) == 0 {
-			logger.Warn().Msg("no active mappings — run `agentctl discover` then map companies in /settings/tally")
+			logger.Warn().Msg("no active mappings — open /settings/tally and map the auto-discovered companies to GSTINs")
 			return nil
 		}
 		logger.Info().
