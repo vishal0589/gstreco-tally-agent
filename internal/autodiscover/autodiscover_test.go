@@ -393,7 +393,14 @@ func TestRun_DiffEndpoints_AddedAndGone(t *testing.T) {
 	}
 }
 
-func TestRun_FiltersOutV4Endpoints(t *testing.T) {
+func TestRun_AcceptsAllReachableTallyVersions(t *testing.T) {
+	// Pre-v0.1.3 this test asserted that V4 endpoints were filtered
+	// out. v0.1.3 treats Tally Prime 3.x/4.x/5.x/6.x as protocol-
+	// identical for the HTTP/XML queries this agent issues (verified
+	// against the production-shipping Manual2AI Python adapter and
+	// the Tally Prime 6.0 release notes — no breaking changes to the
+	// XML envelope shape). The filter now keeps every IsTally probe
+	// result.
 	sender := &recordingSender{}
 	r, err := Run(context.Background(), Options{
 		Cfg:    &config.Config{},
@@ -410,17 +417,23 @@ func TestRun_FiltersOutV4Endpoints(t *testing.T) {
 					Endpoint: "http://127.0.0.1:9001", Reachable: true, IsTally: true, Version: tally.VersionV3,
 					Companies: []tally.TallyCompany{{Name: "PrimeV3"}},
 				},
+				{
+					Endpoint: "http://127.0.0.1:2026", Reachable: true, IsTally: true, Version: tally.VersionUnknown,
+					VersionStr: "Release 6.1",
+					Companies:  []tally.TallyCompany{{Name: "PrimeV6"}},
+				},
 			}, nil
 		},
 	})
 	if err != nil {
 		t.Fatalf("Run err = %v", err)
 	}
-	if !equalSlices(r.Endpoints, []string{"http://127.0.0.1:9001"}) {
-		t.Errorf("expected only V3 endpoint, got %v", r.Endpoints)
+	want := []string{"http://127.0.0.1:2026", "http://127.0.0.1:9000", "http://127.0.0.1:9001"}
+	if !equalSlices(r.Endpoints, want) {
+		t.Errorf("Endpoints = %v, want %v (all reachable Tallys accepted)", r.Endpoints, want)
 	}
-	if r.CompaniesPushed != 1 {
-		t.Errorf("CompaniesPushed = %d, want 1 (V4 filtered)", r.CompaniesPushed)
+	if r.CompaniesPushed != 3 {
+		t.Errorf("CompaniesPushed = %d, want 3 (3.x + 4.x + 6.x all accepted)", r.CompaniesPushed)
 	}
 }
 

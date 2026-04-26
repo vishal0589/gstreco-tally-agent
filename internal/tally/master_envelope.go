@@ -102,13 +102,23 @@ func masterFilterForKind(k MasterKind) (name, expr string, err error) {
 type CompanyListRequest struct{}
 
 // companyListTmpl asks Tally for the list of currently-loaded companies.
-// Uses the built-in `List of Companies` report so we don't have to roll our
-// own TDL COLLECTION definition.
+// Uses the built-in `List of Companies` report so we don't have to roll
+// our own TDL COLLECTION definition.
+//
+// TYPE=Collection (NOT Data). Tally Prime 6.x is strict: built-in
+// reports like "List of Companies" must be requested as Collection,
+// not Data. The pre-v0.1.3 envelope used Data (which Tally Prime 3.x
+// silently accepted) and 6.x returned `STATUS=0 + DESC not found` —
+// the agent's discover then logged "responded but not Tally" and
+// gave up. Cross-checked against the production-shipping Manual2AI
+// Python adapter (PlummLegano/scripts/tally-sync/tally_client.py:123)
+// which has run against PLLUM's Tally Prime 6.1 install since the
+// 2026-04-19 ship.
 var companyListTmpl = template.Must(template.New("companies").Parse(`<ENVELOPE>
   <HEADER>
     <VERSION>1</VERSION>
     <TALLYREQUEST>Export</TALLYREQUEST>
-    <TYPE>Data</TYPE>
+    <TYPE>Collection</TYPE>
     <ID>List of Companies</ID>
   </HEADER>
   <BODY>

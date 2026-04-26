@@ -1,6 +1,7 @@
 package tally
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -189,9 +190,18 @@ func Discover(ctx context.Context, opts DiscoverOptions) ([]ProbeResult, error) 
 	return results, nil
 }
 
-// probeOne does the actual two-call probe (version, then company
-// list) for a single endpoint. Built to never panic — every error
-// path returns a structured ProbeResult.
+// probeOne does the actual two-call probe (version best-effort, then
+// company list) for a single endpoint. Built to never panic — every
+// error path returns a structured ProbeResult.
+//
+// As of v0.1.3 the company-list probe is the AUTHORITATIVE "is this
+// Tally" signal. The version probe is best-effort for diagnostic
+// reporting only. Reasoning: Tally Prime 6.x doesn't reliably accept
+// the `<TYPE>Function</TYPE><ID>$$Version</ID>` envelope shape (it
+// returns `STATUS=0 + DESC not found`), and the production-shipping
+// Manual2AI adapter doesn't bother with a version probe at all —
+// it just sends the actual data queries. We follow that pattern: try
+// version for nice diagnostics, ignore failure, trust company-list.
 func probeOne(ctx context.Context, endpoint string, client *Client) ProbeResult {
 	start := time.Now()
 	r := ProbeResult{Endpoint: endpoint}
@@ -200,55 +210,72 @@ func probeOne(ctx context.Context, endpoint string, client *Client) ProbeResult 
 		r.LatencyMs = time.Since(start).Milliseconds()
 	}()
 
-	versionEnv, err := BuildVersionXML()
-	if err != nil {
-		r.Err = fmt.Errorf("build version envelope: %w", err)
-		return r
-	}
-	versionResp, err := client.PostXML(ctx, versionEnv)
-	if err != nil {
-		r.Err = fmt.Errorf("version probe: %w", err)
-		return r
-	}
-	v, vstr, vErr := ParseVersion(versionResp)
-	r.Version = v
-	r.VersionStr = vstr
-	if vErr != nil {
-		// Reachable but the body wasn't Tally-shaped (e.g. someone
-		// runs Jenkins on this port). Surface it but don't error the
-		// whole sweep — discover keeps moving.
-		r.Reachable = true
-		r.IsTally = false
-		r.Err = fmt.Errorf("version response is not Tally-shaped: %w", vErr)
-		return r
-	}
-	r.Reachable = true
-	r.IsTally = true
-	if v == VersionV4 {
-		r.Warnings = append(r.Warnings,
-			"Tally Prime 4.x detected — agent's parser_v3 cannot fetch from this endpoint until A7 ships.")
-	} else if v == VersionUnknown {
-		r.Warnings = append(r.Warnings,
-			fmt.Sprintf("unrecognised Tally version %q — proceeding with parser_v3 (compatibility not guaranteed)", vstr))
+	// Version probe (best-effort). Failure is recorded as a warning
+	// and the probe continues to the company-list call. Pre-v0.1.3
+	// this was a hard gate that bailed the whole probe on a parse
+	// failure — that broke Tally Prime 6.x discovery.
+	if versionEnv, err := BuildVersionXML(); err == nil {
+		if versionResp, err := client.PostXML(ctx, versionEnv); err == nil {
+			if v, vstr, vErr := ParseVersion(versionResp); vErr == nil {
+				r.Version = v
+				r.VersionStr = vstr
+				if v == VersionV4 {
+					r.Warnings = append(r.Warnings,
+						"Tally Prime 4.x detected — parser compatibility not guaranteed.")
+				}
+			} else {
+				r.Warnings = append(r.Warnings,
+					fmt.Sprintf("version probe parse failed: %v (continuing — will rely on company-list probe)", vErr))
+			}
+		} else {
+			r.Warnings = append(r.Warnings,
+				fmt.Sprintf("version probe POST failed: %v (continuing)", err))
+		}
 	}
 
+	// Company-list probe — authoritative.
 	companyEnv, err := BuildCompanyListXML(CompanyListRequest{})
 	if err != nil {
-		// Should be impossible — the template has no parameters — but
-		// surface the error rather than panic.
 		r.Err = fmt.Errorf("build company-list envelope: %w", err)
 		return r
 	}
 	companyResp, err := client.PostXML(ctx, companyEnv)
 	if err != nil {
+		// Connection-level failure — port closed, host down, etc.
+		// Distinct from "responded but content was wrong" below.
 		r.Err = fmt.Errorf("company-list probe: %w", err)
+		return r
+	}
+	r.Reachable = true
+	// Sanity guard: a response that lacks the `<ENVELOPE>` root tag
+	// is something OTHER than Tally on this port (Jenkins, IIS, a
+	// reverse proxy, a redirect). ParseCompanyListV3 with
+	// dec.Strict=false would otherwise silently return zero
+	// companies on HTML / JSON / arbitrary text, which we'd then
+	// mis-classify as "Tally with no companies loaded". The check
+	// is intentionally tolerant — UTF-8 BOM, leading whitespace,
+	// XML prolog all OK; we just need to find the literal
+	// `<ENVELOPE` somewhere in the head of the body.
+	head := companyResp
+	if len(head) > 256 {
+		head = head[:256]
+	}
+	if !bytes.Contains(head, []byte("<ENVELOPE")) {
+		r.IsTally = false
+		r.Err = fmt.Errorf("response does not look like a Tally envelope (head: %q)", head)
 		return r
 	}
 	companies, cErr := ParseCompanyListV3(companyResp)
 	if cErr != nil {
-		r.Warnings = append(r.Warnings, fmt.Sprintf("company-list parse: %v", cErr))
+		// HTTP responded with an envelope-shaped body that we
+		// nonetheless can't parse. Likely a Tally version we don't
+		// speak — surface as "not Tally" so discover skips it.
+		r.IsTally = false
+		r.Err = fmt.Errorf("company-list parse failed (not Tally-shaped): %w", cErr)
 		return r
 	}
+	// Got back a parseable company list = definitely Tally.
+	r.IsTally = true
 	r.Companies = companies.Companies
 	for _, w := range companies.Warnings {
 		r.Warnings = append(r.Warnings, "company-list: "+w)
