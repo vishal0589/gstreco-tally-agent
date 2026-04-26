@@ -34,6 +34,8 @@ func main() {
 		os.Exit(syncCmd(os.Args[2:]))
 	case "discover":
 		os.Exit(discoverCmd(os.Args[2:]))
+	case "sync-all":
+		os.Exit(syncAllCmd(os.Args[2:]))
 	case "version", "--version", "-v":
 		fmt.Println("agentctl " + version.String())
 	case "help", "--help", "-h":
@@ -168,6 +170,16 @@ Usage:
       probe localhost (or --host) for Tally instances, persist the
       discovered endpoints to config, and push the company catalog
       to the server's mapping list. Default port range: 9000-9009.
+
+  agentctl sync-all (--period MMYYYY | --from YYYY-MM-DD --to YYYY-MM-DD)
+                    [--kinds purchase,sales,credit_note,debit_note]
+                    [--batch-size N] [--dry-run]
+                    [--continue-on-error]
+                    [--server <URL>] [--config <PATH>]
+      walk every active mapping for this connection (fetched from the
+      server), run the fetch → parse → ingest pipeline per
+      (endpoint, company, kind), report a per-mapping + grand-total
+      summary. The pre-A5 daemon driver for multi-port pilots.
 
   agentctl version
       print version and exit

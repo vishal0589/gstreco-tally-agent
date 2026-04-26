@@ -14,6 +14,7 @@ import (
 	"github.com/vishal0589/gstreco-tally-agent/internal/config"
 	"github.com/vishal0589/gstreco-tally-agent/internal/ingest"
 	"github.com/vishal0589/gstreco-tally-agent/internal/keyring"
+	"github.com/vishal0589/gstreco-tally-agent/internal/syncrun"
 	"github.com/vishal0589/gstreco-tally-agent/internal/tally"
 )
 
@@ -52,16 +53,13 @@ type syncDeps struct {
 	loadConfig      func(path string) (*config.Config, error)
 }
 
-// tallyPoster is the subset of *tally.Client this command uses. Narrow on
-// purpose so tests don't have to construct a full HTTP server.
-type tallyPoster interface {
-	PostXML(ctx context.Context, body []byte) ([]byte, error)
-}
-
-// ingestSender is the subset of *ingest.Client this command uses.
-type ingestSender interface {
-	Send(ctx context.Context, body tally.IngestRequestBody) error
-}
+// tallyPoster + ingestSender alias the syncrun interfaces so tests in
+// this package can construct fakes without importing syncrun directly.
+// The two pipelines (single-mapping `sync` and walks-all `sync-all`)
+// both delegate to syncrun.RunOne — the type aliases keep the seam
+// stable.
+type tallyPoster = syncrun.TallyPoster
+type ingestSender = syncrun.IngestSender
 
 func defaultNewIngestClient(baseURL, connectionID, bearer, secretB64 string) (ingestSender, error) {
 	return ingest.NewClient(baseURL, connectionID, bearer, secretB64)
@@ -124,125 +122,135 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 	}
 
 	server := firstNonEmpty(*serverFlag, cfg.Server)
-	tallyEndpoint := firstNonEmpty(*tallyURL, cfg.TallyEndpoint, tally.DefaultEndpoint)
-
-	// Build envelope first so flag/template errors fail before we touch the
-	// network. Tally rejects requests with control characters in the company
-	// name; BuildDayBookXML enforces that.
-	envelope, err := tally.BuildDayBookXML(tally.DayBookRequest{
-		Company: *tallyCompany,
-		From:    from,
-		To:      to,
-		Kind:    tallyKind,
-	})
-	if err != nil {
-		fmt.Fprintf(stderr, "agentctl sync: build envelope: %v\n", err)
-		return 2
+	// Multi-endpoint config (A5-2): if more than one endpoint is
+	// configured the operator MUST pass --tally-url to disambiguate.
+	// Falling back silently to the first entry would mask a wrong
+	// port for the requested company.
+	endpoints := cfg.ResolveTallyEndpoints(tally.DefaultEndpoint)
+	tallyEndpoint := firstNonEmpty(*tallyURL)
+	if tallyEndpoint == "" {
+		if len(endpoints) > 1 {
+			fmt.Fprintf(stderr, "agentctl sync: %d Tally endpoints configured; pass --tally-url to pick one (configured: %s)\n",
+				len(endpoints), strings.Join(endpoints, ", "))
+			return 2
+		}
+		if len(endpoints) == 1 {
+			tallyEndpoint = endpoints[0]
+		} else {
+			tallyEndpoint = tally.DefaultEndpoint
+		}
 	}
 
-	fmt.Fprintf(stdout, "→ fetching %s vouchers from %s for %q (%s..%s)\n",
-		*kindFlag, tallyEndpoint, *tallyCompany,
-		from.Format("2006-01-02"), to.Format("2006-01-02"))
-
+	// Build the tally client up-front. Sender comes from the keyring
+	// unless --dry-run; in that case we use a noop sender and short-
+	// circuit before sending. RunOne short-circuits when rows==0
+	// anyway, but the explicit dry-run path lets us skip keyring
+	// access too — useful for verifying the parser on a brand-new
+	// install before pairing.
 	tallyClient := deps.newTallyClient(tallyEndpoint)
-	fetchCtx, cancelFetch := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancelFetch()
 
-	respXML, err := tallyClient.PostXML(fetchCtx, envelope)
-	if err != nil {
-		fmt.Fprintf(stderr, "agentctl sync: tally fetch failed: %v\n", err)
+	var sender ingestSender
+	if !*dryRun {
+		ks := deps.newOSKeyring()
+		hmacKey, bearerKey := keyring.ConnectionKeys(cfg.ConnectionID)
+		secret, secErr := ks.Get(keyring.ServiceName, hmacKey)
+		if secErr != nil {
+			fmt.Fprintf(stderr, "agentctl sync: read hmac secret from keyring: %v\n", secErr)
+			return 1
+		}
+		bearer, bearerErr := ks.Get(keyring.ServiceName, bearerKey)
+		if bearerErr != nil {
+			fmt.Fprintf(stderr, "agentctl sync: read bearer token from keyring: %v\n", bearerErr)
+			return 1
+		}
+		client, clientErr := deps.newIngestClient(server, cfg.ConnectionID, bearer, secret)
+		if clientErr != nil {
+			fmt.Fprintf(stderr, "agentctl sync: build ingest client: %v\n", clientErr)
+			return 1
+		}
+		sender = client
+	} else {
+		sender = noopSender{}
+	}
+
+	runID := fmt.Sprintf("agentctl-sync-%d", deps.now().Unix())
+
+	// Progress callback prints the same per-stage lines the original
+	// inline pipeline did, so existing operator muscle memory holds.
+	progress := func(e syncrun.Event) {
+		switch e.Stage {
+		case "fetching":
+			fmt.Fprintf(stdout, "→ fetching %s vouchers from %s for %q (%s..%s)\n",
+				*kindFlag, tallyEndpoint, *tallyCompany,
+				from.Format("2006-01-02"), to.Format("2006-01-02"))
+		case "parsed":
+			fmt.Fprintf(stdout, "← %s\n", e.Message)
+		case "normalized":
+			fmt.Fprintf(stdout, "  → %s\n", e.Message)
+		case "batch_sending":
+			fmt.Fprintf(stdout, "→ %s\n", e.Message)
+		case "batch_sent":
+			fmt.Fprintln(stdout, "  ✓ accepted")
+		case "batch_failed":
+			if se := ingest.IsSendError(e.Err); se != nil {
+				fmt.Fprintf(stderr, "  ✗ %s status=%d snippet=%q retryable=%t\n",
+					se.Kind, se.Status, se.Snippet, se.Retryable())
+			} else {
+				fmt.Fprintf(stderr, "  ✗ %v\n", e.Err)
+			}
+		}
+	}
+
+	runCtx, cancelRun := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancelRun()
+
+	res, runErr := syncrun.RunOne(runCtx, tallyClient, sender, syncrun.Request{
+		TallyCompany: *tallyCompany,
+		TallyKind:    tallyKind,
+		IngestKind:   ingestKind,
+		From:         from,
+		To:           to,
+		RunID:        runID,
+		RunKind:      "manual",
+		BatchSize:    *batchSize,
+	}, progress)
+	if runErr != nil {
+		fmt.Fprintf(stderr, "agentctl sync: %v\n", runErr)
 		return 1
 	}
 
-	parsed, err := tally.ParseDayBookV3(respXML)
-	if err != nil {
-		fmt.Fprintf(stderr, "agentctl sync: parse response: %v\n", err)
-		return 1
-	}
-	fmt.Fprintf(stdout, "← parsed %d vouchers (status=%d, warnings=%d)\n",
-		len(parsed.Vouchers), parsed.Status, len(parsed.Warnings))
-	for _, w := range parsed.Warnings {
+	for _, w := range res.ParseWarnings {
 		fmt.Fprintf(stdout, "  ⚠ %s\n", w)
 	}
 
-	rows := make([]tally.IngestVoucherRow, 0, len(parsed.Vouchers))
-	dropped := 0
-	for _, v := range parsed.Vouchers {
-		out, err := tally.Normalize(v, tally.NormalizeOptions{
-			Kind:    ingestKind,
-			RunKind: "manual",
-		})
-		if err != nil {
-			fmt.Fprintf(stdout, "  ⚠ normalize voucher %s: %v\n", voucherDisplayID(v), err)
-			dropped++
-			continue
-		}
-		rows = append(rows, out...)
-	}
-	fmt.Fprintf(stdout, "  → %d ingest rows (dropped %d on normalize)\n", len(rows), dropped)
-
 	if *dryRun {
+		fmt.Fprintf(stdout, "\nrun_id=%s  rows=%d (dropped %d on normalize)\n",
+			runID, res.RowCount, res.DroppedOnNormalize)
 		fmt.Fprintln(stdout, "✓ dry-run complete (no rows sent)")
 		return 0
 	}
-	if len(rows) == 0 {
+	if res.RowCount == 0 {
 		fmt.Fprintln(stdout, "✓ nothing to send (zero ingest rows)")
 		return 0
 	}
 
-	ks := deps.newOSKeyring()
-	hmacKey, bearerKey := keyring.ConnectionKeys(cfg.ConnectionID)
-	secret, err := ks.Get(keyring.ServiceName, hmacKey)
-	if err != nil {
-		fmt.Fprintf(stderr, "agentctl sync: read hmac secret from keyring: %v\n", err)
-		return 1
-	}
-	bearer, err := ks.Get(keyring.ServiceName, bearerKey)
-	if err != nil {
-		fmt.Fprintf(stderr, "agentctl sync: read bearer token from keyring: %v\n", err)
-		return 1
-	}
-
-	client, err := deps.newIngestClient(server, cfg.ConnectionID, bearer, secret)
-	if err != nil {
-		fmt.Fprintf(stderr, "agentctl sync: build ingest client: %v\n", err)
-		return 1
-	}
-
-	runID := fmt.Sprintf("agentctl-sync-%d", deps.now().Unix())
-	chunks := ingest.SplitRows(rows, *batchSize)
-	batches := ingest.BuildBatches(runID, runID, ingestKind, *tallyCompany, "manual", chunks)
-
-	sendCtx, cancelSend := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancelSend()
-
-	sent, failed := 0, 0
-	for i, body := range batches {
-		fmt.Fprintf(stdout, "→ batch %d/%d (%d rows, request_id=%s, is_final=%t)\n",
-			i+1, len(batches), len(body.Batch), body.RequestID, body.IsFinal)
-		if err := client.Send(sendCtx, body); err != nil {
-			failed++
-			if se := ingest.IsSendError(err); se != nil {
-				fmt.Fprintf(stderr, "  ✗ %s status=%d snippet=%q retryable=%t\n",
-					se.Kind, se.Status, se.Snippet, se.Retryable())
-			} else {
-				fmt.Fprintf(stderr, "  ✗ %v\n", err)
-			}
-			// Don't stop the run on one batch failure — surface every error so
-			// the operator gets a complete picture in one CLI invocation.
-			continue
-		}
-		sent++
-		fmt.Fprintln(stdout, "  ✓ accepted")
-	}
-
-	fmt.Fprintf(stdout, "\nrun_id=%s  sent=%d  failed=%d  rows=%d\n", runID, sent, failed, len(rows))
-	if failed > 0 {
+	fmt.Fprintf(stdout, "\nrun_id=%s  sent=%d  failed=%d  rows=%d\n",
+		runID, res.BatchesSent, res.BatchesFailed, res.RowCount)
+	if res.BatchesFailed > 0 {
 		return 1
 	}
 	fmt.Fprintln(stdout, "✓ sync complete")
 	return 0
 }
+
+// noopSender is the dry-run stand-in. RunOne short-circuits the send
+// loop when rows==0; for non-empty payloads dry-run paths also skip
+// keyring access so a brand-new agent can verify the parser before
+// pairing. This guards against future runner changes that reach the
+// sender on dry-run paths.
+type noopSender struct{}
+
+func (noopSender) Send(_ context.Context, _ tally.IngestRequestBody) error { return nil }
 
 // mapKind translates the user-facing --kind string to the (Tally envelope
 // filter, server-side ingest kind) pair. The two enums diverge for
@@ -317,19 +325,6 @@ func parsePeriod(s string) (time.Time, time.Time, error) {
 	// years correctly without a calendar table.
 	to := from.AddDate(0, 1, -1)
 	return from, to, nil
-}
-
-// voucherDisplayID returns a human-friendly identifier for a voucher in CLI
-// output. Mirrors voucherID inside parser_v3 but uses public fields so this
-// file doesn't need internal access.
-func voucherDisplayID(v tally.RawVoucher) string {
-	if v.GUID != "" {
-		return v.GUID
-	}
-	if v.VoucherNumber != "" {
-		return v.VoucherNumber
-	}
-	return "(unknown)"
 }
 
 // firstNonEmpty returns the first non-empty string. Used to layer flag
