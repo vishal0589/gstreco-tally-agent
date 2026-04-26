@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -39,11 +40,56 @@ type Config struct {
 	// PairedAt is when the pair flow completed, in RFC-3339 format. Purely
 	// informational — the server has its own authoritative timestamp.
 	PairedAt time.Time `yaml:"paired_at,omitempty"`
-	// TallyEndpoint overrides http://localhost:9000 if the user changed
-	// Tally's TCP port. Blank = default.
+	// TallyEndpoint is the legacy single-endpoint field. Kept for back-
+	// compat with pre-A5-2 configs that paired against one Tally instance
+	// on the default port. New installs use TallyEndpoints (plural). The
+	// resolver below promotes this into TallyEndpoints when the latter is
+	// empty so any old config stays valid.
 	TallyEndpoint string `yaml:"tally_endpoint,omitempty"`
+	// TallyEndpoints is the multi-port list populated by `agentctl
+	// discover` (A5-2). Each Tally Prime instance binds a different port,
+	// so a single Windows box can host 5–6 endpoints under one paired
+	// agent. Empty = fall back to TallyEndpoint, then to
+	// tally.DefaultEndpoint.
+	TallyEndpoints []string `yaml:"tally_endpoints,omitempty"`
 	// LogLevel is "debug" | "info" | "warn" | "error". Blank = info.
 	LogLevel string `yaml:"log_level,omitempty"`
+}
+
+// ResolveTallyEndpoints returns the effective list of Tally HTTP
+// endpoints the agent should poll. Order of preference:
+//
+//  1. TallyEndpoints (A5-2 multi-port config)
+//  2. TallyEndpoint (legacy single-port config)
+//  3. fallback (caller-supplied default, typically tally.DefaultEndpoint)
+//
+// Whitespace-only entries are dropped. Returned slice is a fresh copy
+// so callers that mutate it (e.g. dedup) don't poison the config.
+func (c *Config) ResolveTallyEndpoints(fallback string) []string {
+	if c == nil {
+		if fallback == "" {
+			return nil
+		}
+		return []string{fallback}
+	}
+	if len(c.TallyEndpoints) > 0 {
+		out := make([]string, 0, len(c.TallyEndpoints))
+		for _, e := range c.TallyEndpoints {
+			if e = strings.TrimSpace(e); e != "" {
+				out = append(out, e)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	if e := strings.TrimSpace(c.TallyEndpoint); e != "" {
+		return []string{e}
+	}
+	if fallback == "" {
+		return nil
+	}
+	return []string{fallback}
 }
 
 // ErrNotFound is returned by Load when the config file doesn't exist yet —
