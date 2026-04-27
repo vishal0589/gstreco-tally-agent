@@ -101,32 +101,7 @@ func ParseDayBookV3(raw []byte) (ParseResult, error) {
 	}
 
 	rawOriginal := append([]byte(nil), raw...) // copy for debug dump on failure
-
-	// First decode UTF-16LE/BE → UTF-8 if the response is UTF-encoded.
-	// Tally Prime echoes the request encoding for IMPORT acks and
-	// sometimes returns voucher data in UTF-16LE for installs whose
-	// company file has non-ASCII characters in narration / party names
-	// (Hindi, regional, ₹). v0.1.4's byte-level sanitizer assumed UTF-8
-	// and would corrupt UTF-16LE by stripping the 0x00 high bytes of
-	// every ASCII char — caught during the PLLUM pilot 2026-04-27.
-	raw = decodeTallyResponse(raw)
-
-	// Then strip XML 1.0-illegal characters from the (now UTF-8)
-	// bytes. Two complementary passes:
-	//
-	//   - sanitizeXMLBytes:    drop literal control bytes (0x00-0x08,
-	//                          0x0B, 0x0C, 0x0E-0x1F).
-	//   - stripIllegalCharRefs: drop XML numeric character references
-	//                          that resolve to those same code-points
-	//                          (e.g. `&#4;`).
-	//
-	// Tally Prime emits both forms — literal bytes when the source
-	// was Alt-numpad typed, character references in legacy GSTCLASS /
-	// VATCLASSIFICATION fields. Without BOTH passes, Go's xml.Decoder
-	// rejects the response with "illegal character code U+xxxx".
-	raw = sanitizeXMLBytes(raw)
-	raw = stripIllegalCharRefs(raw)
-	raw = sanitizeInvalidUTF8(raw)
+	raw = prepareXMLForDecode(raw)
 
 	// DEBUG (v0.1.6): on parse failure, write the bytes at each
 	// pipeline stage to %ProgramData%\GST Reco\agent\debug-dumps\
@@ -455,6 +430,37 @@ func decodeUTF16(raw []byte, order unicode.Endianness) []byte {
 		return out
 	}
 	return out
+}
+
+// prepareXMLForDecode runs the four-stage sanitization pipeline that
+// turns a raw Tally HTTP response into bytes Go's xml.Decoder can
+// parse without rejecting valid Tally edge cases:
+//
+//  1. decodeTallyResponse:   UTF-16LE/BE → UTF-8 if the response is
+//                            UTF-16 (Tally echoes request encoding
+//                            for IMPORT acks; for non-ASCII voucher
+//                            content sometimes responds UTF-16LE).
+//  2. sanitizeXMLBytes:      drop literal XML-1.0-illegal control
+//                            bytes (0x00-0x1F minus 0x09/0x0A/0x0D)
+//                            that Tally emits in narration / address
+//                            fields when source was Alt-numpad typed.
+//  3. stripIllegalCharRefs:  drop XML numeric character references
+//                            (`&#4;`, `&#x04;`) that resolve to chars
+//                            outside the XML 1.0 set. Tally uses these
+//                            in GSTCLASS / VATCLASSIFICATION fields as
+//                            legacy "no value" markers.
+//  4. sanitizeInvalidUTF8:   drop bare invalid-UTF-8 bytes (Windows-
+//                            1252 / ISO-8859-1 chars like 0x92 right
+//                            single quote) embedded in narration.
+//
+// Used by ParseDayBookV3 and the master parsers — both consume
+// Tally responses with the same Tally-side quirks.
+func prepareXMLForDecode(raw []byte) []byte {
+	raw = decodeTallyResponse(raw)
+	raw = sanitizeXMLBytes(raw)
+	raw = stripIllegalCharRefs(raw)
+	raw = sanitizeInvalidUTF8(raw)
+	return raw
 }
 
 // sanitizeInvalidUTF8 drops bytes that don't form valid UTF-8. Tally

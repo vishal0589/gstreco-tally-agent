@@ -30,6 +30,7 @@ func ParseMastersV3(raw []byte) (MasterResult, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return MasterResult{}, fmt.Errorf("tally: empty masters response")
 	}
+	raw = prepareXMLForDecode(raw)
 	dec := xml.NewDecoder(bytes.NewReader(raw))
 	dec.Strict = false
 	dec.CharsetReader = func(_ string, input io.Reader) (io.Reader, error) { return input, nil }
@@ -88,6 +89,7 @@ func ParseCompanyListV3(raw []byte) (CompanyListResult, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return CompanyListResult{}, fmt.Errorf("tally: empty company-list response")
 	}
+	raw = prepareXMLForDecode(raw)
 	dec := xml.NewDecoder(bytes.NewReader(raw))
 	dec.Strict = false
 	dec.CharsetReader = func(_ string, input io.Reader) (io.Reader, error) { return input, nil }
@@ -138,6 +140,7 @@ func ParseVersion(raw []byte) (Version, string, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return VersionUnknown, "", fmt.Errorf("tally: empty version response")
 	}
+	raw = prepareXMLForDecode(raw)
 	// Tally's $$Version replies with something like "Release 3.0.1" or
 	// "Release 4.1" in a variety of wrapper tags (<VERSIONNUMBER>,
 	// <VERSION>, plain text inside <ENVELOPE>). Scan tokens for a string
