@@ -371,3 +371,57 @@ func TestParseDayBookV3_HandlesUTF16LEWithControlChars(t *testing.T) {
 		t.Errorf("Narration = %q, want %q", got.Vouchers[0].Narration, "copiedfrom word")
 	}
 }
+
+func TestStripIllegalCharRefs_DropsControlChars(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{`<X>&#4; Not Applicable</X>`, `<X> Not Applicable</X>`},
+		{`<X>&#x04;hi</X>`, `<X>hi</X>`},
+		{`<X>&#0;&#1;&#2;hello</X>`, `<X>hello</X>`},
+		{`<X>&#9;tab</X>`, `<X>&#9;tab</X>`},      // tab is valid, keep
+		{`<X>&#65;</X>`, `<X>&#65;</X>`},          // 'A' is valid, keep
+		{`<X>&#xff;hi</X>`, `<X>&#xff;hi</X>`},    // 0xFF (255) is valid, keep
+		{`<X>&amp;</X>`, `<X>&amp;</X>`},          // entity ref, not numeric — leave alone
+		{`<X>plain text</X>`, `<X>plain text</X>`}, // no refs at all
+	}
+	for _, c := range cases {
+		got := string(stripIllegalCharRefs([]byte(c.in)))
+		if got != c.want {
+			t.Errorf("input=%q: got=%q want=%q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestParseDayBookV3_HandlesGstClassWithIllegalCharRef(t *testing.T) {
+	// The actual PLLUM bug: Tally emits `<GSTCLASS>&#4; Not Applicable</GSTCLASS>`
+	// inside ledger entries. Confirms parser handles it now.
+	xml := `<ENVELOPE>
+<HEADER><STATUS>1</STATUS></HEADER>
+<BODY><DATA><TALLYMESSAGE>
+<VOUCHER>
+<DATE>20260415</DATE>
+<GUID>g-1</GUID>
+<VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+<VOUCHERNUMBER>P/0001</VOUCHERNUMBER>
+<PARTYLEDGERNAME>Acme Co</PARTYLEDGERNAME>
+<ALLLEDGERENTRIES.LIST>
+<LEDGERNAME>Acme Co</LEDGERNAME>
+<AMOUNT>1180.00</AMOUNT>
+<GSTCLASS TYPE="String">&#4; Not Applicable</GSTCLASS>
+</ALLLEDGERENTRIES.LIST>
+</VOUCHER>
+</TALLYMESSAGE></DATA></BODY>
+</ENVELOPE>`
+	got, err := ParseDayBookV3([]byte(xml))
+	if err != nil {
+		t.Fatalf("ParseDayBookV3 err = %v", err)
+	}
+	if len(got.Vouchers) != 1 {
+		t.Fatalf("expected 1 voucher, got %d (warnings: %v)", len(got.Vouchers), got.Warnings)
+	}
+	if got.Vouchers[0].PartyLedgerName != "Acme Co" {
+		t.Errorf("PartyLedgerName = %q", got.Vouchers[0].PartyLedgerName)
+	}
+}
