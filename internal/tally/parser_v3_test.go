@@ -286,3 +286,88 @@ func TestParseDayBookV3_StripsTallyControlBytes(t *testing.T) {
 		t.Errorf("Narration = %q (control char stripped)", got.Vouchers[0].Narration)
 	}
 }
+
+func TestDecodeTallyResponse_UTF16LEWithBOM(t *testing.T) {
+	// Same XML, encoded as UTF-16LE with BOM.
+	utf8 := []byte("<ENVELOPE><HEADER><STATUS>1</STATUS></HEADER></ENVELOPE>")
+	utf16le := []byte{0xff, 0xfe} // BOM
+	for _, b := range utf8 {
+		utf16le = append(utf16le, b, 0x00)
+	}
+	got := decodeTallyResponse(utf16le)
+	if string(got) != string(utf8) {
+		t.Errorf("got %q, want %q", got, utf8)
+	}
+}
+
+func TestDecodeTallyResponse_UTF16LEWithoutBOM(t *testing.T) {
+	// BOM-less UTF-16LE — detected via null-byte heuristic.
+	utf8 := []byte("<ENVELOPE><HEADER><STATUS>1</STATUS></HEADER></ENVELOPE>")
+	utf16le := []byte{}
+	for _, b := range utf8 {
+		utf16le = append(utf16le, b, 0x00)
+	}
+	got := decodeTallyResponse(utf16le)
+	if string(got) != string(utf8) {
+		t.Errorf("got %q, want %q", got, utf8)
+	}
+}
+
+func TestDecodeTallyResponse_UTF16BEWithBOM(t *testing.T) {
+	utf8 := []byte("<ENVELOPE></ENVELOPE>")
+	utf16be := []byte{0xfe, 0xff}
+	for _, b := range utf8 {
+		utf16be = append(utf16be, 0x00, b)
+	}
+	got := decodeTallyResponse(utf16be)
+	if string(got) != string(utf8) {
+		t.Errorf("got %q, want %q", got, utf8)
+	}
+}
+
+func TestDecodeTallyResponse_UTF8BOMStripped(t *testing.T) {
+	utf8WithBOM := append([]byte{0xef, 0xbb, 0xbf}, []byte("<X/>")...)
+	got := decodeTallyResponse(utf8WithBOM)
+	if string(got) != "<X/>" {
+		t.Errorf("got %q, want <X/>", got)
+	}
+}
+
+func TestDecodeTallyResponse_PlainUTF8Unchanged(t *testing.T) {
+	utf8 := []byte("<ENVELOPE><X/></ENVELOPE>")
+	got := decodeTallyResponse(utf8)
+	if string(got) != string(utf8) {
+		t.Errorf("plain UTF-8 should be unchanged, got %q", got)
+	}
+}
+
+func TestParseDayBookV3_HandlesUTF16LEWithControlChars(t *testing.T) {
+	// Realistic worst case: UTF-16LE response (BOM-less) with embedded
+	// U+0004 in a narration field.
+	utf8 := `<ENVELOPE>
+<HEADER><STATUS>1</STATUS></HEADER>
+<BODY><DATA><TALLYMESSAGE>
+<VOUCHER>
+<DATE>20260415</DATE>
+<GUID>g-1</GUID>
+<VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+<VOUCHERNUMBER>P/0001</VOUCHERNUMBER>
+<NARRATION>copied` + "\x04" + `from word</NARRATION>
+</VOUCHER>
+</TALLYMESSAGE></DATA></BODY>
+</ENVELOPE>`
+	utf16le := []byte{}
+	for _, r := range utf8 {
+		utf16le = append(utf16le, byte(r&0xff), byte((r>>8)&0xff))
+	}
+	got, err := ParseDayBookV3(utf16le)
+	if err != nil {
+		t.Fatalf("ParseDayBookV3 err = %v", err)
+	}
+	if len(got.Vouchers) != 1 {
+		t.Fatalf("expected 1 voucher, got %d", len(got.Vouchers))
+	}
+	if got.Vouchers[0].Narration != "copiedfrom word" {
+		t.Errorf("Narration = %q, want %q", got.Vouchers[0].Narration, "copiedfrom word")
+	}
+}
