@@ -64,6 +64,19 @@ var hkdfSalt = mustHex("9c5b3f1e88a2c4d70f4e6a1b2c3d4e5f")
 // nonceLen is the AES-GCM nonce size. 12 is the standard.
 const nonceLen = 12
 
+// applyDirACLFn is a package-level seam for tests. Defaults to the
+// platform implementation in acl_windows.go / acl_other.go; tests
+// swap it to a stub that simulates a Windows DACL adjustment failing
+// (e.g., icacls returns non-zero, GPO blocks, antivirus interferes).
+//
+// The DIPL Delhi pilot 2026-04-27 hit the silent-failure variant of
+// this — applyDirACL failed but Set() warned-and-continued, so the
+// secret file was written into a directory whose DACL the running
+// LocalSystem service couldn't traverse → "Access is denied" loop on
+// every heartbeat with no actionable error. v0.1.10 makes the
+// failure fatal so pair surfaces it immediately.
+var applyDirACLFn = applyDirACL
+
 // NewFileStore returns a Store backed by encrypted files at dir. The
 // directory is created on first write if it does not exist; an
 // inaccessible parent directory surfaces as a wrapped os error from
@@ -126,13 +139,16 @@ func (s *fileStore) Set(service, key, value string) error {
 	if err := os.MkdirAll(s.dir, 0o700); err != nil {
 		return fmt.Errorf("secretstore: mkdir %s: %w", s.dir, err)
 	}
-	if err := applyDirACL(s.dir); err != nil {
-		// ACL tightening is defence-in-depth; failure is logged but
-		// non-fatal. (On Unix the 0o700 in MkdirAll already blocks
-		// other users; on Windows ACL adjust may fail in containers
-		// without icacls — better to keep the agent running than
-		// hard-fail at startup.)
-		fmt.Fprintf(os.Stderr, "secretstore: warn: applyDirACL: %v\n", err)
+	// applyDirACLFn failure is FATAL as of v0.1.10. On Windows it
+	// invokes icacls to grant SYSTEM + BUILTIN\Administrators full
+	// control on the secrets dir; if that call fails, any file we
+	// write next will be inaccessible to the LocalSystem service at
+	// runtime and the agent silently 401-loops. Surfacing the error
+	// here makes pair fail loudly so the operator can fix it (run
+	// install.ps1 again with the icacls reset baked in, or check
+	// AV / GPO interference) before pair returns success.
+	if err := applyDirACLFn(s.dir); err != nil {
+		return fmt.Errorf("secretstore: applyDirACL %s: %w", s.dir, err)
 	}
 
 	aesKey, err := s.keySrc()
@@ -172,6 +188,23 @@ func (s *fileStore) Set(service, key, value string) error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("secretstore: rename %s: %w", tmp, err)
 	}
+
+	// Write-verify roundtrip. We just successfully wrote ciphertext to
+	// disk and applied the directory ACL; now confirm the resulting
+	// file is actually readable + decryptable from THIS process. If
+	// the host environment (EFS bound to a different user, restrictive
+	// inherited ACL, AV intercepting reads) blocks read access, this
+	// catches it now so pair returns a clear error rather than letting
+	// the service hit the failure on its first heartbeat 60 seconds
+	// later. Cost: one extra ReadFile + GCM Open per pair. Pair is
+	// one-shot so the cost is negligible.
+	got, verifyErr := s.getLocked(service, key)
+	if verifyErr != nil {
+		return fmt.Errorf("secretstore: write-verify %s: %w", path, verifyErr)
+	}
+	if got != value {
+		return fmt.Errorf("secretstore: write-verify %s: roundtrip mismatch (got %d-byte plaintext, want %d-byte)", path, len(got), len(value))
+	}
 	return nil
 }
 
@@ -181,7 +214,13 @@ func (s *fileStore) Get(service, key string) (string, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.getLocked(service, key)
+}
 
+// getLocked is the lock-free body of Get. Callers must hold s.mu.
+// Set's write-verify roundtrip uses this helper to read back the
+// just-written entry without re-acquiring the lock.
+func (s *fileStore) getLocked(service, key string) (string, error) {
 	path := s.entryPath(service, key)
 	body, err := os.ReadFile(path)
 	if err != nil {

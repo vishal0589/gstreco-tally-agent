@@ -358,3 +358,131 @@ func TestReadMachineID_ReturnsNonEmpty(t *testing.T) {
 		t.Errorf("ReadMachineID returned empty string with nil error")
 	}
 }
+
+// TestSet_FatalWhenApplyDirACLFails confirms the v0.1.10 behavior
+// change: applyDirACL failure must propagate up from Set rather than
+// log-and-continue. Pre-v0.1.10 behavior (fmt.Fprintf to os.Stderr +
+// proceed with write) caused the DIPL Delhi pilot incident — the
+// secret file landed in a directory whose DACL the LocalSystem
+// service couldn't traverse, and the agent silently 401-looped on
+// every heartbeat.
+func TestSet_FatalWhenApplyDirACLFails(t *testing.T) {
+	s := tempStore(t)
+
+	// Inject a failing applyDirACLFn for the duration of this test.
+	// Mirrors what would happen if icacls was blocked by AV / GPO /
+	// container minus icacls.exe.
+	prev := applyDirACLFn
+	applyDirACLFn = func(string) error {
+		return errors.New("simulated icacls failure: GPO blocks SeRestorePrivilege")
+	}
+	t.Cleanup(func() { applyDirACLFn = prev })
+
+	err := s.Set("svc", "k", "v")
+	if err == nil {
+		t.Fatal("Set with failing applyDirACL must return error; got nil")
+	}
+	if !strings.Contains(err.Error(), "applyDirACL") {
+		t.Errorf("error should reference applyDirACL; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "simulated icacls failure") {
+		t.Errorf("error should wrap underlying applyDirACL error; got %v", err)
+	}
+
+	// And the secret must NOT have been written — verify Get returns
+	// ErrNotFound. Pre-v0.1.10 the file would have been written
+	// despite the ACL warning, leaving the keyring half-broken.
+	if _, getErr := s.Get("svc", "k"); !errors.Is(getErr, ErrNotFound) {
+		t.Errorf("after failed Set, Get should be ErrNotFound; got %v", getErr)
+	}
+}
+
+// TestSet_WriteVerifyDetectsCorruption confirms the v0.1.10
+// write-verify roundtrip catches the case where Set wrote bytes to
+// disk but the host environment (EFS, AV, GPO) blocks the immediate
+// read-back. Without write-verify, pair returns success but the
+// service hits the read-failure on its first heartbeat 60s later
+// with no actionable error trail back to the operator.
+//
+// We simulate read-failure by deleting the file between Set's
+// rename step and Set's verify step. We can't intercept Set
+// mid-flight cleanly, so instead we drive the path via a custom
+// keyDeriver that returns one key on the Set encrypt path and a
+// different key on the verify decrypt path — same effect: verify
+// fails because decrypt fails.
+func TestSet_WriteVerifyDetectsCorruption(t *testing.T) {
+	dir := t.TempDir()
+	encKey := make([]byte, 32)
+	if _, err := rand.Read(encKey); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	verifyKey := make([]byte, 32)
+	if _, err := rand.Read(verifyKey); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+
+	// keyDeriver alternates encKey (first call: encrypt) and verifyKey
+	// (second call: read-back decrypt) — the second call is in the
+	// write-verify path and should fail decryption.
+	calls := 0
+	deriver := func() ([]byte, error) {
+		calls++
+		fresh := make([]byte, 32)
+		switch calls {
+		case 1:
+			copy(fresh, encKey)
+		default:
+			copy(fresh, verifyKey)
+		}
+		return fresh, nil
+	}
+	s := &fileStore{dir: dir, keySrc: deriver}
+
+	err := s.Set("svc", "k", "v")
+	if err == nil {
+		t.Fatal("Set with mismatched encrypt/verify keys must return error; got nil")
+	}
+	if !strings.Contains(err.Error(), "write-verify") {
+		t.Errorf("error should reference write-verify; got %v", err)
+	}
+}
+
+// TestSet_WriteVerifyRoundtrip confirms the happy path still works
+// — write-verify shouldn't break Set on a normal store, and a Get
+// after Set returns the original value.
+func TestSet_WriteVerifyRoundtrip(t *testing.T) {
+	s := tempStore(t)
+
+	if err := s.Set("svc", "k", "secret-value-123"); err != nil {
+		t.Fatalf("Set on healthy store must succeed: %v", err)
+	}
+	v, err := s.Get("svc", "k")
+	if err != nil {
+		t.Fatalf("Get after Set: %v", err)
+	}
+	if v != "secret-value-123" {
+		t.Errorf("Get returned %q, want %q", v, "secret-value-123")
+	}
+}
+
+// TestApplyDirACLFnSeam confirms that applyDirACLFn can be swapped
+// at the package level — protects the seam from accidental removal
+// in future refactors. The same pattern is used by the test above
+// for the fatal-fail path.
+func TestApplyDirACLFnSeam(t *testing.T) {
+	prev := applyDirACLFn
+	t.Cleanup(func() { applyDirACLFn = prev })
+
+	called := 0
+	applyDirACLFn = func(dir string) error {
+		called++
+		return nil
+	}
+	s := tempStore(t)
+	if err := s.Set("svc", "k", "v"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if called == 0 {
+		t.Error("expected applyDirACLFn to be invoked from Set; got 0 calls")
+	}
+}
