@@ -7,6 +7,9 @@ import (
 	"io"
 	"strconv"
 	"strings"
+
+	"golang.org/x/text/encoding/unicode"
+	"golang.org/x/text/transform"
 )
 
 // ParseResult is what the parser hands back. Status mirrors the <STATUS>
@@ -38,16 +41,23 @@ func ParseDayBookV3(raw []byte) (ParseResult, error) {
 		return ParseResult{}, fmt.Errorf("tally: empty response")
 	}
 
-	// Strip XML 1.0-illegal control characters before handing to the
-	// decoder. Tally Prime emits NUL / EOT / SUB / etc. (0x00-0x08,
-	// 0x0B, 0x0C, 0x0E-0x1F) in narration, party-name, and address
-	// fields when the source data was pasted from a Word doc, copied
-	// from an old DOS report, or hand-typed with Alt-numpad sequences.
-	// Go's encoding/xml refuses these even with Strict=false because
-	// they're outside XML's character set, not just shape-invalid.
-	// Caught during PLLUM pilot 2026-04-27 — every voucher fetch
-	// returned 200 OK but the parser bailed with
-	// "illegal character code U+0004" mid-stream.
+	// First decode UTF-16LE/BE → UTF-8 if the response is UTF-encoded.
+	// Tally Prime echoes the request encoding for IMPORT acks and
+	// sometimes returns voucher data in UTF-16LE for installs whose
+	// company file has non-ASCII characters in narration / party names
+	// (Hindi, regional, ₹). v0.1.4's byte-level sanitizer assumed UTF-8
+	// and would corrupt UTF-16LE by stripping the 0x00 high bytes of
+	// every ASCII char — caught during the PLLUM pilot 2026-04-27.
+	raw = decodeTallyResponse(raw)
+
+	// Then strip XML 1.0-illegal control characters from the (now
+	// UTF-8) bytes. Tally Prime emits NUL / EOT / SUB / etc.
+	// (0x00-0x08, 0x0B, 0x0C, 0x0E-0x1F) in narration, party-name,
+	// and address fields when the source data was pasted from a Word
+	// doc, copied from an old DOS report, or hand-typed with
+	// Alt-numpad. Go's encoding/xml refuses these even with
+	// Strict=false because they're outside XML's character set, not
+	// just shape-invalid.
 	raw = sanitizeXMLBytes(raw)
 
 	dec := xml.NewDecoder(bytes.NewReader(raw))
@@ -301,6 +311,70 @@ func parseTallyRate(s string) (rate float64, unit string) {
 		unit = strings.TrimSpace(parts[1])
 	}
 	return rate, unit
+}
+
+// decodeTallyResponse detects the response encoding (UTF-16LE,
+// UTF-16BE, UTF-8 with or without BOM) and returns UTF-8 bytes.
+// Tally Prime defaults to UTF-8 for EXPORT but switches to UTF-16LE
+// when the company file's data contains non-ASCII chars (Hindi,
+// regional Indian languages, ₹) — and it does NOT advertise this in
+// the HTTP Content-Type. Caller must sniff.
+//
+// Detection order (matches the production Manual2AI Python adapter
+// at PlummLegano/scripts/tally-sync/tally_client.py:351-378):
+//   1. BOM: \xff\xfe → UTF-16LE; \xfe\xff → UTF-16BE; \xef\xbb\xbf →
+//      UTF-8 (BOM stripped, body returned as-is).
+//   2. Null-byte heuristic on the head (first 8 bytes): a `<` in
+//      position 0 followed by 0x00 in position 1 → UTF-16LE; 0x00
+//      then `<` → UTF-16BE.
+//   3. Default: UTF-8 (body returned unchanged).
+//
+// On decode error (truncated UTF-16, invalid sequences) the function
+// returns the original bytes — the caller's xml decoder will surface
+// the underlying issue, which is more useful than swallowing it here.
+func decodeTallyResponse(raw []byte) []byte {
+	if len(raw) < 2 {
+		return raw
+	}
+	// BOM sniff.
+	if bytes.HasPrefix(raw, []byte{0xff, 0xfe}) {
+		return decodeUTF16(raw[2:], unicode.LittleEndian)
+	}
+	if bytes.HasPrefix(raw, []byte{0xfe, 0xff}) {
+		return decodeUTF16(raw[2:], unicode.BigEndian)
+	}
+	if bytes.HasPrefix(raw, []byte{0xef, 0xbb, 0xbf}) {
+		return raw[3:] // UTF-8 BOM, strip.
+	}
+	// Null-byte heuristic on the first 8 bytes for BOM-less UTF-16.
+	head := raw
+	if len(head) > 8 {
+		head = head[:8]
+	}
+	if len(head) >= 2 {
+		// `<\x00` at start = UTF-16LE
+		if head[0] == '<' && head[1] == 0x00 {
+			return decodeUTF16(raw, unicode.LittleEndian)
+		}
+		// `\x00<` at start = UTF-16BE
+		if head[0] == 0x00 && head[1] == '<' {
+			return decodeUTF16(raw, unicode.BigEndian)
+		}
+	}
+	return raw
+}
+
+func decodeUTF16(raw []byte, order unicode.Endianness) []byte {
+	dec := unicode.UTF16(order, unicode.IgnoreBOM).NewDecoder()
+	out, _, err := transform.Bytes(dec, raw)
+	if err != nil {
+		// Decoder bails on truncated final code unit — return what we
+		// got plus the unconverted tail so the caller still sees most
+		// of the response. If the tail is all that errored, sanitize
+		// will strip any leftover stray bytes.
+		return out
+	}
+	return out
 }
 
 // sanitizeXMLBytes replaces XML-1.0-illegal control characters with
