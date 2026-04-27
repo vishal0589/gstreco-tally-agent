@@ -425,3 +425,76 @@ func TestParseDayBookV3_HandlesGstClassWithIllegalCharRef(t *testing.T) {
 		t.Errorf("PartyLedgerName = %q", got.Vouchers[0].PartyLedgerName)
 	}
 }
+
+func TestSanitizeInvalidUTF8_DropsBareBytes(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []byte
+		want string
+	}{
+		{
+			"valid UTF-8 unchanged",
+			[]byte("hello world"),
+			"hello world",
+		},
+		{
+			"Windows-1252 right single quote (0x92) dropped",
+			[]byte{'h', 'i', 0x92, 's', ' ', 'o', 'k'},
+			"his ok",
+		},
+		{
+			"valid multi-byte UTF-8 preserved",
+			[]byte("café"), // é = 0xC3 0xA9 in UTF-8
+			"café",
+		},
+		{
+			"₹ rupee sign preserved",
+			[]byte("₹100"), // ₹ = 0xE2 0x82 0xB9
+			"₹100",
+		},
+		{
+			"truncated UTF-8 sequence dropped",
+			append([]byte("ok"), 0xC3),
+			"ok",
+		},
+	}
+	for _, c := range cases {
+		got := string(sanitizeInvalidUTF8(c.in))
+		if got != c.want {
+			t.Errorf("%s: got %q want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestParseDayBookV3_HandlesWindows1252Bytes(t *testing.T) {
+	// Realistic case: Tally narration field contains a Windows-1252
+	// right single quote (0x92) — invalid UTF-8 — embedded in
+	// otherwise-clean XML. The PLLUM LEGNO sales response on
+	// 2026-04-27 hit this.
+	xml := []byte(`<ENVELOPE>
+<HEADER><STATUS>1</STATUS></HEADER>
+<BODY><DATA><TALLYMESSAGE>
+<VOUCHER>
+<DATE>20260415</DATE>
+<GUID>g-1</GUID>
+<VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+<VOUCHERNUMBER>S/0001</VOUCHERNUMBER>
+<PARTYLEDGERNAME>Acme` + string([]byte{0x92}) + `s Ltd</PARTYLEDGERNAME>
+<NARRATION>March` + string([]byte{0x92}) + `s order</NARRATION>
+</VOUCHER>
+</TALLYMESSAGE></DATA></BODY>
+</ENVELOPE>`)
+	got, err := ParseDayBookV3(xml)
+	if err != nil {
+		t.Fatalf("ParseDayBookV3 err = %v", err)
+	}
+	if len(got.Vouchers) != 1 {
+		t.Fatalf("expected 1 voucher, got %d", len(got.Vouchers))
+	}
+	if got.Vouchers[0].PartyLedgerName != "Acmes Ltd" {
+		t.Errorf("PartyLedgerName = %q (0x92 should be dropped)", got.Vouchers[0].PartyLedgerName)
+	}
+	if got.Vouchers[0].Narration != "Marchs order" {
+		t.Errorf("Narration = %q", got.Vouchers[0].Narration)
+	}
+}

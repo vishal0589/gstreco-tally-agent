@@ -433,6 +433,14 @@ func makeTickFunc(
 			Time("from", from).Time("to", to).
 			Msg("walking mappings")
 
+		// Sync vendor + customer masters BEFORE walking vouchers so
+		// the server's ingest path back-fills vendor_id / customer_id
+		// on each invoice as it lands. Best-effort: per-(mapping,
+		// kind) failures log warn and the voucher walk still runs.
+		// Reusing the same Tally client per endpoint keeps connection
+		// pooling sensible (Tally HTTP is single-process anyway).
+		syncMastersForMappings(ctx, client, newTallyClient, mappings.Mappings, logger)
+
 		runIDPrefix := fmt.Sprintf("daemon-%d", time.Now().Unix())
 
 		res := syncrun.WalkAll(ctx, syncrun.WalkOptions{
@@ -481,6 +489,96 @@ func makeTickFunc(
 		// sync-status dashboard (B4) once it ships. A non-nil return
 		// here would just produce a duplicate scheduler-level log.
 		return nil
+	}
+}
+
+// syncMastersForMappings fetches vendor + customer master ledgers
+// from each Tally company in the active mappings list and POSTs
+// each batch to /api/tally/masters. Runs once at the start of every
+// scheduled tick so the server's vendor_master / customer_master
+// tables stay synchronised with Tally — populating email, phone,
+// address, state code, GST registration type that the voucher feed
+// alone doesn't carry.
+//
+// Best-effort: failures are logged at warn level and the daemon
+// continues to the voucher walk. Masters are configuration; a stale
+// row never blocks reconciliation.
+//
+// Per-mapping cost: 2 Tally fetches (vendor, customer) + up to 2
+// HTTP POSTs. On a 500-vendor book this is < 5 seconds total per
+// mapping. Cheaper than walking 4 voucher kinds.
+func syncMastersForMappings(
+	ctx context.Context,
+	client *ingest.Client,
+	newTallyClient func(string, ...tally.ClientOption) *tally.Client,
+	mappings []ingest.ActiveMapping,
+	logger zerolog.Logger,
+) {
+	for _, m := range mappings {
+		tc := newTallyClient(m.TallyEndpoint)
+		for _, kind := range []tally.MasterKind{tally.MasterVendor, tally.MasterCustomer} {
+			env, err := tally.BuildMasterXML(tally.MasterRequest{
+				Company: m.TallyCompanyName,
+				Kind:    kind,
+			})
+			if err != nil {
+				logger.Warn().
+					Str("mapping", m.TallyCompanyName).
+					Str("kind", string(kind)).
+					Err(err).
+					Msg("masters envelope build failed (skipping)")
+				continue
+			}
+			fetchCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+			resp, err := tc.PostXML(fetchCtx, env)
+			cancel()
+			if err != nil {
+				logger.Warn().
+					Str("mapping", m.TallyCompanyName).
+					Str("kind", string(kind)).
+					Err(err).
+					Msg("masters fetch failed (skipping)")
+				continue
+			}
+			parsed, err := tally.ParseMastersV3(resp)
+			if err != nil {
+				logger.Warn().
+					Str("mapping", m.TallyCompanyName).
+					Str("kind", string(kind)).
+					Err(err).
+					Msg("masters parse failed (skipping)")
+				continue
+			}
+			items := tally.NormalizeMasters(parsed.Masters, kind)
+			if len(items) == 0 {
+				logger.Info().
+					Str("mapping", m.TallyCompanyName).
+					Str("kind", string(kind)).
+					Int("raw_ledgers", len(parsed.Masters)).
+					Msg("no GSTIN-bearing masters to push")
+				continue
+			}
+			pushCtx, pushCancel := context.WithTimeout(ctx, 30*time.Second)
+			err = client.SendMasters(pushCtx, tally.IngestMastersRequest{
+				Kind:  kind,
+				Items: items,
+			})
+			pushCancel()
+			if err != nil {
+				logger.Warn().
+					Str("mapping", m.TallyCompanyName).
+					Str("kind", string(kind)).
+					Int("items", len(items)).
+					Err(err).
+					Msg("masters push failed (continuing)")
+				continue
+			}
+			logger.Info().
+				Str("mapping", m.TallyCompanyName).
+				Str("kind", string(kind)).
+				Int("items", len(items)).
+				Msg("masters pushed")
+		}
 	}
 }
 

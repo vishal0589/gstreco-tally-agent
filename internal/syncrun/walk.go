@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/vishal0589/gstreco-tally-agent/internal/ingest"
 	"github.com/vishal0589/gstreco-tally-agent/internal/tally"
 )
@@ -126,7 +128,19 @@ func WalkAll(ctx context.Context, opts WalkOptions) WalkResult {
 		mappingRan := false
 
 		for _, kind := range kinds {
-			runID := fmt.Sprintf("%s-%s-%d", opts.RunIDPrefix, kind.Name, mIdx+1)
+			// run_id MUST be a UUID — server's tally_sync_runs.id and
+			// tally_ingest_log.run_id are uuid-typed columns. Pre-v0.1.8
+			// we built a human-readable string ("daemon-1777274014-
+			// purchase-1") which silently failed the upsert (server
+			// logged the error but returned 200, so the agent thought
+			// success). Net effect: vouchers landed in
+			// purchase_invoices/sales_invoices via the import_history
+			// path, but tally_sync_runs stayed empty so the operator
+			// dashboard showed "no runs" despite real data flowing.
+			// Caught during PLLUM pilot 2026-04-27: 86 vouchers in DB,
+			// zero runs in UI. The RunIDPrefix is preserved for log
+			// correlation only — not sent on the wire.
+			runID := uuid.NewString()
 
 			var progress Progress
 			if opts.PerRunProgress != nil {
