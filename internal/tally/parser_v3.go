@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/text/encoding/unicode"
 	"golang.org/x/text/transform"
@@ -125,6 +126,7 @@ func ParseDayBookV3(raw []byte) (ParseResult, error) {
 	// rejects the response with "illegal character code U+xxxx".
 	raw = sanitizeXMLBytes(raw)
 	raw = stripIllegalCharRefs(raw)
+	raw = sanitizeInvalidUTF8(raw)
 
 	// DEBUG (v0.1.6): on parse failure, write the bytes at each
 	// pipeline stage to %ProgramData%\GST Reco\agent\debug-dumps\
@@ -451,6 +453,42 @@ func decodeUTF16(raw []byte, order unicode.Endianness) []byte {
 		// of the response. If the tail is all that errored, sanitize
 		// will strip any leftover stray bytes.
 		return out
+	}
+	return out
+}
+
+// sanitizeInvalidUTF8 drops bytes that don't form valid UTF-8. Tally
+// Prime sometimes embeds Windows-1252 or ISO-8859-1 characters in
+// narration / address fields when source data was pasted from a
+// non-Unicode app — bytes like 0x92 (Windows-1252 right single quote)
+// appear as bare-byte invalid UTF-8 sequences in an otherwise UTF-8
+// response. Go's xml.Decoder rejects these with "invalid UTF-8".
+//
+// PLLUM LEGNO sales hit this on 2026-04-27: response was 100k+ lines,
+// one byte sequence somewhere on line 106484 wasn't valid UTF-8.
+//
+// Strategy: drop the invalid bytes entirely. Alternative would be to
+// replace with U+FFFD, but that pollutes legitimate narration text.
+// Dropping is cleaner — operator sees clean text, just minus the
+// bytes that wouldn't have rendered anywhere anyway.
+//
+// Fast-path on already-valid input: utf8.Valid runs in roughly the
+// same time as a simple byte loop, so the no-allocation branch
+// matters for the common case.
+func sanitizeInvalidUTF8(raw []byte) []byte {
+	if utf8.Valid(raw) {
+		return raw
+	}
+	out := make([]byte, 0, len(raw))
+	for i := 0; i < len(raw); {
+		r, size := utf8.DecodeRune(raw[i:])
+		if r == utf8.RuneError && size <= 1 {
+			// Invalid byte — skip.
+			i++
+			continue
+		}
+		out = append(out, raw[i:i+size]...)
+		i += size
 	}
 	return out
 }
