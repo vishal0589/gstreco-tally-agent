@@ -59,6 +59,30 @@ type IngestVoucherRow struct {
 	Side *IngestSide `json:"side,omitempty"`
 }
 
+// IngestMasterItem is one party-master row sent to /api/tally/masters.
+// Mirrors the server's MasterItem in src/lib/tally/masters-upsert.ts.
+// All optional fields use *string so the JSON omits them when empty —
+// the server treats null and missing identically and the wire payload
+// stays compact for chatty masters refreshes.
+type IngestMasterItem struct {
+	GSTIN     string  `json:"gstin"`
+	TradeName *string `json:"trade_name,omitempty"`
+	LegalName *string `json:"legal_name,omitempty"`
+	StateCode *string `json:"state_code,omitempty"`
+	Email     *string `json:"email,omitempty"`
+	Phone     *string `json:"phone,omitempty"`
+}
+
+// IngestMastersRequest is the body POSTed to /api/tally/masters.
+// run_id is optional (masters are configuration not invoice data, so
+// no tally_sync_runs row is created from this endpoint).
+type IngestMastersRequest struct {
+	RunID     string             `json:"run_id,omitempty"`
+	Kind      MasterKind         `json:"kind"` // vendor|customer
+	Items     []IngestMasterItem `json:"items"`
+	RequestID string             `json:"request_id,omitempty"`
+}
+
 // IngestRequestBody is the full request shape. One run_id can span many
 // batches (each is_final=false), with the last batch carrying is_final=true.
 type IngestRequestBody struct {
