@@ -5,12 +5,63 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/text/encoding/unicode"
 	"golang.org/x/text/transform"
 )
+
+// dumpDebugResponse writes the parser's input bytes (both before and
+// after decode/sanitize) to %ProgramData%\GST Reco\agent\debug-dumps\
+// (Windows) or ~/.gstreco-agent/debug-dumps/ (Unix) when the xml
+// decoder rejects the response. Best-effort — failure to dump is
+// logged to stderr but the parser still returns the original error.
+//
+// Each dump filename is "parse-fail-<unix>-<stage>.bin" so multiple
+// failures in one tick land in distinct files. Caller passes:
+//   rawOriginal: bytes as received from Tally HTTP response
+//   raw:         bytes after decodeTallyResponse + sanitizeXMLBytes
+// Comparing the two reveals whether the pipeline introduced the
+// illegal char or it was in Tally's response from the start.
+func dumpDebugResponse(rawOriginal, raw []byte, parseErr error) {
+	dir := debugDumpDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "tally: dumpDebugResponse mkdir %s: %v\n", dir, err)
+		return
+	}
+	ts := time.Now().Unix()
+	origPath := filepath.Join(dir, fmt.Sprintf("parse-fail-%d-original.bin", ts))
+	postPath := filepath.Join(dir, fmt.Sprintf("parse-fail-%d-after-pipeline.bin", ts))
+	errPath := filepath.Join(dir, fmt.Sprintf("parse-fail-%d-error.txt", ts))
+	if err := os.WriteFile(origPath, rawOriginal, 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, "tally: dumpDebugResponse write %s: %v\n", origPath, err)
+	}
+	if err := os.WriteFile(postPath, raw, 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, "tally: dumpDebugResponse write %s: %v\n", postPath, err)
+	}
+	if err := os.WriteFile(errPath, []byte(parseErr.Error()+"\n"), 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, "tally: dumpDebugResponse write %s: %v\n", errPath, err)
+	}
+}
+
+func debugDumpDir() string {
+	if runtime.GOOS == "windows" {
+		if pd := os.Getenv("ProgramData"); pd != "" {
+			return filepath.Join(pd, "GST Reco", "agent", "debug-dumps")
+		}
+		return `C:\ProgramData\GST Reco\agent\debug-dumps`
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "gstreco-agent-debug-dumps")
+	}
+	return filepath.Join(home, ".gstreco-agent", "debug-dumps")
+}
 
 // ParseResult is what the parser hands back. Status mirrors the <STATUS>
 // header value Tally returns (1 = success, 0 = failure, other values indicate
@@ -41,6 +92,8 @@ func ParseDayBookV3(raw []byte) (ParseResult, error) {
 		return ParseResult{}, fmt.Errorf("tally: empty response")
 	}
 
+	rawOriginal := append([]byte(nil), raw...) // copy for debug dump on failure
+
 	// First decode UTF-16LE/BE → UTF-8 if the response is UTF-encoded.
 	// Tally Prime echoes the request encoding for IMPORT acks and
 	// sometimes returns voucher data in UTF-16LE for installs whose
@@ -59,6 +112,17 @@ func ParseDayBookV3(raw []byte) (ParseResult, error) {
 	// Strict=false because they're outside XML's character set, not
 	// just shape-invalid.
 	raw = sanitizeXMLBytes(raw)
+
+	// DEBUG (v0.1.6): on parse failure, write the bytes at each
+	// pipeline stage to %ProgramData%\GST Reco\agent\debug-dumps\
+	// so we can compare what the agent received vs what a parallel
+	// PowerShell test captures. Caught a contradiction during the
+	// PLLUM pilot 2026-04-27 where the parser reported U+0004 but
+	// PowerShell-captured response had zero illegal bytes; the only
+	// way to break the speculation loop is to look at the actual
+	// bytes the agent's HTTP path delivered to the parser.
+	debugRawOriginal := rawOriginal // captured before decode/sanitize
+	debugRaw := raw                 // after decode + sanitize
 
 	dec := xml.NewDecoder(bytes.NewReader(raw))
 	// Tally occasionally emits ampersands and less-than signs that the spec
@@ -80,6 +144,7 @@ func ParseDayBookV3(raw []byte) (ParseResult, error) {
 			break
 		}
 		if err != nil {
+			dumpDebugResponse(debugRawOriginal, debugRaw, err)
 			return result, fmt.Errorf("tally: xml decode: %w", err)
 		}
 		start, ok := tok.(xml.StartElement)
