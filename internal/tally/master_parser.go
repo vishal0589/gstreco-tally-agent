@@ -194,34 +194,80 @@ func ParseVersion(raw []byte) (Version, string, error) {
 // --- private XML shapes ---
 
 type xmlLedger struct {
-	Name             string              `xml:"NAME"`
-	GUID             string              `xml:"GUID"`
-	AlterID          string              `xml:"ALTERID"`
-	Parent           string              `xml:"PARENT"`
-	GSTIN            string              `xml:"PARTYGSTIN"`
-	GSTRegType       string              `xml:"GSTREGISTRATIONTYPE"`
-	StateName        string              `xml:"STATENAME"`
-	Email            string              `xml:"EMAIL"`
-	Phone            string              `xml:"LEDGERPHONE"`
-	Mobile           string              `xml:"LEDGERMOBILE"`
-	Contact          string              `xml:"LEDGERCONTACT"`
-	MailingNames     []string            `xml:"MAILINGNAME.LIST>MAILINGNAME"`
-	LedgerMailNames  []string            `xml:"LEDGERMAILINGNAME.LIST>MAILINGNAME"`
-	AddressLines     []string            `xml:"ADDRESS.LIST>ADDRESS"`
+	Name    string `xml:"NAME"`
+	GUID    string `xml:"GUID"`
+	AlterID string `xml:"ALTERID"`
+	Parent  string `xml:"PARENT"`
+
+	// GSTIN — primary v3 path + variants seen on Tally Prime 6.x. The
+	// PartyGSTIN element is the v3 default; GSTIN and PartyGSTNumber
+	// have appeared on different Prime 6.1 patches. firstNonEmpty in
+	// toRaw picks the first populated one.
+	PartyGSTIN     string `xml:"PARTYGSTIN"`
+	GSTIN          string `xml:"GSTIN"`
+	PartyGSTNumber string `xml:"PARTYGSTNUMBER"`
+
+	// Registration type — Prime 6.x sometimes exposes this as
+	// PARTYREGISTRATIONTYPE rather than GSTREGISTRATIONTYPE.
+	GSTRegType   string `xml:"GSTREGISTRATIONTYPE"`
+	PartyRegType string `xml:"PARTYREGISTRATIONTYPE"`
+
+	// State — Tally Prime 6.x renamed STATENAME to LEDSTATENAME on the
+	// ledger and exposes additional GSTSTATENAME / PARTYSTATENAME on
+	// some patches. Fall back through all of them.
+	StateName       string `xml:"STATENAME"`
+	LedStateName    string `xml:"LEDSTATENAME"`
+	LedgerStateName string `xml:"LEDGERSTATENAME"`
+	GSTStateName    string `xml:"GSTSTATENAME"`
+	PartyStateName  string `xml:"PARTYSTATENAME"`
+
+	// Email — Prime 6.x emits LEDGEREMAIL where v3 emitted EMAIL.
+	// EMAILID is a third variant seen on multi-email ledgers (we take
+	// the primary).
+	Email       string `xml:"EMAIL"`
+	EmailID     string `xml:"EMAILID"`
+	LedgerEmail string `xml:"LEDGEREMAIL"`
+	LedgerMail  string `xml:"LEDGERMAIL"`
+
+	// Phone — primary + Tally variants. CONTACTNUMBER appears on
+	// some ledger types where the primary phone field is empty.
+	Phone         string `xml:"LEDGERPHONE"`
+	PhoneNo       string `xml:"PHONENO"`
+	PhoneNumber   string `xml:"PHONENUMBER"`
+	ContactNumber string `xml:"CONTACTNUMBER"`
+
+	// Mobile — Prime 6.x renamed LEDGERMOBILE to LEDGERMOBILENO on
+	// some patches and exposes plain MOBILENO on others.
+	Mobile         string `xml:"LEDGERMOBILE"`
+	LedgerMobileNo string `xml:"LEDGERMOBILENO"`
+	MobileNo       string `xml:"MOBILENO"`
+	MobileNumber   string `xml:"MOBILENUMBER"`
+
+	Contact       string `xml:"LEDGERCONTACT"`
+	ContactPerson string `xml:"CONTACTPERSON"`
+
+	MailingNames    []string `xml:"MAILINGNAME.LIST>MAILINGNAME"`
+	LedgerMailNames []string `xml:"LEDGERMAILINGNAME.LIST>MAILINGNAME"`
+
+	AddressLines              []string `xml:"ADDRESS.LIST>ADDRESS"`
+	LedgerMailingAddressLines []string `xml:"LEDGERMAILINGADDRESS.LIST>ADDRESS"`
 }
 
 func (x xmlLedger) toRaw() RawMaster {
+	// firstNonEmpty (defined in normalize.go) skips whitespace-only
+	// entries but does not trim the returned value, so wrap with
+	// strings.TrimSpace where the downstream needs a clean string.
 	m := RawMaster{
 		Name:                strings.TrimSpace(x.Name),
 		GUID:                strings.TrimSpace(x.GUID),
 		Parent:              strings.TrimSpace(x.Parent),
-		GSTIN:               strings.ToUpper(strings.TrimSpace(x.GSTIN)),
-		GSTRegistrationType: strings.TrimSpace(x.GSTRegType),
-		StateName:           strings.TrimSpace(x.StateName),
-		Email:               strings.TrimSpace(x.Email),
-		Phone:               strings.TrimSpace(x.Phone),
-		Mobile:              strings.TrimSpace(x.Mobile),
-		Contact:             strings.TrimSpace(x.Contact),
+		GSTIN:               strings.ToUpper(strings.TrimSpace(firstNonEmpty(x.PartyGSTIN, x.GSTIN, x.PartyGSTNumber))),
+		GSTRegistrationType: strings.TrimSpace(firstNonEmpty(x.GSTRegType, x.PartyRegType)),
+		StateName:           strings.TrimSpace(firstNonEmpty(x.StateName, x.LedStateName, x.LedgerStateName, x.GSTStateName, x.PartyStateName)),
+		Email:               strings.TrimSpace(firstNonEmpty(x.Email, x.LedgerEmail, x.EmailID, x.LedgerMail)),
+		Phone:               strings.TrimSpace(firstNonEmpty(x.Phone, x.PhoneNo, x.PhoneNumber, x.ContactNumber)),
+		Mobile:              strings.TrimSpace(firstNonEmpty(x.Mobile, x.LedgerMobileNo, x.MobileNo, x.MobileNumber)),
+		Contact:             strings.TrimSpace(firstNonEmpty(x.Contact, x.ContactPerson)),
 	}
 	if x.AlterID != "" {
 		if v, err := strconv.ParseInt(strings.TrimSpace(x.AlterID), 10, 64); err == nil {
@@ -247,9 +293,15 @@ func (x xmlLedger) toRaw() RawMaster {
 	if m.TradeName == "" {
 		m.TradeName = m.Name
 	}
-	// Address: concatenate non-empty lines with newlines.
-	lines := make([]string, 0, len(x.AddressLines))
-	for _, a := range x.AddressLines {
+	// Address: concatenate non-empty lines with newlines. Tally Prime
+	// 6.x exposes a separate LEDGERMAILINGADDRESS.LIST on some patches;
+	// fall back to it when the canonical ADDRESS.LIST is empty.
+	addrLines := x.AddressLines
+	if len(addrLines) == 0 {
+		addrLines = x.LedgerMailingAddressLines
+	}
+	lines := make([]string, 0, len(addrLines))
+	for _, a := range addrLines {
 		if a = strings.TrimSpace(a); a != "" {
 			lines = append(lines, a)
 		}
@@ -270,10 +322,5 @@ type xmlCompanyRecord struct {
 }
 
 func (x xmlCompanyRecord) firstNonEmptyName() string {
-	for _, n := range []string{x.Name, x.CompanyName, x.BasicCompanyName, x.RemoteInfoName} {
-		if s := strings.TrimSpace(n); s != "" {
-			return s
-		}
-	}
-	return ""
+	return firstNonEmpty(x.Name, x.CompanyName, x.BasicCompanyName, x.RemoteInfoName)
 }
