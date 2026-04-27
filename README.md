@@ -25,6 +25,14 @@ A fresh customer install: paste one PowerShell line, type your Tally port (or le
 
 Voucher fetch + ingest hardening (UTF-16LE response decoding, inline-TDL voucher collections, strict-OK ingest predicate, voucher-type-name configurability) is queued for v0.1.4. v0.1.3 unblocks discovery; v0.1.4 will harden the actual sync path.
 
+**v0.1.10 — secretstore: applyDirACL fatal-on-fail + write-verify roundtrip.** DIPL Delhi pilot (2026-04-27) hit the silent-failure variant of `applyDirACL`: the directory-level icacls call failed (probably AV / GPO interference), Set() warned-and-continued, and the file ended up in a directory whose DACL the LocalSystem service couldn't traverse. The agent then 401-looped on every heartbeat with `read hmac secret from keyring failed: Access is denied`, taking 5+ hours to diagnose. v0.1.10 fixes this end-to-end:
+
+- **Fatal**: `applyDirACL` failure now returns from `Set()` instead of warning to stderr. Pair surfaces the error immediately.
+- **Write-verify roundtrip**: after `Set()` writes + renames the encrypted file, it does a `getLocked()` round-trip read-back to confirm the resulting file is actually readable + decryptable. Catches EFS / AV / restrictive-DACL cases that cipher succeeds but read fails.
+- **Test seam**: `applyDirACLFn` is now a package-level variable so tests can simulate icacls failure deterministically (cross-platform).
+
+Plus `install.ps1` (in GST_Reco repo, separate PR) appends a belt-and-suspenders `icacls /reset /T /grant:r Everyone:(OI)(CI)F /T` on the secrets dir so any prior broken DACL is corrected at install time.
+
 **v0.1.10 — Tally Prime 6.x master-field rename catch-up.** DIPL Delhi pilot (2026-04-27) surfaced 0 % coverage on `trade_name`, `state_code`, `email` despite real GSTINs flowing — the smoking gun that Tally Prime 6.x renamed master-ledger XML elements (the v3 `EMAIL` is now `LEDGEREMAIL`; `STATENAME` is now `LEDSTATENAME`; `LEDGERMOBILE` is now `LEDGERMOBILENO` on some patches). The FETCH list in `internal/tally/master_envelope.go` and the `xmlLedger` struct in `internal/tally/master_parser.go` now ask for + accept all known variants and pick the populated one via the existing `firstNonEmpty` helper. After re-syncing masters on v0.1.10, vendor / customer master coverage on Prime 6.x ledgers jumps from <5 % to ~95 % — vendor portal lists show real names and emails instead of raw GSTINs.
 
 ## Layout
