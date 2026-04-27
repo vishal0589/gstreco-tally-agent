@@ -232,3 +232,57 @@ func TestParseDayBookV3_DropsVoucherWithoutIdentifiers(t *testing.T) {
 		t.Errorf("expected a 'dropped' warning, got %v", got.Warnings)
 	}
 }
+
+func TestSanitizeXMLBytes_StripsControlChars(t *testing.T) {
+	input := []byte("<NARR>hello\x04world\x00bye</NARR>")
+	got := sanitizeXMLBytes(input)
+	want := "<NARR>helloworldbye</NARR>"
+	if string(got) != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestSanitizeXMLBytes_PreservesValidWhitespace(t *testing.T) {
+	input := []byte("<X>line1\nline2\tcol\rend</X>")
+	got := sanitizeXMLBytes(input)
+	if string(got) != string(input) {
+		t.Errorf("expected tab/LF/CR preserved, got %q", got)
+	}
+}
+
+func TestSanitizeXMLBytes_NoAllocOnClean(t *testing.T) {
+	input := []byte("<X>clean</X>")
+	got := sanitizeXMLBytes(input)
+	if &got[0] != &input[0] {
+		t.Errorf("clean input should not allocate a new slice")
+	}
+}
+
+func TestParseDayBookV3_StripsTallyControlBytes(t *testing.T) {
+	xml := []byte(`<ENVELOPE>
+<HEADER><STATUS>1</STATUS></HEADER>
+<BODY><DATA><TALLYMESSAGE>
+<VOUCHER>
+<DATE>20260415</DATE>
+<GUID>abc-123</GUID>
+<VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+<VOUCHERNUMBER>P/0001</VOUCHERNUMBER>
+<PARTYLEDGERNAME>Supplier` + "\x04" + `Co</PARTYLEDGERNAME>
+<NARRATION>copied` + "\x00" + `from word</NARRATION>
+</VOUCHER>
+</TALLYMESSAGE></DATA></BODY>
+</ENVELOPE>`)
+	got, err := ParseDayBookV3(xml)
+	if err != nil {
+		t.Fatalf("ParseDayBookV3 err = %v", err)
+	}
+	if len(got.Vouchers) != 1 {
+		t.Fatalf("expected 1 voucher, got %d", len(got.Vouchers))
+	}
+	if got.Vouchers[0].PartyLedgerName != "SupplierCo" {
+		t.Errorf("PartyLedgerName = %q, want SupplierCo (control char stripped)", got.Vouchers[0].PartyLedgerName)
+	}
+	if got.Vouchers[0].Narration != "copiedfrom word" {
+		t.Errorf("Narration = %q (control char stripped)", got.Vouchers[0].Narration)
+	}
+}

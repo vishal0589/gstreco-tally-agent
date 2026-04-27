@@ -38,6 +38,18 @@ func ParseDayBookV3(raw []byte) (ParseResult, error) {
 		return ParseResult{}, fmt.Errorf("tally: empty response")
 	}
 
+	// Strip XML 1.0-illegal control characters before handing to the
+	// decoder. Tally Prime emits NUL / EOT / SUB / etc. (0x00-0x08,
+	// 0x0B, 0x0C, 0x0E-0x1F) in narration, party-name, and address
+	// fields when the source data was pasted from a Word doc, copied
+	// from an old DOS report, or hand-typed with Alt-numpad sequences.
+	// Go's encoding/xml refuses these even with Strict=false because
+	// they're outside XML's character set, not just shape-invalid.
+	// Caught during PLLUM pilot 2026-04-27 — every voucher fetch
+	// returned 200 OK but the parser bailed with
+	// "illegal character code U+0004" mid-stream.
+	raw = sanitizeXMLBytes(raw)
+
 	dec := xml.NewDecoder(bytes.NewReader(raw))
 	// Tally occasionally emits ampersands and less-than signs that the spec
 	// would reject. Strict=false lets the decoder recover; AutoClose is left
@@ -289,4 +301,40 @@ func parseTallyRate(s string) (rate float64, unit string) {
 		unit = strings.TrimSpace(parts[1])
 	}
 	return rate, unit
+}
+
+// sanitizeXMLBytes replaces XML-1.0-illegal control characters with
+// nothing (drops them). Valid in XML 1.0: 0x09 (tab), 0x0A (LF),
+// 0x0D (CR), and anything >= 0x20. Everything else in 0x00-0x1F is
+// outside XML's character set and rejected by encoding/xml even with
+// Strict=false.
+//
+// Operates at the byte level — safe for UTF-8 because every
+// continuation byte in UTF-8 has the high bit set (>= 0x80) so the
+// check `b < 0x20` never triggers on a multi-byte char. Not safe for
+// UTF-16 responses (those have NUL bytes between every ASCII char);
+// caller should detect + decode UTF-16 to UTF-8 before passing here.
+// Tally EXPORT responses default to UTF-8; the v0.1.5 UTF-16LE
+// decoding work covers the IMPORT-ack edge case separately.
+func sanitizeXMLBytes(raw []byte) []byte {
+	// Walk first to see if anything needs stripping. Most responses
+	// are clean; allocating a fresh slice on every call is wasteful.
+	dirty := false
+	for _, b := range raw {
+		if b < 0x20 && b != 0x09 && b != 0x0A && b != 0x0D {
+			dirty = true
+			break
+		}
+	}
+	if !dirty {
+		return raw
+	}
+	out := make([]byte, 0, len(raw))
+	for _, b := range raw {
+		if b < 0x20 && b != 0x09 && b != 0x0A && b != 0x0D {
+			continue
+		}
+		out = append(out, b)
+	}
+	return out
 }
