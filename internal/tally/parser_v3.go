@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -15,6 +16,12 @@ import (
 	"golang.org/x/text/encoding/unicode"
 	"golang.org/x/text/transform"
 )
+
+// illegalCharRefRE matches XML numeric character references — both
+// decimal (&#NNN;) and hexadecimal (&#xHH;). Used by sanitizeXMLBytes
+// to drop references that resolve to characters outside XML 1.0's
+// valid character set.
+var illegalCharRefRE = regexp.MustCompile(`&#[xX]?[0-9a-fA-F]+;`)
 
 // dumpDebugResponse writes the parser's input bytes (both before and
 // after decode/sanitize) to %ProgramData%\GST Reco\agent\debug-dumps\
@@ -103,15 +110,21 @@ func ParseDayBookV3(raw []byte) (ParseResult, error) {
 	// every ASCII char — caught during the PLLUM pilot 2026-04-27.
 	raw = decodeTallyResponse(raw)
 
-	// Then strip XML 1.0-illegal control characters from the (now
-	// UTF-8) bytes. Tally Prime emits NUL / EOT / SUB / etc.
-	// (0x00-0x08, 0x0B, 0x0C, 0x0E-0x1F) in narration, party-name,
-	// and address fields when the source data was pasted from a Word
-	// doc, copied from an old DOS report, or hand-typed with
-	// Alt-numpad. Go's encoding/xml refuses these even with
-	// Strict=false because they're outside XML's character set, not
-	// just shape-invalid.
+	// Then strip XML 1.0-illegal characters from the (now UTF-8)
+	// bytes. Two complementary passes:
+	//
+	//   - sanitizeXMLBytes:    drop literal control bytes (0x00-0x08,
+	//                          0x0B, 0x0C, 0x0E-0x1F).
+	//   - stripIllegalCharRefs: drop XML numeric character references
+	//                          that resolve to those same code-points
+	//                          (e.g. `&#4;`).
+	//
+	// Tally Prime emits both forms — literal bytes when the source
+	// was Alt-numpad typed, character references in legacy GSTCLASS /
+	// VATCLASSIFICATION fields. Without BOTH passes, Go's xml.Decoder
+	// rejects the response with "illegal character code U+xxxx".
 	raw = sanitizeXMLBytes(raw)
+	raw = stripIllegalCharRefs(raw)
 
 	// DEBUG (v0.1.6): on parse failure, write the bytes at each
 	// pipeline stage to %ProgramData%\GST Reco\agent\debug-dumps\
@@ -440,6 +453,51 @@ func decodeUTF16(raw []byte, order unicode.Endianness) []byte {
 		return out
 	}
 	return out
+}
+
+// stripIllegalCharRefs walks every XML numeric character reference
+// in the input and drops the ones that resolve to characters outside
+// XML 1.0's valid set. Tally Prime emits these in fields like
+// GSTCLASS as legacy markers — e.g. `<GSTCLASS>&#4; Not Applicable
+// </GSTCLASS>` was the smoking gun during the PLLUM pilot
+// 2026-04-27. The reference IS valid XML syntactically (4 bytes:
+// '&', '#', '4', ';') so a byte-level sanitizer can't catch it; the
+// damage happens when Go's xml.Decoder resolves it to U+0004.
+//
+// Valid XML 1.0 character set: 0x09, 0x0A, 0x0D, 0x20-0xD7FF,
+// 0xE000-0xFFFD, 0x10000-0x10FFFF. Anything else is dropped.
+//
+// References that fail to parse (badly-formed digits, out-of-range
+// codepoints) are left in place so the underlying error surfaces
+// rather than getting silently swallowed.
+func stripIllegalCharRefs(raw []byte) []byte {
+	if !illegalCharRefRE.Match(raw) {
+		return raw
+	}
+	return illegalCharRefRE.ReplaceAllFunc(raw, func(m []byte) []byte {
+		// m is "&#...;" or "&#x...;". Strip the '&#' prefix and ';' suffix.
+		body := string(m[2 : len(m)-1])
+		var n int
+		var err error
+		if len(body) > 0 && (body[0] == 'x' || body[0] == 'X') {
+			var v int64
+			v, err = strconv.ParseInt(body[1:], 16, 32)
+			n = int(v)
+		} else {
+			n, err = strconv.Atoi(body)
+		}
+		if err != nil {
+			return m // leave bad refs alone
+		}
+		// Valid XML 1.0 codepoint?
+		if n == 0x09 || n == 0x0A || n == 0x0D ||
+			(n >= 0x20 && n <= 0xD7FF) ||
+			(n >= 0xE000 && n <= 0xFFFD) ||
+			(n >= 0x10000 && n <= 0x10FFFF) {
+			return m // legit
+		}
+		return nil // drop the reference entirely
+	})
 }
 
 // sanitizeXMLBytes replaces XML-1.0-illegal control characters with
