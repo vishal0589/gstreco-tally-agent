@@ -24,6 +24,12 @@ type MasterRequest struct {
 // don't surprise us. `ISINITIALIZE="Yes"` forces Tally to rebuild the
 // collection (vs serving a cached one from a previous request) — a
 // diagnostic aid when the agent is chasing a master that isn't showing up.
+//
+// FETCH list covers v3 element names and Tally Prime 6.x variants for the
+// same fields. Tally returns whatever subset it has; the parser's
+// xmlLedger struct + firstNonEmpty in toRaw picks the populated value.
+// Asking for both names is cheap (Tally just emits empty elements for
+// the ones it doesn't have) and avoids 0% field coverage on Prime 6.x.
 var masterTmpl = template.Must(template.New("masters").Parse(`<ENVELOPE>
   <HEADER>
     <VERSION>1</VERSION>
@@ -41,8 +47,13 @@ var masterTmpl = template.Must(template.New("masters").Parse(`<ENVELOPE>
         <TDLMESSAGE>
           <COLLECTION NAME="GstrecoMasterCollection" ISINITIALIZE="Yes">
             <TYPE>Ledger</TYPE>
-            <FETCH>NAME, GUID, ALTERID, PARENT, LEDGERCONTACT, EMAIL, LEDGERPHONE, LEDGERMOBILE, PARTYGSTIN, GSTREGISTRATIONTYPE, STATENAME, COUNTRYNAME</FETCH>
-            <FETCH>MAILINGNAME.LIST, LEDGERMAILINGNAME.LIST, ADDRESS.LIST</FETCH>
+            <FETCH>NAME, GUID, ALTERID, PARENT, LEDGERCONTACT, CONTACTPERSON, COUNTRYNAME</FETCH>
+            <FETCH>EMAIL, EMAILID, LEDGEREMAIL, LEDGERMAIL</FETCH>
+            <FETCH>LEDGERPHONE, PHONENO, PHONENUMBER, CONTACTNUMBER</FETCH>
+            <FETCH>LEDGERMOBILE, LEDGERMOBILENO, MOBILENO, MOBILENUMBER</FETCH>
+            <FETCH>PARTYGSTIN, GSTIN, PARTYGSTNUMBER, GSTREGISTRATIONTYPE, PARTYREGISTRATIONTYPE</FETCH>
+            <FETCH>STATENAME, LEDSTATENAME, LEDGERSTATENAME, GSTSTATENAME, PARTYSTATENAME</FETCH>
+            <FETCH>MAILINGNAME.LIST, LEDGERMAILINGNAME.LIST, ADDRESS.LIST, LEDGERMAILINGADDRESS.LIST</FETCH>
             <FILTER>{{.Filter}}</FILTER>
           </COLLECTION>
           <SYSTEM TYPE="Formulae" NAME="{{.Filter}}">{{.FilterExpr}}</SYSTEM>

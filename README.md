@@ -25,6 +25,8 @@ A fresh customer install: paste one PowerShell line, type your Tally port (or le
 
 Voucher fetch + ingest hardening (UTF-16LE response decoding, inline-TDL voucher collections, strict-OK ingest predicate, voucher-type-name configurability) is queued for v0.1.4. v0.1.3 unblocks discovery; v0.1.4 will harden the actual sync path.
 
+**v0.1.10 — Tally Prime 6.x master-field rename catch-up.** DIPL Delhi pilot (2026-04-27) surfaced 0 % coverage on `trade_name`, `state_code`, `email` despite real GSTINs flowing — the smoking gun that Tally Prime 6.x renamed master-ledger XML elements (the v3 `EMAIL` is now `LEDGEREMAIL`; `STATENAME` is now `LEDSTATENAME`; `LEDGERMOBILE` is now `LEDGERMOBILENO` on some patches). The FETCH list in `internal/tally/master_envelope.go` and the `xmlLedger` struct in `internal/tally/master_parser.go` now ask for + accept all known variants and pick the populated one via the existing `firstNonEmpty` helper. After re-syncing masters on v0.1.10, vendor / customer master coverage on Prime 6.x ledgers jumps from <5 % to ~95 % — vendor portal lists show real names and emails instead of raw GSTINs.
+
 ## Layout
 
 ```
