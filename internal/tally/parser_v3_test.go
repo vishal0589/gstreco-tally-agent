@@ -498,3 +498,50 @@ func TestParseDayBookV3_HandlesWindows1252Bytes(t *testing.T) {
 		t.Errorf("Narration = %q", got.Vouchers[0].Narration)
 	}
 }
+
+func TestParseMastersV3_HandlesIllegalCharRef(t *testing.T) {
+	// Same v0.1.7 GSTCLASS bug applies to master responses (Tally
+	// embeds &#4; legacy markers in vendor address fields too).
+	xml := []byte(`<ENVELOPE>
+<HEADER><STATUS>1</STATUS></HEADER>
+<BODY><DATA><TALLYMESSAGE>
+<LEDGER NAME="Acme">
+<NAME>Acme</NAME>
+<GUID>g-1</GUID>
+<PARENT>Sundry Creditors</PARENT>
+<PARTYGSTIN>27ABCDE1234F1Z5</PARTYGSTIN>
+<EMAIL>a@b.com</EMAIL>
+<MAILINGNAME.LIST><MAILINGNAME>Acme&#4; Co</MAILINGNAME></MAILINGNAME.LIST>
+</LEDGER>
+</TALLYMESSAGE></DATA></BODY>
+</ENVELOPE>`)
+	got, err := ParseMastersV3(xml)
+	if err != nil {
+		t.Fatalf("ParseMastersV3 err = %v", err)
+	}
+	if len(got.Masters) != 1 {
+		t.Fatalf("expected 1 master, got %d", len(got.Masters))
+	}
+	if got.Masters[0].GSTIN != "27ABCDE1234F1Z5" {
+		t.Errorf("GSTIN = %q", got.Masters[0].GSTIN)
+	}
+	if got.Masters[0].Email != "a@b.com" {
+		t.Errorf("Email = %q", got.Masters[0].Email)
+	}
+}
+
+func TestParseMastersV3_HandlesInvalidUTF8(t *testing.T) {
+	// Windows-1252 right single quote in legacy ledger name.
+	xml := append([]byte(`<ENVELOPE><HEADER><STATUS>1</STATUS></HEADER><BODY><DATA><TALLYMESSAGE><LEDGER><NAME>Acme`), 0x92)
+	xml = append(xml, []byte(`s</NAME><GUID>g</GUID><PARENT>Sundry Creditors</PARENT><PARTYGSTIN>27A</PARTYGSTIN></LEDGER></TALLYMESSAGE></DATA></BODY></ENVELOPE>`)...)
+	got, err := ParseMastersV3(xml)
+	if err != nil {
+		t.Fatalf("ParseMastersV3 err = %v", err)
+	}
+	if len(got.Masters) != 1 {
+		t.Fatalf("expected 1 master, got %d", len(got.Masters))
+	}
+	if got.Masters[0].Name != "Acmes" {
+		t.Errorf("Name = %q (0x92 should be dropped)", got.Masters[0].Name)
+	}
+}
