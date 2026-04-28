@@ -25,6 +25,14 @@ A fresh customer install: paste one PowerShell line, type your Tally port (or le
 
 Voucher fetch + ingest hardening (UTF-16LE response decoding, inline-TDL voucher collections, strict-OK ingest predicate, voucher-type-name configurability) is queued for v0.1.4. v0.1.3 unblocks discovery; v0.1.4 will harden the actual sync path.
 
+**v0.1.11 — HSN carried through to ingest payload.** Server v0.1.21's migration 00049 added `purchase_invoices.hsn`, and v0.1.23's migration 00050 wired the `upsert_tally_purchase_invoices` RPC to accept the new field — but until v0.1.11 the agent never sent it. The HSN was already extracted into `RawVoucher.InventoryEntries[].HSN` (since v0.1.0), it just stayed agent-side. v0.1.11 carries it through:
+
+- **`IngestVoucherRow.HSN *string`** added in `internal/tally/ingest_types.go` (mirrors the new TS field on the server). `omitempty` so the wire payload stays compact when HSN is absent.
+- **`Normalize()`** sets `row.HSN` from the first non-empty inventory entry's `GSTHSNNAME`. `firstInventoryHSN` skips whitespace-only entries (Tally serialises legacy stock-items with `" "` when the HSN master field is blank). Service-only purchases (no `<INVENTORYENTRIES.LIST>`) leave HSN nil — the server-side classifier defaults to `is_capital_good=false` for unknown HSN, which is correct since services are never capital goods.
+- **Consolidated vouchers** carry the same first-HSN across every split row. HSN is a voucher-level fact in Tally — inventory entries aren't separately tagged to bill allocations.
+
+This unblocks the v0.1.11 capital-goods classifier (chapters 84/85/90) on real ingested data; before this PR the classifier saw `undefined` for every Tally-sourced row and always marked `is_capital_good=false`.
+
 **v0.1.10 — secretstore: applyDirACL fatal-on-fail + write-verify roundtrip.** DIPL Delhi pilot (2026-04-27) hit the silent-failure variant of `applyDirACL`: the directory-level icacls call failed (probably AV / GPO interference), Set() warned-and-continued, and the file ended up in a directory whose DACL the LocalSystem service couldn't traverse. The agent then 401-looped on every heartbeat with `read hmac secret from keyring failed: Access is denied`, taking 5+ hours to diagnose. v0.1.10 fixes this end-to-end:
 
 - **Fatal**: `applyDirACL` failure now returns from `Set()` instead of warning to stderr. Pair surfaces the error immediately.

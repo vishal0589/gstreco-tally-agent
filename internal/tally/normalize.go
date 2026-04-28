@@ -181,7 +181,37 @@ func baseRow(v RawVoucher, kind IngestKind, side IngestSide, invoice, taxable fl
 		r := rate
 		row.TaxRate = &r
 	}
+	// HSN — first non-empty inventory entry's GSTHSNNAME. Service-only
+	// purchases (no inventory) leave it nil, which the server treats as
+	// "unknown" and defaults to is_capital_good=false (correct: services
+	// are never capital goods).
+	//
+	// We pick the FIRST non-empty rather than aggregating because:
+	//   1. The capital-goods classifier is chapter-prefix matching
+	//      (chapters 84/85/90). Mixed-HSN vouchers are rare; when they
+	//      happen, the first item dominates the bucket choice.
+	//   2. Aggregation (e.g. most common HSN, or first-mode) would need
+	//      a lookup table on the server side that doesn't exist. The
+	//      first-non-empty rule is monotonic with what Tally itself
+	//      shows in the voucher report.
+	if hsn := firstInventoryHSN(v.InventoryEntries); hsn != "" {
+		h := hsn
+		row.HSN = &h
+	}
 	return row
+}
+
+// firstInventoryHSN returns the first non-empty HSN across inventory
+// entries, or "" when none. Whitespace-only HSNs are skipped — Tally
+// occasionally serialises legacy stock-items with " " when the HSN
+// master field is blank, and we don't want to send those upstream.
+func firstInventoryHSN(entries []InventoryEntry) string {
+	for _, e := range entries {
+		if h := strings.TrimSpace(e.HSN); h != "" {
+			return h
+		}
+	}
+	return ""
 }
 
 // inferKind derives IngestKind from the voucher's type name + ReverseCharge
