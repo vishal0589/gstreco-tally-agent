@@ -1,0 +1,63 @@
+name: ci
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: go vet + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go mod download
+        run: go mod download
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test -race -count=1 ./...
+
+  build-matrix:
+    name: cross-compile ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows-amd64
+            make: windows
+          - target: linux-amd64
+            make: linux
+          - target: darwin-arm64
+            make: darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: cross-compile
+        run: make ${{ matrix.make }}
+
+      - name: archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: gstreco-tally-agent-${{ matrix.target }}
+          path: dist/${{ matrix.target }}/
+          retention-days: 7

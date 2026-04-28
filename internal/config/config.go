@@ -1,0 +1,185 @@
+// Package config persists the agent's non-secret state (server URL,
+// connection id, device name, pairing timestamp) to a YAML file under
+// %ProgramData%\GST Reco\agent\ on Windows or ~/.gstreco-agent/ elsewhere.
+// Secrets (HMAC key, bearer token) live in the OS keyring — see package
+// keyring.
+package config
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+// FileName is the config filename within the config directory. Kept short so
+// it fits in Windows' credential-manager diagnostics cleanly.
+const FileName = "config.yaml"
+
+// Config is the on-disk shape of the agent's persistent state. Fields are
+// written lowercase (matching the YAML struct tags) so a user editing the
+// file by hand doesn't have to guess capitalisation. Zero values indicate an
+// unpaired agent.
+type Config struct {
+	// Server is the base URL of GST Reco (e.g. https://gstreco.m2ai.ai). The
+	// pair flow writes this from the --server flag; the ingest client reads
+	// it to construct request URLs.
+	Server string `yaml:"server,omitempty"`
+	// ConnectionID is the UUID the server allocated when the agent paired.
+	// Used as the x-tally-connection-id header on every signed request and as
+	// the keyring key prefix.
+	ConnectionID string `yaml:"connection_id,omitempty"`
+	// DeviceName is what the agent told the server at pair time. Usually the
+	// OS hostname. Surfaced in the server's /settings/tally connection list.
+	DeviceName string `yaml:"device_name,omitempty"`
+	// PairedAt is when the pair flow completed, in RFC-3339 format. Purely
+	// informational — the server has its own authoritative timestamp.
+	PairedAt time.Time `yaml:"paired_at,omitempty"`
+	// TallyEndpoint is the legacy single-endpoint field. Kept for back-
+	// compat with pre-A5-2 configs that paired against one Tally instance
+	// on the default port. New installs use TallyEndpoints (plural). The
+	// resolver below promotes this into TallyEndpoints when the latter is
+	// empty so any old config stays valid.
+	TallyEndpoint string `yaml:"tally_endpoint,omitempty"`
+	// TallyEndpoints is the multi-port list populated by `agentctl
+	// discover` (A5-2). Each Tally Prime instance binds a different port,
+	// so a single Windows box can host 5–6 endpoints under one paired
+	// agent. Empty = fall back to TallyEndpoint, then to
+	// tally.DefaultEndpoint.
+	TallyEndpoints []string `yaml:"tally_endpoints,omitempty"`
+	// LogLevel is "debug" | "info" | "warn" | "error". Blank = info.
+	LogLevel string `yaml:"log_level,omitempty"`
+	// ScheduleCron is the cron expression the daemon (A5) uses for
+	// scheduled syncs. Empty = scheduler.DefaultSpec ("0 2 * * *").
+	// Interpreted in the agent's local timezone (typically IST for
+	// the CA market we serve). Server-side
+	// `tally_connections.schedule_cron` is the authoritative source;
+	// the agent will sync this from heartbeat once B3 ships, but for
+	// V1 the local override here is the only knob.
+	ScheduleCron string `yaml:"schedule_cron,omitempty"`
+}
+
+// ResolveTallyEndpoints returns the effective list of Tally HTTP
+// endpoints the agent should poll. Order of preference:
+//
+//  1. TallyEndpoints (A5-2 multi-port config)
+//  2. TallyEndpoint (legacy single-port config)
+//  3. fallback (caller-supplied default, typically tally.DefaultEndpoint)
+//
+// Whitespace-only entries are dropped. Returned slice is a fresh copy
+// so callers that mutate it (e.g. dedup) don't poison the config.
+func (c *Config) ResolveTallyEndpoints(fallback string) []string {
+	if c == nil {
+		if fallback == "" {
+			return nil
+		}
+		return []string{fallback}
+	}
+	if len(c.TallyEndpoints) > 0 {
+		out := make([]string, 0, len(c.TallyEndpoints))
+		for _, e := range c.TallyEndpoints {
+			if e = strings.TrimSpace(e); e != "" {
+				out = append(out, e)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	if e := strings.TrimSpace(c.TallyEndpoint); e != "" {
+		return []string{e}
+	}
+	if fallback == "" {
+		return nil
+	}
+	return []string{fallback}
+}
+
+// ErrNotFound is returned by Load when the config file doesn't exist yet —
+// i.e. the agent has never been paired. Callers distinguish this from
+// corrupted-YAML errors to surface a clean "run `agentctl pair` first"
+// message.
+var ErrNotFound = errors.New("config: file not found")
+
+// IsPaired reports whether the config contains enough state for the ingest
+// client to sign a request. Missing Server or ConnectionID means the user
+// still needs to run `agentctl pair`.
+func (c *Config) IsPaired() bool {
+	return c != nil && c.Server != "" && c.ConnectionID != ""
+}
+
+// DefaultDir returns the platform-appropriate config directory. Windows
+// agents install service-wide to %ProgramData% so every user on the machine
+// sees the same pairing; non-Windows dev boxes use the invoking user's home
+// to avoid needing sudo for `make run`.
+func DefaultDir() string {
+	if runtime.GOOS == "windows" {
+		if pd := os.Getenv("ProgramData"); pd != "" {
+			return filepath.Join(pd, "GST Reco", "agent")
+		}
+		return `C:\ProgramData\GST Reco\agent`
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "gstreco-agent")
+	}
+	return filepath.Join(home, ".gstreco-agent")
+}
+
+// DefaultPath returns DefaultDir + FileName.
+func DefaultPath() string {
+	return filepath.Join(DefaultDir(), FileName)
+}
+
+// Load reads the config from path. Returns ErrNotFound (wrapped) if the file
+// is missing so callers can distinguish "never paired" from "file corrupted".
+func Load(path string) (*Config, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, path)
+		}
+		return nil, fmt.Errorf("config: read %s: %w", path, err)
+	}
+	var c Config
+	if err := yaml.Unmarshal(raw, &c); err != nil {
+		return nil, fmt.Errorf("config: parse %s: %w", path, err)
+	}
+	return &c, nil
+}
+
+// Save writes the config atomically: writes to a sibling .tmp file then
+// renames into place so a power loss mid-write can't leave a half-formatted
+// YAML file.
+//
+// File mode is 0o600 — owner-only read/write. The config doesn't hold the
+// HMAC secret (that's in the keyring), but it does hold connection_id +
+// server URL, which together with a leaked bearer token would let an
+// attacker forge ingest requests. Narrower-by-default keeps the same-box
+// threat model smaller on Unix. Windows ignores the mode argument and
+// inherits ACLs from %ProgramData% — Windows-specific hardening lands in
+// the MSI installer (A9) where we can set explicit DACLs.
+func Save(path string, c *Config) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("config: mkdir %s: %w", dir, err)
+	}
+	body, err := yaml.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("config: marshal: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, body, 0o600); err != nil {
+		return fmt.Errorf("config: write temp %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("config: rename %s → %s: %w", tmp, path, err)
+	}
+	return nil
+}

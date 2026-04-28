@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <STATUS>1</STATUS>
+  </HEADER>
+  <BODY>
+    <IMPORTDATA>
+      <REQUESTDESC>
+        <REPORTNAME>Vouchers</REPORTNAME>
+      </REQUESTDESC>
+      <REQUESTDATA>
+        <TALLYMESSAGE xmlns:UDF="TallyUDF">
+          <VOUCHER VCHTYPE="GST Purchase" ACTION="Create">
+            <DATE>01-Apr-26</DATE>
+            <GUID>fixture-wrapped-0001</GUID>
+            <ALTERID>12700</ALTERID>
+            <VOUCHERTYPENAME>GST Purchase</VOUCHERTYPENAME>
+            <VOUCHERNUMBER>PI/099/26-27</VOUCHERNUMBER>
+            <PARTYLEDGERNAME>Wrapped Vendor</PARTYLEDGERNAME>
+            <PARTYGSTIN>29WRAPD0001W1Z5</PARTYGSTIN>
+            <PLACEOFSUPPLY>Karnataka</PLACEOFSUPPLY>
+            <ISINVOICE>Yes</ISINVOICE>
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>Wrapped Vendor</LEDGERNAME>
+              <AMOUNT>-11800.00</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>IGST @ 18%</LEDGERNAME>
+              <AMOUNT>1800.00</AMOUNT>
+              <GSTCLASS>IGST@18</GSTCLASS>
+            </ALLLEDGERENTRIES.LIST>
+          </VOUCHER>
+        </TALLYMESSAGE>
+      </REQUESTDATA>
+    </IMPORTDATA>
+  </BODY>
+</ENVELOPE>
