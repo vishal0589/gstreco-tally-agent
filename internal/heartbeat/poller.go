@@ -120,8 +120,14 @@ func (p *Poller) Start(parent context.Context) {
 	}
 	ctx, cancel := context.WithCancel(parent)
 	p.cancel = cancel
-	p.done = make(chan struct{})
-	go p.loop(ctx)
+	done := make(chan struct{})
+	p.done = done
+	// Capture done into the closure so loop() doesn't have to read
+	// p.done after Start returns. Stop() may set p.done=nil under the
+	// mutex while loop() is mid-flight; the captured local ref keeps
+	// the close target stable. (Race detector flagged this on CI
+	// before — see TestStartStopIdempotent.)
+	go p.loop(ctx, done)
 }
 
 // Stop signals the loop to exit and waits for it to drain. Bounded
@@ -144,9 +150,11 @@ func (p *Poller) Stop() {
 
 // loop is the goroutine body. Fires immediately on Start (so a
 // freshly-started daemon picks up any backlog without a 60s wait),
-// then on every tick.
-func (p *Poller) loop(ctx context.Context) {
-	defer close(p.done)
+// then on every tick. Takes its done channel as an argument (rather
+// than reading p.done) so concurrent Stop() can safely null out
+// p.done without racing the loop's defer.
+func (p *Poller) loop(ctx context.Context, done chan struct{}) {
+	defer close(done)
 	p.poll(ctx)
 	ticker := time.NewTicker(p.opts.Interval)
 	defer ticker.Stop()

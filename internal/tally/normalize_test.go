@@ -266,6 +266,131 @@ func TestClassifyTaxLedger_PrefersGSTClassOverName(t *testing.T) {
 	}
 }
 
+func TestNormalize_HSNFromFirstInventoryEntry(t *testing.T) {
+	// v0.1.11 — HSN flows from first inventory entry through to
+	// IngestVoucherRow.HSN. Drives server-side capital-goods
+	// classifier + Sec 17(5) blocked-credit detector.
+	parsed, err := ParseDayBookV3(mustFixture(t, "voucher-v3-purchase-single.xml"))
+	if err != nil {
+		t.Fatalf("ParseDayBookV3: %v", err)
+	}
+	rows, err := Normalize(parsed.Vouchers[0], NormalizeOptions{})
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	r := rows[0]
+	if r.HSN == nil {
+		t.Fatalf("HSN should be populated from inventory entry; got nil")
+	}
+	if *r.HSN != "4802" {
+		t.Errorf("HSN = %q, want 4802 (from fixture's GSTHSNNAME)", *r.HSN)
+	}
+}
+
+func TestNormalize_HSNNilWhenNoInventoryEntries(t *testing.T) {
+	// Service-only purchases (no <INVENTORYENTRIES.LIST>) leave HSN nil.
+	// The server's capital-goods classifier defaults is_capital_good=false
+	// for unknown HSN, which is correct: services are never capital goods.
+	v := RawVoucher{
+		GUID: "service-only", IsInvoice: true,
+		Date:            parseDate(t, "2026-04-10"),
+		VoucherType:     "Purchase",
+		PartyLedgerName: "Vendor", PartyGSTIN: "29ABCDE1234F1Z5",
+		LedgerEntries: []LedgerEntry{
+			{LedgerName: "Vendor", Amount: -11800, IsPartyLedger: true,
+				BillAllocations: []BillRef{{Name: "INV-1", Amount: 11800, BillType: "New Ref"}}},
+			{LedgerName: "IGST", GSTClass: "IGST@18", Amount: 1800},
+			{LedgerName: "Service Account", Amount: 10000},
+		},
+		// No InventoryEntries — service-only.
+	}
+	rows, err := Normalize(v, NormalizeOptions{})
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if rows[0].HSN != nil {
+		t.Errorf("HSN = %v, want nil for service-only purchase", *rows[0].HSN)
+	}
+}
+
+func TestNormalize_HSNSkipsWhitespaceOnlyEntries(t *testing.T) {
+	// Tally serialises legacy stock-items with " " when the master
+	// HSN field is blank. We skip those and pick the first ACTUALLY
+	// non-empty HSN downstream — guards against sending whitespace
+	// codes to the server's classifier (which strips them server-side
+	// but the wire payload should be clean).
+	v := RawVoucher{
+		GUID: "mixed-hsn", IsInvoice: true,
+		Date:            parseDate(t, "2026-04-10"),
+		VoucherType:     "Purchase",
+		PartyLedgerName: "Vendor", PartyGSTIN: "29ABCDE1234F1Z5",
+		LedgerEntries: []LedgerEntry{
+			{LedgerName: "Vendor", Amount: -11800, IsPartyLedger: true,
+				BillAllocations: []BillRef{{Name: "INV-1", Amount: 11800, BillType: "New Ref"}}},
+			{LedgerName: "IGST", GSTClass: "IGST@18", Amount: 1800},
+			{LedgerName: "Purchase", Amount: 10000},
+		},
+		InventoryEntries: []InventoryEntry{
+			{StockItem: "Legacy item", HSN: "   "},
+			{StockItem: "Computer", HSN: "8471", Quantity: 1, Rate: 50000, Amount: 50000},
+			{StockItem: "Mouse", HSN: "8517"},
+		},
+	}
+	rows, err := Normalize(v, NormalizeOptions{})
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if rows[0].HSN == nil {
+		t.Fatal("HSN should pick the first non-whitespace entry")
+	}
+	if *rows[0].HSN != "8471" {
+		t.Errorf("HSN = %q, want 8471 (skipping whitespace-only first entry)", *rows[0].HSN)
+	}
+}
+
+func TestNormalize_HSNCarriesAcrossConsolidatedBills(t *testing.T) {
+	// Multi-bill (consolidated) vouchers: every split row from the
+	// same voucher carries the same first-HSN. The first-HSN is a
+	// voucher-level fact, not a bill-level fact — Tally doesn't
+	// separately tag inventory entries to bill allocations.
+	v := RawVoucher{
+		GUID: "consolidated", IsInvoice: true,
+		Date:            parseDate(t, "2026-04-10"),
+		VoucherType:     "Purchase",
+		PartyLedgerName: "Vendor", PartyGSTIN: "29ABCDE1234F1Z5",
+		LedgerEntries: []LedgerEntry{
+			{LedgerName: "Vendor", Amount: -23600, IsPartyLedger: true,
+				BillAllocations: []BillRef{
+					{Name: "BILL-A", Amount: 11800, BillType: "New Ref"},
+					{Name: "BILL-B", Amount: 11800, BillType: "New Ref"},
+				}},
+			{LedgerName: "IGST", GSTClass: "IGST@18", Amount: 3600},
+			{LedgerName: "Purchase", Amount: 20000},
+		},
+		InventoryEntries: []InventoryEntry{
+			{StockItem: "Computer", HSN: "8471"},
+		},
+	}
+	rows, err := Normalize(v, NormalizeOptions{})
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(rows))
+	}
+	for i, r := range rows {
+		if r.HSN == nil || *r.HSN != "8471" {
+			t.Errorf("rows[%d].HSN = %v, want %q", i, r.HSN, "8471")
+		}
+	}
+}
+
 // --- helpers ---
 
 func nearly(a, b, eps float64) bool { return math.Abs(a-b) <= eps }

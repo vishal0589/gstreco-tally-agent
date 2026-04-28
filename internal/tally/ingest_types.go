@@ -57,6 +57,14 @@ type IngestVoucherRow struct {
 	// server ignores the field; for credit_note/debit_note the agent sets
 	// it from the party ledger's group in Tally.
 	Side *IngestSide `json:"side,omitempty"`
+	// HSN/SAC code from the voucher's first inventory entry. Purchase-side
+	// only (sales_invoices has no hsn column). Drives the server's v0.1.11
+	// capital-goods classifier (chapters 84/85/90) and the Sec 17(5)
+	// HSN-based blocked-credit detector. Vouchers without inventory entries
+	// (service-only purchases) leave it nil; the server-side classifier
+	// defaults is_capital_good=false there, which is correct since services
+	// are never capital goods.
+	HSN *string `json:"hsn,omitempty"`
 }
 
 // IngestMasterItem is one party-master row sent to /api/tally/masters.
