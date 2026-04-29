@@ -8,7 +8,9 @@
 //   - Load config + keyring secret
 //   - Build ingest client (one, reused across all ticks)
 //   - Schedule syncs via internal/scheduler (cron expression from
-//     config; default "0 2 * * *" = 02:00 local daily)
+//     config; default "0 11,13,15,17 * * *" = 11am/1pm/3pm/5pm
+//     local daily, with 1h+2h retry-with-backoff per tick on
+//     failure — see internal/scheduler.DefaultRetryDelays)
 //   - Each tick: fetch active mappings via S15 GET /mappings/active,
 //     walk them via syncrun.WalkAll, log per-mapping results
 //   - Graceful shutdown on SIGINT/SIGTERM (cron drains in-flight tick)

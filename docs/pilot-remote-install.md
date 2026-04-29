@@ -289,8 +289,11 @@ The full daemon (A5) with cron + tray + Windows service is not yet
 built. For the pilot, schedule `sync-all` via Windows Task Scheduler:
 
 ```powershell
-# Daily at 02:00 IST
-schtasks /Create /TN "GST Reco Tally Sync" /TR "C:\path\to\gstreco-tally-agentctl.exe sync-all --period 042026" /SC DAILY /ST 02:00 /RU SYSTEM
+# Daily at 11:00 IST (working hours — Tally is reliably open)
+# Pre-v0.1.12 this example used 02:00; changed after the
+# 2026-04-29 DIPL incident demonstrated overnight ticks silently
+# fail when Tally is closed at the scheduled minute.
+schtasks /Create /TN "GST Reco Tally Sync" /TR "C:\path\to\gstreco-tally-agentctl.exe sync-all --period 042026" /SC DAILY /ST 11:00 /RU SYSTEM
 ```
 
 Note: `--period` baked in once means the task syncs the SAME month
