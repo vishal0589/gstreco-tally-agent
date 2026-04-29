@@ -55,12 +55,16 @@ type Config struct {
 	// LogLevel is "debug" | "info" | "warn" | "error". Blank = info.
 	LogLevel string `yaml:"log_level,omitempty"`
 	// ScheduleCron is the cron expression the daemon (A5) uses for
-	// scheduled syncs. Empty = scheduler.DefaultSpec ("0 2 * * *").
-	// Interpreted in the agent's local timezone (typically IST for
-	// the CA market we serve). Server-side
-	// `tally_connections.schedule_cron` is the authoritative source;
-	// the agent will sync this from heartbeat once B3 ships, but for
-	// V1 the local override here is the only knob.
+	// scheduled syncs. Empty = scheduler.DefaultSpec
+	// ("0 11,13,15,17 * * *" — fires at 11am/1pm/3pm/5pm in the
+	// agent's local timezone, typically IST for the CA market).
+	// Pre-v0.1.12 the default was "0 2 * * *" (overnight); changed
+	// after the 2026-04-29 DIPL incident demonstrated that overnight
+	// ticks silently waited 24 hours when Tally was closed at the
+	// scheduled minute. Server-side `tally_connections.schedule_cron`
+	// is the authoritative source; the agent will sync this from
+	// heartbeat once B3 ships, but for V1 the local override here is
+	// the only knob.
 	ScheduleCron string `yaml:"schedule_cron,omitempty"`
 }
 

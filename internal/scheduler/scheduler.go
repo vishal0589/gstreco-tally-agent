@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -16,10 +17,29 @@ import (
 )
 
 // DefaultSpec is the cron expression used when config.ScheduleCron is
-// empty. Matches the master plan's "02:00 daily" default and aligns
-// with the typical CA workflow: GSTR-2B becomes available in the
-// morning, sync runs overnight before the operator opens the laptop.
-const DefaultSpec = "0 2 * * *"
+// empty. Fires at the top of 11am, 1pm, 3pm, 5pm in the configured
+// timezone (typically IST for the CA market). Pre-v0.1.12 the default
+// was "0 2 * * *" — daily 2am — which silently failed for any
+// customer whose Tally instance was closed at that minute (DIPL hit
+// this 2026-04-29: scheduler ran at 2am IST, Tally was closed,
+// connection refused on every kind, scheduler waited a full 24 hours
+// before its next attempt). Working-hours ticks plus per-tick
+// retry-with-backoff (DefaultRetryDelays below) keep customers fresh
+// without depending on the operator running Tally overnight.
+const DefaultSpec = "0 11,13,15,17 * * *"
+
+// DefaultRetryDelays is the per-attempt retry schedule applied to
+// cron-driven ticks that return a non-nil error from TickFunc. The
+// first failed tick re-fires after 1 hour, the second after 2 more
+// hours, and then the scheduler waits for the next cron tick. With
+// the working-hours DefaultSpec this gives roughly hourly recovery
+// during the customer's business day without retry storms. RunNow
+// (operator-triggered "Sync now") does NOT retry — the operator is
+// already in front of the dashboard and can re-click if needed.
+//
+// Pass RetryDelays: []time.Duration{} via Options to disable retries
+// (e.g. tests that assert "single tick").
+var DefaultRetryDelays = []time.Duration{1 * time.Hour, 2 * time.Hour}
 
 // TickFunc is the callback fired on each scheduled tick. It receives
 // a fresh ctx with the run's deadline already applied. Returning an
@@ -35,18 +55,32 @@ type Scheduler struct {
 	tickFn   TickFunc
 	deadline time.Duration
 
+	retryDelays []time.Duration
+
 	// Track running ticks so Stop() can wait for them. cron's own
 	// Stop() returns a context that completes when running jobs
 	// finish, but we want explicit visibility for tests.
 	mu      sync.Mutex
 	running int
+	// retryTimers holds outstanding time.AfterFunc timers from
+	// scheduleRetry. Stop() walks this slice to cancel pending
+	// retries so a wedged customer doesn't keep firing ticks
+	// after their daemon was supposed to shut down.
+	retryTimers []*time.Timer
+
+	// stopped is set true at the start of Stop(). Pending retries
+	// (whose timer may already have started its countdown when the
+	// timer is cancelled but the goroutine could still race in)
+	// observe this and short-circuit before calling tickFn.
+	stopped atomic.Bool
 }
 
 // Options configures a new Scheduler.
 type Options struct {
 	// Spec is a cron expression. Empty = DefaultSpec. The cron
 	// flavour is robfig/cron/v3 with seconds disabled (5-field POSIX
-	// crontab). "0 2 * * *" = 02:00 every day.
+	// crontab). "0 11,13,15,17 * * *" = 11:00, 13:00, 15:00, 17:00
+	// every day.
 	Spec string
 	// TickFunc fires on each scheduled tick. Required.
 	TickFunc TickFunc
@@ -59,8 +93,13 @@ type Options struct {
 	Logger zerolog.Logger
 	// Location is the timezone the cron expression interprets.
 	// Empty = time.Local. Daemon uses time.Local so a CA on IST
-	// who configures "0 2 * * *" gets 02:00 IST, not UTC.
+	// who configures "0 11,13,15,17 * * *" gets local IST, not UTC.
 	Location *time.Location
+	// RetryDelays is the per-attempt retry schedule applied to
+	// cron-driven ticks that return a non-nil error from TickFunc.
+	// nil = DefaultRetryDelays. Pass an empty slice ([]time.Duration{})
+	// to disable retries entirely (mostly useful in tests).
+	RetryDelays []time.Duration
 }
 
 // New builds a Scheduler. Returns an error for an invalid cron spec
@@ -79,11 +118,17 @@ func New(opts Options) (*Scheduler, error) {
 		loc = time.Local
 	}
 
+	delays := opts.RetryDelays
+	if delays == nil {
+		delays = DefaultRetryDelays
+	}
+
 	s := &Scheduler{
-		logger:   opts.Logger,
-		spec:     spec,
-		tickFn:   opts.TickFunc,
-		deadline: opts.PerTickDeadline,
+		logger:      opts.Logger,
+		spec:        spec,
+		tickFn:      opts.TickFunc,
+		deadline:    opts.PerTickDeadline,
+		retryDelays: delays,
 	}
 
 	c := cron.New(cron.WithLocation(loc), cron.WithLogger(cron.DefaultLogger))
@@ -109,8 +154,19 @@ func (s *Scheduler) Start() {
 // Stop halts new ticks and waits for any in-flight tick to finish.
 // Bounded by the per-tick deadline so a wedged tick doesn't block
 // shutdown forever — the deadline cancels the tick's ctx, the tick
-// returns, and Stop returns.
+// returns, and Stop returns. Also cancels any pending retry timers
+// scheduled by scheduleRetry so a stuck-customer's daemon doesn't
+// keep firing ticks after shutdown.
 func (s *Scheduler) Stop() {
+	s.stopped.Store(true)
+
+	s.mu.Lock()
+	for _, t := range s.retryTimers {
+		t.Stop()
+	}
+	s.retryTimers = nil
+	s.mu.Unlock()
+
 	stopCtx := s.cron.Stop()
 	<-stopCtx.Done()
 	s.logger.Info().Msg("scheduler stopped")
@@ -126,9 +182,53 @@ func (s *Scheduler) RunNow(ctx context.Context) error {
 
 // runTick is the cron-invoked entry point. Uses background ctx so a
 // tick keeps running even if some upstream caller's ctx was
-// cancelled. Per-tick deadline is applied internally.
+// cancelled. Per-tick deadline is applied internally. Failures
+// schedule a retry per retryDelays — see scheduleRetry. RunNow does
+// NOT route through here, so operator-triggered ticks are not
+// retried.
 func (s *Scheduler) runTick() {
-	_ = s.runTickWithCtx(context.Background())
+	if err := s.runTickWithCtx(context.Background()); err != nil {
+		s.scheduleRetry(0)
+	}
+}
+
+// scheduleRetry queues a delayed retry of the tick after a
+// cron-driven failure. attempt is the 0-indexed offset into
+// retryDelays — 0 = first retry, 1 = second, and so on. After the
+// last retry attempt the scheduler waits for the next cron tick.
+//
+// If the retry itself fails, scheduleRetry is called recursively
+// with attempt+1; the recursion bottoms out when attempt is past
+// the end of retryDelays.
+//
+// Stop() flips s.stopped before cancelling timers; the inner
+// goroutine re-checks s.stopped after the timer fires to avoid a
+// race where the timer.Stop() in Stop() lost (Go 1.22+: timer.Stop
+// returns false even when the func has already started running).
+func (s *Scheduler) scheduleRetry(attempt int) {
+	if s.stopped.Load() {
+		return
+	}
+	if attempt >= len(s.retryDelays) {
+		return
+	}
+	delay := s.retryDelays[attempt]
+	s.logger.Info().
+		Int("attempt", attempt+1).
+		Int("max_attempts", len(s.retryDelays)).
+		Dur("delay", delay).
+		Msg("scheduler tick failed; queued retry")
+	timer := time.AfterFunc(delay, func() {
+		if s.stopped.Load() {
+			return
+		}
+		if err := s.runTickWithCtx(context.Background()); err != nil {
+			s.scheduleRetry(attempt + 1)
+		}
+	})
+	s.mu.Lock()
+	s.retryTimers = append(s.retryTimers, timer)
+	s.mu.Unlock()
 }
 
 func (s *Scheduler) runTickWithCtx(parent context.Context) error {
