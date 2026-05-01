@@ -150,6 +150,7 @@ func WalkAll(ctx context.Context, opts WalkOptions) WalkResult {
 			runCtx, cancelRun := context.WithTimeout(ctx, timeout)
 			runRes, runErr := RunOne(runCtx, tallyClient, opts.Sender, Request{
 				TallyCompany: m.TallyCompanyName,
+				TallyEndpoint: m.TallyEndpoint,
 				TallyKind:    kind.Tally,
 				IngestKind:   kind.Ingest,
 				From:         opts.From,

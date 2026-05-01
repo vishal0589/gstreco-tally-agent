@@ -67,6 +67,7 @@ func (f *fakeSender) Send(_ context.Context, body tally.IngestRequestBody) error
 func makeReq() Request {
 	return Request{
 		TallyCompany: "PLLUM CASA",
+		TallyEndpoint: "http://127.0.0.1:9000",
 		TallyKind:    tally.VoucherPurchase,
 		IngestKind:   tally.IngestKindPurchase,
 		From:         time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
@@ -87,6 +88,9 @@ func TestRunOne_HappyPath_PostsOneBatch(t *testing.T) {
 	if len(snd.sent) != 1 || res.BatchesSent != 1 {
 		t.Errorf("sent=%d res.BatchesSent=%d, want 1", len(snd.sent), res.BatchesSent)
 	}
+	if snd.sent[0].TallyEndpoint == nil || *snd.sent[0].TallyEndpoint != "http://127.0.0.1:9000" {
+		t.Errorf("TallyEndpoint=%v, want http://127.0.0.1:9000", snd.sent[0].TallyEndpoint)
+	}
 	if res.RowCount != 1 {
 		t.Errorf("RowCount=%d, want 1", res.RowCount)
 	}
@@ -98,6 +102,65 @@ func TestRunOne_HappyPath_PostsOneBatch(t *testing.T) {
 	}
 	if res.ParseStatus != 1 {
 		t.Errorf("ParseStatus=%d, want 1", res.ParseStatus)
+	}
+}
+
+func TestRunOne_ReferenceOnlyVoucherStillPostsBatch(t *testing.T) {
+	const referenceOnlyVoucher = `<ENVELOPE>
+  <HEADER><STATUS>1</STATUS></HEADER>
+  <BODY><DATA><COLLECTION>
+    <VOUCHER>
+      <DATE>20260410</DATE>
+      <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+      <REFERENCE>SUPP-INV-5501</REFERENCE>
+      <PARTYLEDGERNAME>SMOKE Vendors Ltd</PARTYLEDGERNAME>
+      <PARTYGSTIN>29ABCDE1234F1Z5</PARTYGSTIN>
+      <ISINVOICE>Yes</ISINVOICE>
+      <ISCANCELLED>No</ISCANCELLED>
+      <ALLLEDGERENTRIES.LIST>
+        <LEDGERNAME>SMOKE Vendors Ltd</LEDGERNAME>
+        <AMOUNT>-11800.00</AMOUNT>
+        <BILLALLOCATIONS.LIST>
+          <NAME>SUPP-INV-5501</NAME>
+          <BILLTYPE>New Ref</BILLTYPE>
+          <AMOUNT>-11800.00</AMOUNT>
+        </BILLALLOCATIONS.LIST>
+      </ALLLEDGERENTRIES.LIST>
+      <ALLLEDGERENTRIES.LIST>
+        <LEDGERNAME>Purchases A/c</LEDGERNAME>
+        <AMOUNT>10000.00</AMOUNT>
+      </ALLLEDGERENTRIES.LIST>
+      <ALLLEDGERENTRIES.LIST>
+        <LEDGERNAME>IGST @ 18%</LEDGERNAME>
+        <GSTCLASS>IGST@18</GSTCLASS>
+        <AMOUNT>1800.00</AMOUNT>
+      </ALLLEDGERENTRIES.LIST>
+    </VOUCHER>
+  </COLLECTION></DATA></BODY>
+</ENVELOPE>`
+
+	tly := &fakeTally{resp: []byte(referenceOnlyVoucher)}
+	snd := &fakeSender{}
+
+	res, err := RunOne(context.Background(), tly, snd, makeReq(), nil)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if len(snd.sent) != 1 || res.BatchesSent != 1 {
+		t.Fatalf("sent=%d batchesSent=%d, want 1", len(snd.sent), res.BatchesSent)
+	}
+	if res.RowCount != 1 {
+		t.Fatalf("RowCount=%d, want 1", res.RowCount)
+	}
+	row := snd.sent[0].Batch[0]
+	if row.InvoiceNumber != "SUPP-INV-5501" {
+		t.Errorf("InvoiceNumber=%q, want SUPP-INV-5501", row.InvoiceNumber)
+	}
+	if row.TallyVoucherGUID != nil {
+		t.Errorf("TallyVoucherGUID=%v, want nil when GUID is absent", row.TallyVoucherGUID)
+	}
+	if res.ParseWarnings != nil && len(res.ParseWarnings) != 0 {
+		t.Errorf("unexpected parse warnings: %v", res.ParseWarnings)
 	}
 }
 

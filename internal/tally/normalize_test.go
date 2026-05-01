@@ -125,6 +125,45 @@ func TestNormalize_ConsolidatedProratedByBillShare(t *testing.T) {
 	}
 }
 
+func TestNormalize_ConsolidatedWithoutGUIDUsesFallbackParentRef(t *testing.T) {
+	v := RawVoucher{
+		IsInvoice:       true,
+		Date:            parseDate(t, "2026-04-10"),
+		VoucherType:     "GST Purchase",
+		Reference:       "SUPP-INV-5501",
+		PartyLedgerName: "ABC Vendors Ltd",
+		LedgerEntries: []LedgerEntry{
+			{
+				LedgerName:    "ABC Vendors Ltd",
+				Amount:        -118000,
+				IsPartyLedger: true,
+				BillAllocations: []BillRef{
+					{Name: "PQR/APR/101", Amount: -70800, BillType: "New Ref"},
+					{Name: "PQR/APR/102", Amount: -47200, BillType: "New Ref"},
+				},
+			},
+			{LedgerName: "Purchase A/c", Amount: 100000},
+			{LedgerName: "IGST @ 18%", Amount: 18000, GSTClass: "IGST@18"},
+		},
+	}
+
+	rows, err := Normalize(v, NormalizeOptions{})
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(rows))
+	}
+	for i, row := range rows {
+		if row.ParentRef == nil || *row.ParentRef != "SUPP-INV-5501" {
+			t.Errorf("row %d ParentRef = %v, want SUPP-INV-5501", i, row.ParentRef)
+		}
+		if row.TallyVoucherGUID != nil {
+			t.Errorf("row %d TallyVoucherGUID = %v, want nil when GUID is absent", i, row.TallyVoucherGUID)
+		}
+	}
+}
+
 func TestNormalize_ConsolidatedThreeBillsSumToOriginal(t *testing.T) {
 	// Three equal bills with a tax total that doesn't divide evenly (₹55 /
 	// 3 = 18.333...). With naive proration each row rounds to 18.33 and the
