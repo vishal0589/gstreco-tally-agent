@@ -474,6 +474,9 @@ func makeTickFunc(
 					Int("rows", r.RowCount).
 					Int("sent", r.BatchesSent).
 					Int("failed", r.BatchesFailed).
+					Int("landed", r.ServerInserted+r.ServerAmended).
+					Int("skipped", r.ServerSkipped).
+					Int("server_errors", r.ServerErrors).
 					Msg("per-kind result")
 			},
 		})
@@ -483,6 +486,8 @@ func makeTickFunc(
 			Int("rows", res.TotalRows).
 			Int("batches_sent", res.TotalBatchesSent).
 			Int("batches_failed", res.TotalBatchesFailed).
+			Int("server_skipped", res.TotalServerSkipped).
+			Int("server_errors", res.TotalServerErrors).
 			Int("fatal_errors", res.FatalErrors).
 			Msg("tick complete")
 

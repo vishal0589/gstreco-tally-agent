@@ -189,10 +189,19 @@ func runSyncAll(stdout, stderr io.Writer, args []string, deps syncAllDeps) int {
 				fmt.Fprintf(stderr, "  ✗ %s: %v\n", k.Name, fatalErr)
 				return
 			}
-			fmt.Fprintf(stdout, "    %s: rows=%d sent=%d failed=%d\n",
-				k.Name, r.RowCount, r.BatchesSent, r.BatchesFailed)
+			fmt.Fprintf(stdout, "    %s: rows=%d sent=%d failed=%d landed=%d skipped=%d server_errors=%d\n",
+				k.Name,
+				r.RowCount,
+				r.BatchesSent,
+				r.BatchesFailed,
+				r.ServerInserted+r.ServerAmended,
+				r.ServerSkipped,
+				r.ServerErrors)
 			for _, w := range r.ParseWarnings {
 				fmt.Fprintf(stdout, "      ⚠ %s\n", w)
+			}
+			for _, f := range r.ServerFindings {
+				fmt.Fprintf(stdout, "      ⚠ %s\n", formatServerFinding(f))
 			}
 		},
 		PerRunProgress: func(_ ingest.ActiveMapping, k syncrun.KindPair) syncrun.Progress {
@@ -206,11 +215,12 @@ func runSyncAll(stdout, stderr io.Writer, args []string, deps syncAllDeps) int {
 	}
 
 	fmt.Fprintf(stdout,
-		"\nsummary: %d/%d mapping(s) ran · rows=%d · batches sent=%d failed=%d · fatal errors=%d\n",
+		"\nsummary: %d/%d mapping(s) ran · rows=%d · batches sent=%d failed=%d · skipped=%d · server errors=%d · fatal errors=%d\n",
 		res.MappingsRun, len(mappings.Mappings), res.TotalRows,
-		res.TotalBatchesSent, res.TotalBatchesFailed, res.FatalErrors)
+		res.TotalBatchesSent, res.TotalBatchesFailed,
+		res.TotalServerSkipped, res.TotalServerErrors, res.FatalErrors)
 
-	if res.FatalErrors > 0 || res.TotalBatchesFailed > 0 {
+	if res.FatalErrors > 0 || res.TotalBatchesFailed > 0 || res.TotalServerErrors > 0 {
 		return 1
 	}
 	if *dryRun {
@@ -292,7 +302,7 @@ func makeSyncAllProgress(stdout, stderr io.Writer, kindName string) syncrun.Prog
 		case "batch_sending":
 			fmt.Fprintf(stdout, "    → %s %s\n", kindName, e.Message)
 		case "batch_sent":
-			fmt.Fprintf(stdout, "      ✓ accepted\n")
+			fmt.Fprintf(stdout, "      ✓ %s\n", e.Message)
 		case "batch_failed":
 			if se := ingest.IsSendError(e.Err); se != nil {
 				fmt.Fprintf(stderr, "      ✗ %s status=%d snippet=%q retryable=%t\n",

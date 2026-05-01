@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/vishal0589/gstreco-tally-agent/internal/config"
+	"github.com/vishal0589/gstreco-tally-agent/internal/ingest"
 	"github.com/vishal0589/gstreco-tally-agent/internal/keyring"
 	"github.com/vishal0589/gstreco-tally-agent/internal/tally"
 )
@@ -136,11 +137,19 @@ func (f *fakeTallyPoster) PostXML(_ context.Context, body []byte) ([]byte, error
 type fakeIngestSender struct {
 	sent []tally.IngestRequestBody
 	err  error
+	resp ingest.AcceptedResponse
 }
 
-func (f *fakeIngestSender) Send(_ context.Context, body tally.IngestRequestBody) error {
+func (f *fakeIngestSender) Send(_ context.Context, body tally.IngestRequestBody) (ingest.AcceptedResponse, error) {
 	f.sent = append(f.sent, body)
-	return f.err
+	if f.err != nil {
+		return ingest.AcceptedResponse{}, f.err
+	}
+	resp := f.resp
+	if resp.Counters == (ingest.AcceptedCounters{}) {
+		resp.Counters.Inserted = len(body.Batch)
+	}
+	return resp, nil
 }
 
 // stubResponse is a minimal valid Tally Prime 3.x day-book response with one
@@ -290,6 +299,65 @@ func TestRunSync_DryRunSkipsKeyringAndSend(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "dry-run complete") {
 		t.Errorf("missing dry-run line: %s", stdout.String())
+	}
+}
+
+func TestRunSync_SurfacesServerFindings(t *testing.T) {
+	tally := &fakeTallyPoster{resp: []byte(stubResponse)}
+	sender := &fakeIngestSender{
+		resp: ingest.AcceptedResponse{
+			OK:    true,
+			RunID: "server-run",
+			Counters: ingest.AcceptedCounters{
+				Inserted: 0,
+				Skipped:  1,
+			},
+			Findings: ingest.AcceptedFindings{
+				MissingGSTIN: []ingest.ValidationFinding{
+					{
+						RowIndex:    0,
+						ErrorType:   "invalid_gstin",
+						ErrorDetail: "Vendor GSTIN is missing.",
+						Severity:    "error",
+					},
+				},
+			},
+		},
+	}
+	store := keyring.NewMemoryStore()
+	hk, bk := keyring.ConnectionKeys("conn-123")
+	_ = store.Set(keyring.ServiceName, hk, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+	_ = store.Set(keyring.ServiceName, bk, "bearer-token")
+
+	deps := syncDeps{
+		now:            time.Now,
+		newOSKeyring:   func() keyring.Store { return store },
+		newTallyClient: func(string) tallyPoster { return tally },
+		newIngestClient: func(_, _, _, _ string) (ingestSender, error) {
+			return sender, nil
+		},
+		loadConfig: func(string) (*config.Config, error) {
+			return &config.Config{
+				Server:       "https://example.test",
+				ConnectionID: "conn-123",
+			}, nil
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runSync(&stdout, &stderr, []string{
+		"--tally-company", "PLLUM CASA",
+		"--kind", "purchase",
+		"--period", "042026",
+	}, deps)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s, stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "accepted (inserted=0 amended=0 skipped=1 errors=0)") {
+		t.Errorf("stdout missing accepted counters: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "missing_gstin row_index=0 invalid_gstin: Vendor GSTIN is missing.") {
+		t.Errorf("stdout missing surfaced finding: %s", stdout.String())
 	}
 }
 

@@ -26,7 +26,7 @@ type TallyPoster interface {
 // IngestSender is the narrow surface RunOne uses to talk to GST Reco.
 // Real callers pass a *ingest.Client; tests pass fakes.
 type IngestSender interface {
-	Send(ctx context.Context, body tally.IngestRequestBody) error
+	Send(ctx context.Context, body tally.IngestRequestBody) (ingest.AcceptedResponse, error)
 }
 
 // Request describes one fetch-and-ingest cycle: a single (Tally
@@ -88,6 +88,17 @@ type Result struct {
 	// (unparsable date, malformed amount, dropped voucher). Same
 	// purpose as DroppedOnNormalize at parser-level.
 	ParseWarnings []string
+	// ServerInserted / ServerAmended / ServerSkipped / ServerErrors are
+	// the counters returned by the app on 2xx ingest responses. They are
+	// authoritative for what the server says actually landed.
+	ServerInserted int
+	ServerAmended  int
+	ServerSkipped  int
+	ServerErrors   int
+	// ServerFindings are the flattened validation findings returned by
+	// the app on 2xx ingest responses (missing GSTIN, rejected purchase
+	// row, rejected sales row, etc).
+	ServerFindings []ingest.ValidationFinding
 }
 
 // BatchError carries detail for one failed ingest batch. Index is
@@ -231,7 +242,8 @@ func RunOne(
 			fmt.Sprintf("batch %d/%d (%d rows, request_id=%s, is_final=%t)",
 				i+1, len(batches), len(body.Batch), body.RequestID, body.IsFinal),
 			nil)
-		if sendErr := sender.Send(ctx, body); sendErr != nil {
+		accepted, sendErr := sender.Send(ctx, body)
+		if sendErr != nil {
 			res.BatchesFailed++
 			res.BatchErrors = append(res.BatchErrors, BatchError{
 				Index:     i + 1,
@@ -246,8 +258,21 @@ func RunOne(
 			// time.
 			continue
 		}
+		res.ServerInserted += accepted.Counters.Inserted
+		res.ServerAmended += accepted.Counters.Amended
+		res.ServerSkipped += accepted.Counters.Skipped
+		res.ServerErrors += accepted.Counters.Errors
+		if findings := accepted.AllFindings(); len(findings) > 0 {
+			res.ServerFindings = append(res.ServerFindings, findings...)
+		}
 		res.BatchesSent++
-		emitBatch("batch_sent", i+1, len(batches), "accepted", nil)
+		emitBatch("batch_sent", i+1, len(batches),
+			fmt.Sprintf("accepted (inserted=%d amended=%d skipped=%d errors=%d)",
+				accepted.Counters.Inserted,
+				accepted.Counters.Amended,
+				accepted.Counters.Skipped,
+				accepted.Counters.Errors),
+			nil)
 	}
 
 	emit("complete", fmt.Sprintf("sent=%d failed=%d rows=%d",

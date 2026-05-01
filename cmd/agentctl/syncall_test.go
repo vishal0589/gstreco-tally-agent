@@ -38,11 +38,19 @@ type fakeSyncAllIngest struct {
 	fetchErr    error
 	sent        []tally.IngestRequestBody
 	sendErr     error
+	resp        ingest.AcceptedResponse
 }
 
-func (f *fakeSyncAllIngest) Send(_ context.Context, body tally.IngestRequestBody) error {
+func (f *fakeSyncAllIngest) Send(_ context.Context, body tally.IngestRequestBody) (ingest.AcceptedResponse, error) {
 	f.sent = append(f.sent, body)
-	return f.sendErr
+	if f.sendErr != nil {
+		return ingest.AcceptedResponse{}, f.sendErr
+	}
+	resp := f.resp
+	if resp.Counters == (ingest.AcceptedCounters{}) {
+		resp.Counters.Inserted = len(body.Batch)
+	}
+	return resp, nil
 }
 func (f *fakeSyncAllIngest) FetchActiveMappings(_ context.Context) (*ingest.ActiveMappingsResponse, error) {
 	if f.fetchErr != nil {

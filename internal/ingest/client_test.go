@@ -43,7 +43,7 @@ func TestSend_SignsAndSendsHeaders(t *testing.T) {
 		gotHeaders = r.Header.Clone()
 		gotBody, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusAccepted)
-		_, _ = w.Write([]byte(`{}`))
+		_, _ = w.Write([]byte(`{"ok":true,"run_id":"r1","counters":{"inserted":1,"amended":0,"skipped":0,"errors":0},"findings":{"missing_gstin":[],"purchase":[],"sales":[]}}`))
 	}))
 	defer srv.Close()
 
@@ -55,8 +55,12 @@ func TestSend_SignsAndSendsHeaders(t *testing.T) {
 	}
 
 	body := fixedBody()
-	if err := c.Send(context.Background(), body); err != nil {
+	resp, err := c.Send(context.Background(), body)
+	if err != nil {
 		t.Fatalf("Send: %v", err)
+	}
+	if !resp.OK || resp.Counters.Inserted != 1 {
+		t.Fatalf("resp=%+v, want ok with inserted=1", resp)
 	}
 
 	for _, h := range []string{tally.HeaderConnectionID, tally.HeaderTimestamp, tally.HeaderNonce, tally.HeaderSignature, tally.HeaderAuth} {
@@ -122,7 +126,7 @@ func TestSend_ClassifiesErrorsForRetryDecision(t *testing.T) {
 			defer srv.Close()
 
 			c, _ := NewClient(srv.URL, "c", "b", secretB64)
-			err := c.Send(context.Background(), fixedBody())
+			_, err := c.Send(context.Background(), fixedBody())
 			se := IsSendError(err)
 			if se == nil {
 				t.Fatalf("err = %v, not a SendError", err)
@@ -143,7 +147,7 @@ func TestSend_ClassifiesErrorsForRetryDecision(t *testing.T) {
 func TestSend_NetworkErrorIsRetryable(t *testing.T) {
 	secretB64, _ := makeSecret(t)
 	c, _ := NewClient("http://127.0.0.1:1", "c", "b", secretB64)
-	err := c.Send(context.Background(), fixedBody())
+	_, err := c.Send(context.Background(), fixedBody())
 	se := IsSendError(err)
 	if se == nil || se.Kind != ErrorKindNetwork {
 		t.Fatalf("err = %v, want SendError{Kind: network}", err)

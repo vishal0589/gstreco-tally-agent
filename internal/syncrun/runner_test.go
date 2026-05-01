@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vishal0589/gstreco-tally-agent/internal/ingest"
 	"github.com/vishal0589/gstreco-tally-agent/internal/tally"
 )
 
@@ -57,11 +58,19 @@ func (f *fakeTally) PostXML(_ context.Context, body []byte) ([]byte, error) {
 type fakeSender struct {
 	sent []tally.IngestRequestBody
 	err  error
+	resp ingest.AcceptedResponse
 }
 
-func (f *fakeSender) Send(_ context.Context, body tally.IngestRequestBody) error {
+func (f *fakeSender) Send(_ context.Context, body tally.IngestRequestBody) (ingest.AcceptedResponse, error) {
 	f.sent = append(f.sent, body)
-	return f.err
+	if f.err != nil {
+		return ingest.AcceptedResponse{}, f.err
+	}
+	resp := f.resp
+	if resp.Counters == (ingest.AcceptedCounters{}) {
+		resp.Counters.Inserted = len(body.Batch)
+	}
+	return resp, nil
 }
 
 func makeReq() Request {
@@ -102,6 +111,10 @@ func TestRunOne_HappyPath_PostsOneBatch(t *testing.T) {
 	}
 	if res.ParseStatus != 1 {
 		t.Errorf("ParseStatus=%d, want 1", res.ParseStatus)
+	}
+	if res.ServerInserted != 1 || res.ServerSkipped != 0 || res.ServerErrors != 0 {
+		t.Errorf("server counters = inserted:%d skipped:%d errors:%d, want 1/0/0",
+			res.ServerInserted, res.ServerSkipped, res.ServerErrors)
 	}
 }
 
@@ -214,6 +227,42 @@ func TestRunOne_BatchFailureCapturedNotFatal(t *testing.T) {
 	}
 }
 
+func TestRunOne_CollectsServerCountersAndFindings(t *testing.T) {
+	tly := &fakeTally{resp: []byte(stubResponse)}
+	snd := &fakeSender{
+		resp: ingest.AcceptedResponse{
+			Counters: ingest.AcceptedCounters{
+				Inserted: 0,
+				Skipped:  1,
+			},
+			Findings: ingest.AcceptedFindings{
+				MissingGSTIN: []ingest.ValidationFinding{
+					{
+						RowIndex:    0,
+						ErrorType:   "invalid_gstin",
+						ErrorDetail: "Vendor GSTIN is missing.",
+						Severity:    "error",
+					},
+				},
+			},
+		},
+	}
+
+	res, err := RunOne(context.Background(), tly, snd, makeReq(), nil)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.ServerSkipped != 1 || res.ServerInserted != 0 {
+		t.Fatalf("server counters = %+v", res)
+	}
+	if len(res.ServerFindings) != 1 {
+		t.Fatalf("ServerFindings=%v, want 1 finding", res.ServerFindings)
+	}
+	if got := res.ServerFindings[0].Scope; got != "missing_gstin" {
+		t.Fatalf("finding scope=%q, want missing_gstin", got)
+	}
+}
+
 func TestRunOne_TallyFetchFailureIsFatal(t *testing.T) {
 	tly := &fakeTally{err: errors.New("tally down")}
 	snd := &fakeSender{}
@@ -307,13 +356,13 @@ type cancellingSender struct {
 	calls  int
 }
 
-func (c *cancellingSender) Send(_ context.Context, _ tally.IngestRequestBody) error {
+func (c *cancellingSender) Send(_ context.Context, _ tally.IngestRequestBody) (ingest.AcceptedResponse, error) {
 	c.calls++
 	if c.calls == 1 {
 		c.cancel()
-		return nil
+		return ingest.AcceptedResponse{Counters: ingest.AcceptedCounters{Inserted: 1}}, nil
 	}
-	return errors.New("cancellingSender: should not be called after ctx cancel")
+	return ingest.AcceptedResponse{}, errors.New("cancellingSender: should not be called after ctx cancel")
 }
 
 func TestRunOne_NoVouchersStillEmitsCompleteEvent(t *testing.T) {

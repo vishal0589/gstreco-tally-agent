@@ -191,7 +191,7 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 		case "batch_sending":
 			fmt.Fprintf(stdout, "→ %s\n", e.Message)
 		case "batch_sent":
-			fmt.Fprintln(stdout, "  ✓ accepted")
+			fmt.Fprintf(stdout, "  ✓ %s\n", e.Message)
 		case "batch_failed":
 			if se := ingest.IsSendError(e.Err); se != nil {
 				fmt.Fprintf(stderr, "  ✗ %s status=%d snippet=%q retryable=%t\n",
@@ -224,6 +224,9 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 	for _, w := range res.ParseWarnings {
 		fmt.Fprintf(stdout, "  ⚠ %s\n", w)
 	}
+	for _, f := range res.ServerFindings {
+		fmt.Fprintf(stdout, "  ⚠ %s\n", formatServerFinding(f))
+	}
 
 	if *dryRun {
 		fmt.Fprintf(stdout, "\nrun_id=%s  rows=%d (dropped %d on normalize)\n",
@@ -236,9 +239,15 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 		return 0
 	}
 
-	fmt.Fprintf(stdout, "\nrun_id=%s  sent=%d  failed=%d  rows=%d\n",
-		runID, res.BatchesSent, res.BatchesFailed, res.RowCount)
-	if res.BatchesFailed > 0 {
+	fmt.Fprintf(stdout, "\nrun_id=%s  sent=%d  failed=%d  rows=%d  landed=%d  skipped=%d  server_errors=%d\n",
+		runID,
+		res.BatchesSent,
+		res.BatchesFailed,
+		res.RowCount,
+		res.ServerInserted+res.ServerAmended,
+		res.ServerSkipped,
+		res.ServerErrors)
+	if res.BatchesFailed > 0 || res.ServerErrors > 0 {
 		return 1
 	}
 	fmt.Fprintln(stdout, "✓ sync complete")
@@ -252,7 +261,20 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 // sender on dry-run paths.
 type noopSender struct{}
 
-func (noopSender) Send(_ context.Context, _ tally.IngestRequestBody) error { return nil }
+func (noopSender) Send(_ context.Context, _ tally.IngestRequestBody) (ingest.AcceptedResponse, error) {
+	return ingest.AcceptedResponse{}, nil
+}
+
+func formatServerFinding(f ingest.ValidationFinding) string {
+	location := fmt.Sprintf("row_index=%d", f.RowIndex)
+	if f.Scope != "" {
+		location = f.Scope + " " + location
+	}
+	if f.ErrorType == "" {
+		return fmt.Sprintf("%s: %s", location, f.ErrorDetail)
+	}
+	return fmt.Sprintf("%s %s: %s", location, f.ErrorType, f.ErrorDetail)
+}
 
 // mapKind translates the user-facing --kind string to the (Tally envelope
 // filter, server-side ingest kind) pair. The two enums diverge for

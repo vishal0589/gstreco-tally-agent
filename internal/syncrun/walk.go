@@ -90,6 +90,8 @@ type WalkResult struct {
 	TotalRows          int
 	TotalBatchesSent   int
 	TotalBatchesFailed int
+	TotalServerSkipped int
+	TotalServerErrors  int
 	FatalErrors        int
 	// StoppedEarly is true when ContinueOnError=false and a fatal
 	// error short-circuited the walk.
@@ -177,6 +179,8 @@ func WalkAll(ctx context.Context, opts WalkOptions) WalkResult {
 			res.TotalRows += runRes.RowCount
 			res.TotalBatchesSent += runRes.BatchesSent
 			res.TotalBatchesFailed += runRes.BatchesFailed
+			res.TotalServerSkipped += runRes.ServerSkipped
+			res.TotalServerErrors += runRes.ServerErrors
 		}
 		if mappingRan {
 			res.MappingsRun++
