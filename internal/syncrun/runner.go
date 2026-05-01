@@ -35,6 +35,10 @@ type Request struct {
 	// TallyCompany is the SVCURRENTCOMPANY value the envelope uses.
 	// Whitespace matters — pass exactly what Tally exports.
 	TallyCompany string
+	// TallyEndpoint is the exact local Tally HTTP URL this run used.
+	// The server can use it to disambiguate duplicate company names
+	// discovered on different ports.
+	TallyEndpoint string
 	// TallyKind picks the Tally envelope filter (purchase / sales /
 	// credit_note / debit_note).
 	TallyKind tally.VoucherKind
@@ -47,8 +51,7 @@ type Request struct {
 	From, To time.Time
 	// RunID identifies this run on the server. Reused as the
 	// request_id_prefix so the per-batch request_id has the form
-	// "<run_id>-<n>". Caller picks the format ("agentctl-sync-<unix>",
-	// "syncall-<unix>", "daemon-<cron-tick>").
+	// "<run_id>-<n>".
 	RunID string
 	// RunKind is "full" | "incremental" | "manual" — passed through
 	// to the IngestRequestBody.
@@ -204,8 +207,12 @@ func RunOne(
 	}
 
 	chunks := ingest.SplitRows(rows, req.BatchSize)
+	var tallyEndpoint *string
+	if req.TallyEndpoint != "" {
+		tallyEndpoint = &req.TallyEndpoint
+	}
 	batches := ingest.BuildBatches(req.RunID, req.RunID, req.IngestKind,
-		req.TallyCompany, req.RunKind, chunks)
+		req.TallyCompany, tallyEndpoint, req.RunKind, chunks)
 
 	for i, body := range batches {
 		// Honour ctx cancellation between batches. Without this, a

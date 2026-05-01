@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/vishal0589/gstreco-tally-agent/internal/config"
 	"github.com/vishal0589/gstreco-tally-agent/internal/ingest"
 	"github.com/vishal0589/gstreco-tally-agent/internal/keyring"
@@ -173,7 +174,7 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 		sender = noopSender{}
 	}
 
-	runID := fmt.Sprintf("agentctl-sync-%d", deps.now().Unix())
+	runID := uuid.NewString()
 
 	// Progress callback prints the same per-stage lines the original
 	// inline pipeline did, so existing operator muscle memory holds.
@@ -206,6 +207,7 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 
 	res, runErr := syncrun.RunOne(runCtx, tallyClient, sender, syncrun.Request{
 		TallyCompany: *tallyCompany,
+		TallyEndpoint: tallyEndpoint,
 		TallyKind:    tallyKind,
 		IngestKind:   ingestKind,
 		From:         from,

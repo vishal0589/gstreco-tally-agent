@@ -179,6 +179,9 @@ func TestParseDayBookV3_EmptyCollection(t *testing.T) {
 	if got.Status != 1 {
 		t.Errorf("Status = %d, want 1", got.Status)
 	}
+	if len(got.Warnings) != 0 {
+		t.Errorf("Warnings = %v, want none for empty collection", got.Warnings)
+	}
 }
 
 func TestParseDayBookV3_WrappedInTallyMessage(t *testing.T) {
@@ -214,8 +217,9 @@ func TestParseDayBookV3_MalformedXMLReturnsError(t *testing.T) {
 }
 
 func TestParseDayBookV3_DropsVoucherWithoutIdentifiers(t *testing.T) {
-	// A voucher with no GUID and no VOUCHERNUMBER is untrackable — parser
-	// drops it with a warning rather than shipping a ghost row to the server.
+	// A voucher with no GUID, voucher number, reference, or usable bill ref is
+	// untrackable — parser drops it with a warning rather than shipping a ghost
+	// row to the server.
 	minimal := []byte(`<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE><HEADER><STATUS>1</STATUS></HEADER><BODY><DATA><COLLECTION>
   <VOUCHER><DATE>20260401</DATE><VOUCHERTYPENAME>X</VOUCHERTYPENAME></VOUCHER>
@@ -230,6 +234,54 @@ func TestParseDayBookV3_DropsVoucherWithoutIdentifiers(t *testing.T) {
 	}
 	if len(got.Warnings) == 0 || !strings.Contains(got.Warnings[0], "dropped") {
 		t.Errorf("expected a 'dropped' warning, got %v", got.Warnings)
+	}
+}
+
+func TestParseDayBookV3_KeepsVoucherWithoutGUIDOrVoucherNumberWhenFallbackIdentityExists(t *testing.T) {
+	xml := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE><HEADER><STATUS>1</STATUS></HEADER><BODY><DATA><COLLECTION>
+  <VOUCHER>
+    <DATE>20260401</DATE>
+    <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+    <REFERENCE>SUPP-INV-5501</REFERENCE>
+  </VOUCHER>
+  <VOUCHER>
+    <DATE>20260402</DATE>
+    <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+    <PARTYLEDGERNAME>ABC Vendors Ltd</PARTYLEDGERNAME>
+    <ALLLEDGERENTRIES.LIST>
+      <LEDGERNAME>ABC Vendors Ltd</LEDGERNAME>
+      <AMOUNT>-118000.00</AMOUNT>
+      <BILLALLOCATIONS.LIST>
+        <NAME>PQR/APR/101</NAME>
+        <BILLTYPE>New Ref</BILLTYPE>
+        <AMOUNT>-118000.00</AMOUNT>
+      </BILLALLOCATIONS.LIST>
+    </ALLLEDGERENTRIES.LIST>
+  </VOUCHER>
+</COLLECTION></DATA></BODY></ENVELOPE>`)
+
+	got, err := ParseDayBookV3(xml)
+	if err != nil {
+		t.Fatalf("ParseDayBookV3: %v", err)
+	}
+	if len(got.Vouchers) != 2 {
+		t.Fatalf("Vouchers = %d, want 2", len(got.Vouchers))
+	}
+	if got.Vouchers[0].Reference != "SUPP-INV-5501" {
+		t.Errorf("Reference = %q", got.Vouchers[0].Reference)
+	}
+	if len(got.Vouchers[1].LedgerEntries) != 1 {
+		t.Fatalf("LedgerEntries = %d, want 1", len(got.Vouchers[1].LedgerEntries))
+	}
+	if len(got.Vouchers[1].LedgerEntries[0].BillAllocations) != 1 {
+		t.Fatalf("BillAllocations = %d, want 1", len(got.Vouchers[1].LedgerEntries[0].BillAllocations))
+	}
+	if got.Vouchers[1].LedgerEntries[0].BillAllocations[0].Name != "PQR/APR/101" {
+		t.Errorf("BillAllocations[0].Name = %q", got.Vouchers[1].LedgerEntries[0].BillAllocations[0].Name)
+	}
+	if len(got.Warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", got.Warnings)
 	}
 }
 
@@ -380,10 +432,10 @@ func TestStripIllegalCharRefs_DropsControlChars(t *testing.T) {
 		{`<X>&#4; Not Applicable</X>`, `<X> Not Applicable</X>`},
 		{`<X>&#x04;hi</X>`, `<X>hi</X>`},
 		{`<X>&#0;&#1;&#2;hello</X>`, `<X>hello</X>`},
-		{`<X>&#9;tab</X>`, `<X>&#9;tab</X>`},      // tab is valid, keep
-		{`<X>&#65;</X>`, `<X>&#65;</X>`},          // 'A' is valid, keep
-		{`<X>&#xff;hi</X>`, `<X>&#xff;hi</X>`},    // 0xFF (255) is valid, keep
-		{`<X>&amp;</X>`, `<X>&amp;</X>`},          // entity ref, not numeric — leave alone
+		{`<X>&#9;tab</X>`, `<X>&#9;tab</X>`},       // tab is valid, keep
+		{`<X>&#65;</X>`, `<X>&#65;</X>`},           // 'A' is valid, keep
+		{`<X>&#xff;hi</X>`, `<X>&#xff;hi</X>`},     // 0xFF (255) is valid, keep
+		{`<X>&amp;</X>`, `<X>&amp;</X>`},           // entity ref, not numeric — leave alone
 		{`<X>plain text</X>`, `<X>plain text</X>`}, // no refs at all
 	}
 	for _, c := range cases {

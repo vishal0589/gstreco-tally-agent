@@ -34,13 +34,22 @@ func SplitRows(rows []tally.IngestVoucherRow, size int) [][]tally.IngestVoucherR
 // metadata. The last batch carries is_final=true so the server can close the
 // tally_sync_run and stamp finished_at. Caller is responsible for generating
 // a unique request_id per batch (e.g. via uuid); this layer passes it through.
-func BuildBatches(runID, requestIDPrefix string, kind tally.IngestKind, tallyCompany, runKind string, chunks [][]tally.IngestVoucherRow) []tally.IngestRequestBody {
+func BuildBatches(
+	runID,
+	requestIDPrefix string,
+	kind tally.IngestKind,
+	tallyCompany string,
+	tallyEndpoint *string,
+	runKind string,
+	chunks [][]tally.IngestVoucherRow,
+) []tally.IngestRequestBody {
 	out := make([]tally.IngestRequestBody, 0, len(chunks))
 	for i, chunk := range chunks {
 		body := tally.IngestRequestBody{
 			RunID:        runID,
 			Kind:         kind,
 			TallyCompany: tallyCompany,
+			TallyEndpoint: tallyEndpoint,
 			Batch:        chunk,
 			RunKind:      runKind,
 			RequestID:    requestIDPrefix + "-" + intToStr(i+1),

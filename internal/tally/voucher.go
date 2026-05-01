@@ -26,7 +26,9 @@ const (
 // "absent" and the ingest layer decides which gaps are fatal. Field names and
 // XML tags mirror Tally Prime 3.x's collection output.
 type RawVoucher struct {
-	// GUID uniquely identifies a voucher across edits. Stable across amendments.
+	// GUID is Tally's preferred stable voucher identifier when the export
+	// includes it. Some real-world invoice vouchers omit GUID entirely, so
+	// downstream logic must tolerate it being blank.
 	GUID string
 	// AlterID increases every time the voucher is touched. Used as the
 	// incremental sync cursor ($AlterID watermark, pain #13).
@@ -39,7 +41,9 @@ type RawVoucher struct {
 	// Tally's built-in classification ($$IsSales / $$IsPurchase / …).
 	VoucherType string
 	// VoucherNumber is the human-readable number ("PI/001/26-27"). Not unique
-	// across companies or fiscal years; dedup must use GUID.
+	// across companies or fiscal years; when GUID is missing the server still
+	// dedups on GSTIN + normalized invoice number + invoice date, so this is
+	// one fallback identity signal, not a universal primary key.
 	VoucherNumber string
 	// Reference is the customer/supplier invoice number as entered in Tally
 	// ("Reference / Ref. No." field). Often the number the counterparty sees.
@@ -103,7 +107,8 @@ type LedgerEntry struct {
 	IsPartyLedger bool
 	// BillAllocations is how Tally splits a single ledger line across multiple
 	// bills ("consolidated voucher", pain #8). One ledger entry + N bill
-	// allocations = N IngestVoucherRow rows, each with parent_ref=<Voucher.GUID>.
+	// allocations = N IngestVoucherRow rows, each with parent_ref carrying the
+	// best voucher-level identity the agent has available.
 	BillAllocations []BillRef
 }
 

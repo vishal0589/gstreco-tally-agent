@@ -44,13 +44,17 @@ func TestSplitRows(t *testing.T) {
 
 func TestBuildBatches_MarksOnlyLastFinal(t *testing.T) {
 	chunks := SplitRows(makeRows(1500), 500)
-	batches := BuildBatches("run-42", "req-abc", tally.IngestKindPurchase, "Acme", "incremental", chunks)
+	endpoint := "http://127.0.0.1:9000"
+	batches := BuildBatches("run-42", "req-abc", tally.IngestKindPurchase, "Acme", &endpoint, "incremental", chunks)
 	if len(batches) != 3 {
 		t.Fatalf("len = %d, want 3", len(batches))
 	}
 	for i, b := range batches {
 		if b.RunID != "run-42" || b.TallyCompany != "Acme" || b.Kind != tally.IngestKindPurchase || b.RunKind != "incremental" {
 			t.Errorf("batch %d metadata wrong: %+v", i, b)
+		}
+		if b.TallyEndpoint == nil || *b.TallyEndpoint != endpoint {
+			t.Errorf("batch %d TallyEndpoint = %v, want %q", i, b.TallyEndpoint, endpoint)
 		}
 		if b.RequestID != "req-abc-"+intToStr(i+1) {
 			t.Errorf("batch %d request_id = %q", i, b.RequestID)
@@ -63,7 +67,7 @@ func TestBuildBatches_MarksOnlyLastFinal(t *testing.T) {
 }
 
 func TestBuildBatches_EmptyInput(t *testing.T) {
-	batches := BuildBatches("r", "req", tally.IngestKindSales, "Co", "full", nil)
+	batches := BuildBatches("r", "req", tally.IngestKindSales, "Co", nil, "full", nil)
 	if len(batches) != 0 {
 		t.Errorf("empty chunks → len(batches) = %d, want 0", len(batches))
 	}

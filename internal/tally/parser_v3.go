@@ -32,8 +32,10 @@ var illegalCharRefRE = regexp.MustCompile(`&#[xX]?[0-9a-fA-F]+;`)
 //
 // Each dump filename is "parse-fail-<unix>-<stage>.bin" so multiple
 // failures in one tick land in distinct files. Caller passes:
-//   rawOriginal: bytes as received from Tally HTTP response
-//   raw:         bytes after decodeTallyResponse + sanitizeXMLBytes
+//
+//	rawOriginal: bytes as received from Tally HTTP response
+//	raw:         bytes after decodeTallyResponse + sanitizeXMLBytes
+//
 // Comparing the two reveals whether the pipeline introduced the
 // illegal char or it was in Tally's response from the start.
 func dumpDebugResponse(rawOriginal, raw []byte, parseErr error) {
@@ -157,8 +159,11 @@ func ParseDayBookV3(raw []byte) (ParseResult, error) {
 			}
 			raw, warnings := v.toRaw()
 			result.Warnings = append(result.Warnings, warnings...)
-			if raw.GUID == "" && raw.VoucherNumber == "" {
-				result.Warnings = append(result.Warnings, "voucher dropped: missing both GUID and VoucherNumber")
+			if isEmptyVoucherShell(raw) {
+				continue
+			}
+			if !hasUsableVoucherIdentity(raw) {
+				result.Warnings = append(result.Warnings, "voucher dropped: missing GUID/VoucherNumber and no fallback invoice identity")
 				continue
 			}
 			result.Vouchers = append(result.Vouchers, raw)
@@ -291,8 +296,8 @@ func (x xmlVoucher) toRaw() (RawVoucher, []string) {
 }
 
 // voucherID returns a human-readable id for logging. Prefers GUID but falls
-// back to VoucherNumber so warnings point somewhere useful even when Tally
-// sent an incomplete voucher.
+// back through the invoice-facing identifiers so warnings still point at
+// something useful when Tally omits its internal fields.
 func voucherID(r RawVoucher) string {
 	if r.GUID != "" {
 		return r.GUID
@@ -300,7 +305,47 @@ func voucherID(r RawVoucher) string {
 	if r.VoucherNumber != "" {
 		return r.VoucherNumber
 	}
+	if r.Reference != "" {
+		return r.Reference
+	}
+	if billRef := firstUsableBillRefName(r); billRef != "" {
+		return billRef
+	}
 	return "(unknown)"
+}
+
+// hasUsableVoucherIdentity decides whether the voucher has enough identity to
+// make it through normalization + server-side dedup safely. GUID remains the
+// preferred stable key, but when Tally omits it we can still ingest as long as
+// the voucher carries an invoice-facing identifier (voucher no., reference, or
+// a usable bill allocation name).
+func hasUsableVoucherIdentity(r RawVoucher) bool {
+	return r.GUID != "" ||
+		r.VoucherNumber != "" ||
+		r.Reference != "" ||
+		firstUsableBillRefName(r) != ""
+}
+
+// isEmptyVoucherShell filters out bookkeeping counters like
+// <CMPINFO><VOUCHER>0</VOUCHER></CMPINFO> that appear in successful empty
+// exports. They decode into an all-zero xmlVoucher but are not real vouchers
+// and should not produce misleading "dropped voucher" warnings.
+func isEmptyVoucherShell(r RawVoucher) bool {
+	return r.GUID == "" &&
+		r.AlterID == 0 &&
+		r.Date.IsZero() &&
+		r.VoucherType == "" &&
+		r.VoucherNumber == "" &&
+		r.Reference == "" &&
+		r.PartyLedgerName == "" &&
+		r.PartyGSTIN == "" &&
+		r.PlaceOfSupply == "" &&
+		!r.IsInvoice &&
+		!r.IsCancelled &&
+		!r.ReverseCharge &&
+		r.Narration == "" &&
+		len(r.LedgerEntries) == 0 &&
+		len(r.InventoryEntries) == 0
 }
 
 // parseTallyBool normalises Tally's "Yes"/"No"/"" (and occasional 1/0) into a
@@ -377,12 +422,12 @@ func parseTallyRate(s string) (rate float64, unit string) {
 //
 // Detection order (matches the production Manual2AI Python adapter
 // at PlummLegano/scripts/tally-sync/tally_client.py:351-378):
-//   1. BOM: \xff\xfe → UTF-16LE; \xfe\xff → UTF-16BE; \xef\xbb\xbf →
-//      UTF-8 (BOM stripped, body returned as-is).
-//   2. Null-byte heuristic on the head (first 8 bytes): a `<` in
-//      position 0 followed by 0x00 in position 1 → UTF-16LE; 0x00
-//      then `<` → UTF-16BE.
-//   3. Default: UTF-8 (body returned unchanged).
+//  1. BOM: \xff\xfe → UTF-16LE; \xfe\xff → UTF-16BE; \xef\xbb\xbf →
+//     UTF-8 (BOM stripped, body returned as-is).
+//  2. Null-byte heuristic on the head (first 8 bytes): a `<` in
+//     position 0 followed by 0x00 in position 1 → UTF-16LE; 0x00
+//     then `<` → UTF-16BE.
+//  3. Default: UTF-8 (body returned unchanged).
 //
 // On decode error (truncated UTF-16, invalid sequences) the function
 // returns the original bytes — the caller's xml decoder will surface
@@ -437,21 +482,21 @@ func decodeUTF16(raw []byte, order unicode.Endianness) []byte {
 // parse without rejecting valid Tally edge cases:
 //
 //  1. decodeTallyResponse:   UTF-16LE/BE → UTF-8 if the response is
-//                            UTF-16 (Tally echoes request encoding
-//                            for IMPORT acks; for non-ASCII voucher
-//                            content sometimes responds UTF-16LE).
+//     UTF-16 (Tally echoes request encoding
+//     for IMPORT acks; for non-ASCII voucher
+//     content sometimes responds UTF-16LE).
 //  2. sanitizeXMLBytes:      drop literal XML-1.0-illegal control
-//                            bytes (0x00-0x1F minus 0x09/0x0A/0x0D)
-//                            that Tally emits in narration / address
-//                            fields when source was Alt-numpad typed.
+//     bytes (0x00-0x1F minus 0x09/0x0A/0x0D)
+//     that Tally emits in narration / address
+//     fields when source was Alt-numpad typed.
 //  3. stripIllegalCharRefs:  drop XML numeric character references
-//                            (`&#4;`, `&#x04;`) that resolve to chars
-//                            outside the XML 1.0 set. Tally uses these
-//                            in GSTCLASS / VATCLASSIFICATION fields as
-//                            legacy "no value" markers.
+//     (`&#4;`, `&#x04;`) that resolve to chars
+//     outside the XML 1.0 set. Tally uses these
+//     in GSTCLASS / VATCLASSIFICATION fields as
+//     legacy "no value" markers.
 //  4. sanitizeInvalidUTF8:   drop bare invalid-UTF-8 bytes (Windows-
-//                            1252 / ISO-8859-1 chars like 0x92 right
-//                            single quote) embedded in narration.
+//     1252 / ISO-8859-1 chars like 0x92 right
+//     single quote) embedded in narration.
 //
 // Used by ParseDayBookV3 and the master parsers — both consume
 // Tally responses with the same Tally-side quirks.

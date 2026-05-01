@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/vishal0589/gstreco-tally-agent/internal/config"
 	"github.com/vishal0589/gstreco-tally-agent/internal/keyring"
 	"github.com/vishal0589/gstreco-tally-agent/internal/tally"
@@ -217,8 +218,14 @@ func TestRunSync_HappyPath(t *testing.T) {
 		t.Fatalf("want 1 batch sent, got %d", len(sender.sent))
 	}
 	body := sender.sent[0]
+	if _, err := uuid.Parse(body.RunID); err != nil {
+		t.Fatalf("RunID=%q is not a UUID: %v", body.RunID, err)
+	}
 	if body.TallyCompany != "PLLUM CASA" {
 		t.Errorf("TallyCompany=%q", body.TallyCompany)
+	}
+	if body.TallyEndpoint == nil || *body.TallyEndpoint != "http://localhost:9000" {
+		t.Errorf("TallyEndpoint=%v, want http://localhost:9000", body.TallyEndpoint)
 	}
 	if body.Kind != "purchase" {
 		t.Errorf("Kind=%q", body.Kind)

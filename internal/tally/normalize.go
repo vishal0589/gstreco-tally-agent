@@ -74,8 +74,9 @@ func Normalize(v RawVoucher, opts NormalizeOptions) ([]IngestVoucherRow, error) 
 	}
 
 	// Consolidated: one row per bill ref, amounts prorated by share of the
-	// party ledger magnitude. parent_ref = v.GUID so the reco inspector can
-	// re-stitch the group.
+	// party ledger magnitude. parent_ref carries the best voucher-level
+	// identity we have so the reco inspector can still re-stitch the group
+	// when Tally omits GUID on the parent voucher.
 	//
 	// Residual allocation: we prorate the first N-1 rows by share, then
 	// assign whatever's left to the last row. Without this, IEEE-754 drift
@@ -90,8 +91,10 @@ func Normalize(v RawVoucher, opts NormalizeOptions) ([]IngestVoucherRow, error) 
 	for i, b := range bills {
 		row := base
 		row.InvoiceNumber = b.Name
-		guid := v.GUID
-		row.ParentRef = &guid
+		if parentRef := voucherParentRef(v); parentRef != "" {
+			parent := parentRef
+			row.ParentRef = &parent
+		}
 
 		if i == last {
 			row.InvoiceValue = round2(invoiceValue - accInvoice)
@@ -324,12 +327,33 @@ func classifyTaxLedger(gstClass, name string) string {
 func relevantBillRefs(party LedgerEntry) []BillRef {
 	out := make([]BillRef, 0, len(party.BillAllocations))
 	for _, b := range party.BillAllocations {
-		t := strings.ToLower(strings.TrimSpace(b.BillType))
-		if t == "" || t == "new ref" || t == "agst ref" {
+		if isUsableBillRef(b) {
 			out = append(out, b)
 		}
 	}
 	return out
+}
+
+func isUsableBillRef(b BillRef) bool {
+	t := strings.ToLower(strings.TrimSpace(b.BillType))
+	return t == "" || t == "new ref" || t == "agst ref"
+}
+
+// firstUsableBillRefName returns the first non-empty bill reference that maps
+// to an actual invoice. Parser-side drop logic uses the same definition as the
+// normalizer so we don't discard vouchers the server can dedupe safely.
+func firstUsableBillRefName(v RawVoucher) string {
+	for _, entry := range v.LedgerEntries {
+		for _, bill := range entry.BillAllocations {
+			if !isUsableBillRef(bill) {
+				continue
+			}
+			if name := strings.TrimSpace(bill.Name); name != "" {
+				return name
+			}
+		}
+	}
+	return ""
 }
 
 // onlyNewRefName returns the single bill ref's Name when the party ledger
@@ -341,6 +365,14 @@ func onlyNewRefName(party LedgerEntry) string {
 		return ""
 	}
 	return party.BillAllocations[0].Name
+}
+
+// voucherParentRef returns the best voucher-level reference available for
+// grouping consolidated split rows. GUID is ideal, but when Tally omits it we
+// still keep the split rows tied together via voucher number, reference, or
+// the first usable bill ref.
+func voucherParentRef(v RawVoucher) string {
+	return firstNonEmpty(v.GUID, v.VoucherNumber, v.Reference, firstUsableBillRefName(v))
 }
 
 // sumNonTaxNonPartyLedgers is the fallback for taxable_value when the
