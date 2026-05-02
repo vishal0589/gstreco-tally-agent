@@ -31,7 +31,7 @@ type Handler interface {
 	// OnSyncNow fires when the operator clicked "Sync now". The
 	// daemon's scheduler.RunNow is the obvious implementation — kick
 	// off an immediate sync without waiting for the next cron tick.
-	OnSyncNow(ctx context.Context) error
+	OnSyncNow(ctx context.Context, period string) error
 	// OnPause fires when the operator paused the agent. Daemon
 	// stops the scheduler. (Server-side `tally_connections.status`
 	// also flips to 'paused'; the agent could rely on the next
@@ -196,7 +196,7 @@ func (p *Poller) poll(parent context.Context) {
 	}
 
 	for _, action := range resp.PendingActions {
-		p.dispatch(parent, action)
+		p.dispatch(parent, action, resp.PendingSyncPeriod)
 	}
 
 	// Schedule change detection. Skipped on the first poll (we don't
@@ -213,7 +213,7 @@ func (p *Poller) poll(parent context.Context) {
 
 // dispatch routes one action to its Handler method. Each call gets a
 // fresh ctx so a slow OnSyncNow doesn't block subsequent actions.
-func (p *Poller) dispatch(parent context.Context, action ingest.HeartbeatAction) {
+func (p *Poller) dispatch(parent context.Context, action ingest.HeartbeatAction, syncPeriod string) {
 	dispatchCtx, cancel := context.WithTimeout(parent, 30*time.Minute)
 	defer cancel()
 	logger := p.opts.Logger.With().Str("action", string(action)).Logger()
@@ -222,7 +222,7 @@ func (p *Poller) dispatch(parent context.Context, action ingest.HeartbeatAction)
 	var err error
 	switch action {
 	case ingest.HeartbeatActionSyncNow:
-		err = p.opts.Handler.OnSyncNow(dispatchCtx)
+		err = p.opts.Handler.OnSyncNow(dispatchCtx, syncPeriod)
 	case ingest.HeartbeatActionPause:
 		err = p.opts.Handler.OnPause(dispatchCtx)
 	case ingest.HeartbeatActionRevoke:
