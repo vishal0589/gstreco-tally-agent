@@ -163,7 +163,7 @@ func ParseDayBookV3(raw []byte) (ParseResult, error) {
 				continue
 			}
 			if !hasUsableVoucherIdentity(raw) {
-				result.Warnings = append(result.Warnings, "voucher dropped: missing GUID/VoucherNumber and no fallback invoice identity")
+				result.Warnings = append(result.Warnings, "voucher dropped: missing invoice-facing identity and stable internal fallback")
 				continue
 			}
 			result.Vouchers = append(result.Vouchers, raw)
@@ -179,6 +179,7 @@ func ParseDayBookV3(raw []byte) (ParseResult, error) {
 type xmlVoucher struct {
 	Date             string              `xml:"DATE"`
 	GUID             string              `xml:"GUID"`
+	MasterID         string              `xml:"MASTERID"`
 	AlterID          string              `xml:"ALTERID"`
 	VoucherType      string              `xml:"VOUCHERTYPENAME"`
 	VoucherNumber    string              `xml:"VOUCHERNUMBER"`
@@ -223,6 +224,7 @@ func (x xmlVoucher) toRaw() (RawVoucher, []string) {
 
 	r := RawVoucher{
 		GUID:            strings.TrimSpace(x.GUID),
+		MasterID:        strings.TrimSpace(x.MasterID),
 		VoucherType:     strings.TrimSpace(x.VoucherType),
 		VoucherNumber:   strings.TrimSpace(x.VoucherNumber),
 		Reference:       strings.TrimSpace(x.Reference),
@@ -295,43 +297,13 @@ func (x xmlVoucher) toRaw() (RawVoucher, []string) {
 	return r, warnings
 }
 
-// voucherID returns a human-readable id for logging. Prefers GUID but falls
-// back through the invoice-facing identifiers so warnings still point at
-// something useful when Tally omits its internal fields.
-func voucherID(r RawVoucher) string {
-	if r.GUID != "" {
-		return r.GUID
-	}
-	if r.VoucherNumber != "" {
-		return r.VoucherNumber
-	}
-	if r.Reference != "" {
-		return r.Reference
-	}
-	if billRef := firstUsableBillRefName(r); billRef != "" {
-		return billRef
-	}
-	return "(unknown)"
-}
-
-// hasUsableVoucherIdentity decides whether the voucher has enough identity to
-// make it through normalization + server-side dedup safely. GUID remains the
-// preferred stable key, but when Tally omits it we can still ingest as long as
-// the voucher carries an invoice-facing identifier (voucher no., reference, or
-// a usable bill allocation name).
-func hasUsableVoucherIdentity(r RawVoucher) bool {
-	return r.GUID != "" ||
-		r.VoucherNumber != "" ||
-		r.Reference != "" ||
-		firstUsableBillRefName(r) != ""
-}
-
 // isEmptyVoucherShell filters out bookkeeping counters like
 // <CMPINFO><VOUCHER>0</VOUCHER></CMPINFO> that appear in successful empty
 // exports. They decode into an all-zero xmlVoucher but are not real vouchers
 // and should not produce misleading "dropped voucher" warnings.
 func isEmptyVoucherShell(r RawVoucher) bool {
 	return r.GUID == "" &&
+		r.MasterID == "" &&
 		r.AlterID == 0 &&
 		r.Date.IsZero() &&
 		r.VoucherType == "" &&

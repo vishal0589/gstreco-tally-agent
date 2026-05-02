@@ -47,6 +47,7 @@ type IngestVoucherRow struct {
 	TaxRate          *float64 `json:"tax_rate,omitempty"`
 	PlaceOfSupply    *string  `json:"place_of_supply,omitempty"`
 	ReverseCharge    *bool    `json:"reverse_charge,omitempty"`
+	Narration        *string  `json:"narration,omitempty"`
 	// ParentRef is the best voucher-level reference the agent has when this
 	// row is one slice of a consolidated voucher (pain #8). GUID is preferred,
 	// but Tally sometimes omits it on invoice vouchers so the agent falls back
@@ -97,14 +98,14 @@ type IngestMastersRequest struct {
 // IngestRequestBody is the full request shape. One run_id can span many
 // batches (each is_final=false), with the last batch carrying is_final=true.
 type IngestRequestBody struct {
-	RunID        string             `json:"run_id"`
-	Kind         IngestKind         `json:"kind"`
-	TallyCompany string             `json:"tally_company"`
-	TallyEndpoint *string           `json:"tally_endpoint,omitempty"`
-	Batch        []IngestVoucherRow `json:"batch"`
-	CursorBefore any                `json:"cursor_before,omitempty"`
-	CursorAfter  any                `json:"cursor_after,omitempty"`
-	IsFinal      bool               `json:"is_final,omitempty"`
+	RunID         string             `json:"run_id"`
+	Kind          IngestKind         `json:"kind"`
+	TallyCompany  string             `json:"tally_company"`
+	TallyEndpoint *string            `json:"tally_endpoint,omitempty"`
+	Batch         []IngestVoucherRow `json:"batch"`
+	CursorBefore  any                `json:"cursor_before,omitempty"`
+	CursorAfter   any                `json:"cursor_after,omitempty"`
+	IsFinal       bool               `json:"is_final,omitempty"`
 	// RunKind is "full" | "incremental" | "manual". The server stamps it on
 	// the first batch of a run and ignores it on subsequent batches.
 	RunKind   string `json:"run_kind,omitempty"`

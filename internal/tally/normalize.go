@@ -130,7 +130,7 @@ func Normalize(v RawVoucher, opts NormalizeOptions) ([]IngestVoucherRow, error) 
 // branch. Separated out so both branches can start from the same struct.
 func baseRow(v RawVoucher, kind IngestKind, side IngestSide, invoice, taxable float64, tax taxTotals) IngestVoucherRow {
 	row := IngestVoucherRow{
-		InvoiceNumber: firstNonEmpty(v.VoucherNumber, v.Reference),
+		InvoiceNumber: preferredInvoiceNumber(v),
 		InvoiceDate:   v.Date.Format("2006-01-02"),
 		InvoiceValue:  round2(invoice),
 		TaxableValue:  round2(taxable),
@@ -150,6 +150,10 @@ func baseRow(v RawVoucher, kind IngestKind, side IngestSide, invoice, taxable fl
 	if v.ReverseCharge {
 		rc := true
 		row.ReverseCharge = &rc
+	}
+	if v.Narration != "" {
+		n := v.Narration
+		row.Narration = &n
 	}
 	// Party fields differ by side. For purchase-side (and RCM), the party is
 	// the vendor; for sales-side, the party is the customer.
@@ -372,7 +376,7 @@ func onlyNewRefName(party LedgerEntry) string {
 // still keep the split rows tied together via voucher number, reference, or
 // the first usable bill ref.
 func voucherParentRef(v RawVoucher) string {
-	return firstNonEmpty(v.GUID, v.VoucherNumber, v.Reference, firstUsableBillRefName(v))
+	return bestVoucherReference(v)
 }
 
 // sumNonTaxNonPartyLedgers is the fallback for taxable_value when the

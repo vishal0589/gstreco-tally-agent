@@ -36,6 +36,9 @@ func TestParseDayBookV3_PurchaseSingle(t *testing.T) {
 	if v.GUID != "fixture-purchase-single-0001" {
 		t.Errorf("GUID = %q", v.GUID)
 	}
+	if v.MasterID != "700001" {
+		t.Errorf("MasterID = %q, want 700001", v.MasterID)
+	}
 	if v.AlterID != 12345 {
 		t.Errorf("AlterID = %d, want 12345", v.AlterID)
 	}
@@ -282,6 +285,83 @@ func TestParseDayBookV3_KeepsVoucherWithoutGUIDOrVoucherNumberWhenFallbackIdenti
 	}
 	if len(got.Warnings) != 0 {
 		t.Errorf("unexpected warnings: %v", got.Warnings)
+	}
+}
+
+func TestParseDayBookV3_KeepsVoucherWithOnlyMasterID(t *testing.T) {
+	xml := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE><HEADER><STATUS>1</STATUS></HEADER><BODY><DATA><COLLECTION>
+  <VOUCHER>
+    <DATE>20260401</DATE>
+    <MASTERID>900012</MASTERID>
+    <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+    <ISINVOICE>Yes</ISINVOICE>
+    <PARTYLEDGERNAME>Fallback Vendor</PARTYLEDGERNAME>
+    <ALLLEDGERENTRIES.LIST>
+      <LEDGERNAME>Fallback Vendor</LEDGERNAME>
+      <AMOUNT>-11800.00</AMOUNT>
+    </ALLLEDGERENTRIES.LIST>
+    <ALLLEDGERENTRIES.LIST>
+      <LEDGERNAME>Purchases A/c</LEDGERNAME>
+      <AMOUNT>10000.00</AMOUNT>
+    </ALLLEDGERENTRIES.LIST>
+    <ALLLEDGERENTRIES.LIST>
+      <LEDGERNAME>IGST @ 18%</LEDGERNAME>
+      <GSTCLASS>IGST@18</GSTCLASS>
+      <AMOUNT>1800.00</AMOUNT>
+    </ALLLEDGERENTRIES.LIST>
+  </VOUCHER>
+</COLLECTION></DATA></BODY></ENVELOPE>`)
+
+	got, err := ParseDayBookV3(xml)
+	if err != nil {
+		t.Fatalf("ParseDayBookV3: %v", err)
+	}
+	if len(got.Vouchers) != 1 {
+		t.Fatalf("Vouchers = %d, want 1", len(got.Vouchers))
+	}
+	if got.Vouchers[0].MasterID != "900012" {
+		t.Errorf("MasterID = %q, want 900012", got.Vouchers[0].MasterID)
+	}
+	if len(got.Warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", got.Warnings)
+	}
+}
+
+func TestParseDayBookV3_KeepsVoucherWithNarrationInvoiceHint(t *testing.T) {
+	xml := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE><HEADER><STATUS>1</STATUS></HEADER><BODY><DATA><COLLECTION>
+  <VOUCHER>
+    <DATE>20260401</DATE>
+    <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+    <ISINVOICE>Yes</ISINVOICE>
+    <NARRATION>Purchase against supplier invoice SUPP-INV-5501</NARRATION>
+    <PARTYLEDGERNAME>Fallback Vendor</PARTYLEDGERNAME>
+    <ALLLEDGERENTRIES.LIST>
+      <LEDGERNAME>Fallback Vendor</LEDGERNAME>
+      <AMOUNT>-11800.00</AMOUNT>
+    </ALLLEDGERENTRIES.LIST>
+    <ALLLEDGERENTRIES.LIST>
+      <LEDGERNAME>Purchases A/c</LEDGERNAME>
+      <AMOUNT>10000.00</AMOUNT>
+    </ALLLEDGERENTRIES.LIST>
+    <ALLLEDGERENTRIES.LIST>
+      <LEDGERNAME>IGST @ 18%</LEDGERNAME>
+      <GSTCLASS>IGST@18</GSTCLASS>
+      <AMOUNT>1800.00</AMOUNT>
+    </ALLLEDGERENTRIES.LIST>
+  </VOUCHER>
+</COLLECTION></DATA></BODY></ENVELOPE>`)
+
+	got, err := ParseDayBookV3(xml)
+	if err != nil {
+		t.Fatalf("ParseDayBookV3: %v", err)
+	}
+	if len(got.Vouchers) != 1 {
+		t.Fatalf("Vouchers = %d, want 1", len(got.Vouchers))
+	}
+	if hint := invoiceNumberHintFromNarration(got.Vouchers[0].Narration); hint != "SUPP-INV-5501" {
+		t.Errorf("invoice hint = %q, want SUPP-INV-5501", hint)
 	}
 }
 

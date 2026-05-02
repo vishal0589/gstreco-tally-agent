@@ -30,6 +30,10 @@ type RawVoucher struct {
 	// includes it. Some real-world invoice vouchers omit GUID entirely, so
 	// downstream logic must tolerate it being blank.
 	GUID string
+	// MasterID is Tally's internal transaction master identifier. Unlike
+	// AlterID, it does not change on every edit, so it is the safest fallback
+	// identity when invoice-facing fields are absent.
+	MasterID string
 	// AlterID increases every time the voucher is touched. Used as the
 	// incremental sync cursor ($AlterID watermark, pain #13).
 	AlterID int64
