@@ -49,6 +49,7 @@ import (
 	"github.com/vishal0589/gstreco-tally-agent/internal/ingest"
 	"github.com/vishal0589/gstreco-tally-agent/internal/keyring"
 	"github.com/vishal0589/gstreco-tally-agent/internal/log"
+	"github.com/vishal0589/gstreco-tally-agent/internal/period"
 	"github.com/vishal0589/gstreco-tally-agent/internal/scheduler"
 	"github.com/vishal0589/gstreco-tally-agent/internal/secretstore"
 	"github.com/vishal0589/gstreco-tally-agent/internal/selfupdate"
@@ -239,6 +240,10 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 	// there's no measurable contention.
 	tickState := newTickState()
 	tickFnTracked := wrapTickWithState(tickFn, tickState)
+	periodSyncFnTracked := wrapPeriodSyncWithState(
+		makePeriodSyncFunc(client, tally.NewClient, logger),
+		tickState,
+	)
 
 	sched, err := scheduler.New(scheduler.Options{
 		Spec:            scheduleSpec,
@@ -267,9 +272,10 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 	})
 
 	hbHandler := &daemonHeartbeatHandler{
-		sched:     sched,
-		logger:    logger,
-		cancelRun: cancelRun,
+		sched:         sched,
+		logger:        logger,
+		runPeriodSync: periodSyncFnTracked,
+		cancelRun:     cancelRun,
 	}
 	poller, err := heartbeat.New(heartbeat.Options{
 		Client:           client,
@@ -325,14 +331,22 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 // daemonHeartbeatHandler implements heartbeat.Handler by routing each
 // action to the corresponding daemon primitive.
 type daemonHeartbeatHandler struct {
-	sched     *scheduler.Scheduler
-	logger    zerolog.Logger
-	cancelRun context.CancelFunc
+	sched         *scheduler.Scheduler
+	logger        zerolog.Logger
+	runPeriodSync func(ctx context.Context, period string) error
+	cancelRun     context.CancelFunc
 }
 
-func (h *daemonHeartbeatHandler) OnSyncNow(ctx context.Context) error {
-	h.logger.Info().Msg("heartbeat sync_now: firing scheduler.RunNow")
-	return h.sched.RunNow(ctx)
+func (h *daemonHeartbeatHandler) OnSyncNow(ctx context.Context, syncPeriod string) error {
+	if strings.TrimSpace(syncPeriod) == "" {
+		h.logger.Info().Msg("heartbeat sync_now: firing scheduler.RunNow for current month")
+		return h.sched.RunNow(ctx)
+	}
+	h.logger.Info().Str("period", syncPeriod).Msg("heartbeat sync_now: running explicit month window")
+	if h.runPeriodSync == nil {
+		return fmt.Errorf("heartbeat sync_now: explicit month sync is unavailable")
+	}
+	return h.runPeriodSync(ctx, syncPeriod)
 }
 
 func (h *daemonHeartbeatHandler) OnPause(_ context.Context) error {
@@ -405,6 +419,21 @@ func wrapTickWithState(fn scheduler.TickFunc, state *tickState) scheduler.TickFu
 	}
 }
 
+func wrapPeriodSyncWithState(
+	fn func(ctx context.Context, period string) error,
+	state *tickState,
+) func(ctx context.Context, period string) error {
+	return func(ctx context.Context, period string) error {
+		err := fn(ctx, period)
+		status := "ok"
+		if err != nil {
+			status = "error"
+		}
+		state.record(time.Now().UTC(), status)
+		return err
+	}
+}
+
 // makeTickFunc returns the closure the scheduler fires on each tick.
 // One factory call at startup, one closure forever — the server URL,
 // connection id, and ingest client are bound once.
@@ -414,89 +443,116 @@ func makeTickFunc(
 	logger zerolog.Logger,
 ) scheduler.TickFunc {
 	return func(ctx context.Context) error {
-		// Each tick runs against the current calendar month. CAs
-		// reconcile monthly; daily cron means each tick re-syncs the
-		// month-to-date state. Idempotent on the server side
-		// (ingest's ON CONFLICT DO UPDATE per migration 00033).
-		now := time.Now().In(time.Local)
-		from := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
-		to := from.AddDate(0, 1, -1)
+		from, to := currentMonthWindow(time.Now().In(time.Local))
+		return runWindowSync(ctx, client, newTallyClient, logger, from, to, "incremental")
+	}
+}
 
-		mappings, err := client.FetchActiveMappings(ctx)
+func makePeriodSyncFunc(
+	client *ingest.Client,
+	newTallyClient func(string, ...tally.ClientOption) *tally.Client,
+	logger zerolog.Logger,
+) func(ctx context.Context, periodCode string) error {
+	return func(ctx context.Context, periodCode string) error {
+		from, to, err := period.ParseMonthCode(periodCode)
 		if err != nil {
-			return fmt.Errorf("fetch active mappings: %w", err)
+			return fmt.Errorf("sync_now period %q: %w", periodCode, err)
 		}
-		if len(mappings.Mappings) == 0 {
-			logger.Warn().Msg("no active mappings — open /settings/tally and map the auto-discovered companies to GSTINs")
-			return nil
-		}
-		logger.Info().
-			Int("mappings", len(mappings.Mappings)).
-			Time("from", from).Time("to", to).
-			Msg("walking mappings")
+		return runWindowSync(ctx, client, newTallyClient, logger, from, to, "manual")
+	}
+}
 
-		// Sync vendor + customer masters BEFORE walking vouchers so
-		// the server's ingest path back-fills vendor_id / customer_id
-		// on each invoice as it lands. Best-effort: per-(mapping,
-		// kind) failures log warn and the voucher walk still runs.
-		// Reusing the same Tally client per endpoint keeps connection
-		// pooling sensible (Tally HTTP is single-process anyway).
-		syncMastersForMappings(ctx, client, newTallyClient, mappings.Mappings, logger)
+func currentMonthWindow(now time.Time) (time.Time, time.Time) {
+	from := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	return from, from.AddDate(0, 1, -1)
+}
 
-		runIDPrefix := fmt.Sprintf("daemon-%d", time.Now().Unix())
+func runWindowSync(
+	ctx context.Context,
+	client *ingest.Client,
+	newTallyClient func(string, ...tally.ClientOption) *tally.Client,
+	logger zerolog.Logger,
+	from time.Time,
+	to time.Time,
+	runKind string,
+) error {
+	mappings, err := client.FetchActiveMappings(ctx)
+	if err != nil {
+		return fmt.Errorf("fetch active mappings: %w", err)
+	}
+	if len(mappings.Mappings) == 0 {
+		logger.Warn().Msg("no active mappings — open /settings/tally and map the auto-discovered companies to GSTINs")
+		return nil
+	}
+	logger.Info().
+		Int("mappings", len(mappings.Mappings)).
+		Time("from", from).
+		Time("to", to).
+		Str("run_kind", runKind).
+		Msg("walking mappings")
 
-		res := syncrun.WalkAll(ctx, syncrun.WalkOptions{
-			Mappings:        mappings.Mappings,
-			Kinds:           syncrun.DefaultKinds,
-			From:            from,
-			To:              to,
-			RunIDPrefix:     runIDPrefix,
-			RunKind:         "incremental",
-			ContinueOnError: true,
-			NewTallyClient: func(endpoint string) syncrun.TallyPoster {
-				return newTallyClient(endpoint)
-			},
-			Sender: client,
-			PerKindResultHook: func(m ingest.ActiveMapping, k syncrun.KindPair, r syncrun.Result, fatalErr error) {
-				if fatalErr != nil {
-					logger.Error().
-						Str("mapping", m.TallyCompanyName).
-						Str("endpoint", m.TallyEndpoint).
-						Str("kind", k.Name).
-						Err(fatalErr).
-						Msg("per-kind fatal")
-					return
-				}
-				logger.Info().
+	// Sync vendor + customer masters BEFORE walking vouchers so
+	// the server's ingest path back-fills vendor_id / customer_id
+	// on each invoice as it lands. Best-effort: per-(mapping,
+	// kind) failures log warn and the voucher walk still runs.
+	// Reusing the same Tally client per endpoint keeps connection
+	// pooling sensible (Tally HTTP is single-process anyway).
+	syncMastersForMappings(ctx, client, newTallyClient, mappings.Mappings, logger)
+
+	runIDPrefix := fmt.Sprintf("%s-%d", runKind, time.Now().Unix())
+
+	res := syncrun.WalkAll(ctx, syncrun.WalkOptions{
+		Mappings:        mappings.Mappings,
+		Kinds:           syncrun.DefaultKinds,
+		From:            from,
+		To:              to,
+		RunIDPrefix:     runIDPrefix,
+		RunKind:         runKind,
+		ContinueOnError: true,
+		NewTallyClient: func(endpoint string) syncrun.TallyPoster {
+			return newTallyClient(endpoint)
+		},
+		Sender: client,
+		PerKindResultHook: func(m ingest.ActiveMapping, k syncrun.KindPair, r syncrun.Result, fatalErr error) {
+			if fatalErr != nil {
+				logger.Error().
 					Str("mapping", m.TallyCompanyName).
 					Str("endpoint", m.TallyEndpoint).
 					Str("kind", k.Name).
-					Int("rows", r.RowCount).
-					Int("sent", r.BatchesSent).
-					Int("failed", r.BatchesFailed).
-					Int("landed", r.ServerInserted+r.ServerAmended).
-					Int("skipped", r.ServerSkipped).
-					Int("server_errors", r.ServerErrors).
-					Msg("per-kind result")
-			},
-		})
+					Err(fatalErr).
+					Msg("per-kind fatal")
+				return
+			}
+			logger.Info().
+				Str("mapping", m.TallyCompanyName).
+				Str("endpoint", m.TallyEndpoint).
+				Str("kind", k.Name).
+				Int("rows", r.RowCount).
+				Int("sent", r.BatchesSent).
+				Int("failed", r.BatchesFailed).
+				Int("landed", r.ServerInserted+r.ServerAmended).
+				Int("skipped", r.ServerSkipped).
+				Int("server_errors", r.ServerErrors).
+				Msg("per-kind result")
+		},
+	})
 
-		logger.Info().
-			Int("mappings_run", res.MappingsRun).
-			Int("rows", res.TotalRows).
-			Int("batches_sent", res.TotalBatchesSent).
-			Int("batches_failed", res.TotalBatchesFailed).
-			Int("server_skipped", res.TotalServerSkipped).
-			Int("server_errors", res.TotalServerErrors).
-			Int("fatal_errors", res.FatalErrors).
-			Msg("tick complete")
+	logger.Info().
+		Int("mappings_run", res.MappingsRun).
+		Int("rows", res.TotalRows).
+		Int("batches_sent", res.TotalBatchesSent).
+		Int("batches_failed", res.TotalBatchesFailed).
+		Int("server_skipped", res.TotalServerSkipped).
+		Int("server_errors", res.TotalServerErrors).
+		Int("fatal_errors", res.FatalErrors).
+		Str("run_kind", runKind).
+		Msg("tick complete")
 
-		// Tick is "successful" even with non-zero failures — the
-		// scheduler keeps firing. The operator triages via the
-		// sync-status dashboard (B4) once it ships. A non-nil return
-		// here would just produce a duplicate scheduler-level log.
-		return nil
-	}
+	// Tick is "successful" even with non-zero failures — the
+	// scheduler keeps firing. The operator triages via the
+	// sync-status dashboard (B4) once it ships. A non-nil return
+	// here would just produce a duplicate scheduler-level log.
+	return nil
 }
 
 // syncMastersForMappings fetches vendor + customer master ledgers

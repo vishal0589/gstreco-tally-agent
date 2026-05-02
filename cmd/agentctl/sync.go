@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +14,7 @@ import (
 	"github.com/vishal0589/gstreco-tally-agent/internal/config"
 	"github.com/vishal0589/gstreco-tally-agent/internal/ingest"
 	"github.com/vishal0589/gstreco-tally-agent/internal/keyring"
+	"github.com/vishal0589/gstreco-tally-agent/internal/period"
 	"github.com/vishal0589/gstreco-tally-agent/internal/syncrun"
 	"github.com/vishal0589/gstreco-tally-agent/internal/tally"
 )
@@ -33,13 +33,13 @@ import (
 //	2 — user-fixable configuration error (bad flags, agent not paired, unknown kind)
 func syncCmd(args []string) int {
 	return runSync(os.Stdout, os.Stderr, args, syncDeps{
-		now:           time.Now,
-		newOSKeyring:  defaultSecretStore,
+		now:          time.Now,
+		newOSKeyring: defaultSecretStore,
 		newTallyClient: func(endpoint string) tallyPoster {
 			return tally.NewClient(endpoint)
 		},
 		newIngestClient: defaultNewIngestClient,
-		loadConfig:     config.Load,
+		loadConfig:      config.Load,
 	})
 }
 
@@ -206,15 +206,15 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 	defer cancelRun()
 
 	res, runErr := syncrun.RunOne(runCtx, tallyClient, sender, syncrun.Request{
-		TallyCompany: *tallyCompany,
+		TallyCompany:  *tallyCompany,
 		TallyEndpoint: tallyEndpoint,
-		TallyKind:    tallyKind,
-		IngestKind:   ingestKind,
-		From:         from,
-		To:           to,
-		RunID:        runID,
-		RunKind:      "manual",
-		BatchSize:    *batchSize,
+		TallyKind:     tallyKind,
+		IngestKind:    ingestKind,
+		From:          from,
+		To:            to,
+		RunID:         runID,
+		RunKind:       "manual",
+		BatchSize:     *batchSize,
 	}, progress)
 	if runErr != nil {
 		fmt.Fprintf(stderr, "agentctl sync: %v\n", runErr)
@@ -332,22 +332,10 @@ func resolveWindow(period, fromStr, toStr string) (time.Time, time.Time, error) 
 // the agent uses UTC; Tally's date filter is calendar-day so the timezone
 // doesn't change which vouchers come back.
 func parsePeriod(s string) (time.Time, time.Time, error) {
-	s = strings.TrimSpace(s)
-	if len(s) != 6 {
-		return time.Time{}, time.Time{}, fmt.Errorf("--period %q: want MMYYYY (6 digits)", s)
+	from, to, err := period.ParseMonthCode(s)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("--period %q: %v", strings.TrimSpace(s), err)
 	}
-	mm, err := strconv.Atoi(s[:2])
-	if err != nil || mm < 1 || mm > 12 {
-		return time.Time{}, time.Time{}, fmt.Errorf("--period %q: month must be 01..12", s)
-	}
-	yyyy, err := strconv.Atoi(s[2:])
-	if err != nil || yyyy < 2000 || yyyy > 2100 {
-		return time.Time{}, time.Time{}, fmt.Errorf("--period %q: year out of range", s)
-	}
-	from := time.Date(yyyy, time.Month(mm), 1, 0, 0, 0, 0, time.UTC)
-	// Last day = first day of next month minus 1 day. Handles February + leap
-	// years correctly without a calendar table.
-	to := from.AddDate(0, 1, -1)
 	return from, to, nil
 }
 
