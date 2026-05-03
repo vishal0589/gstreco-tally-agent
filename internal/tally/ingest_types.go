@@ -30,27 +30,31 @@ const (
 // typed here (the server trusts the agent's coercion), so the agent MUST
 // parse Tally's string-first XML into real numbers before submitting.
 type IngestVoucherRow struct {
-	TallyVoucherGUID *string `json:"tally_voucher_guid,omitempty"`
-	VendorGSTIN      *string `json:"vendor_gstin,omitempty"`
-	VendorName       *string `json:"vendor_name,omitempty"`
-	CustomerGSTIN    *string `json:"customer_gstin,omitempty"`
-	CustomerName     *string `json:"customer_name,omitempty"`
-	RecipientGSTIN   *string `json:"recipient_gstin,omitempty"`
-	InvoiceNumber    string  `json:"invoice_number"`
-	InvoiceDate      string  `json:"invoice_date"` // YYYY-MM-DD
-	InvoiceValue     float64 `json:"invoice_value"`
-	TaxableValue     float64 `json:"taxable_value"`
-	IGST             float64 `json:"igst"`
-	CGST             float64 `json:"cgst"`
-	SGST             float64 `json:"sgst"`
-	CESS             float64 `json:"cess"`
+	TallyVoucherGUID *string  `json:"tally_voucher_guid,omitempty"`
+	VendorGSTIN      *string  `json:"vendor_gstin,omitempty"`
+	VendorName       *string  `json:"vendor_name,omitempty"`
+	CustomerGSTIN    *string  `json:"customer_gstin,omitempty"`
+	CustomerName     *string  `json:"customer_name,omitempty"`
+	RecipientGSTIN   *string  `json:"recipient_gstin,omitempty"`
+	InvoiceNumber    string   `json:"invoice_number"`
+	InvoiceDate      string   `json:"invoice_date"` // YYYY-MM-DD
+	InvoiceValue     float64  `json:"invoice_value"`
+	TaxableValue     float64  `json:"taxable_value"`
+	IGST             float64  `json:"igst"`
+	CGST             float64  `json:"cgst"`
+	SGST             float64  `json:"sgst"`
+	CESS             float64  `json:"cess"`
 	TaxRate          *float64 `json:"tax_rate,omitempty"`
 	PlaceOfSupply    *string  `json:"place_of_supply,omitempty"`
 	ReverseCharge    *bool    `json:"reverse_charge,omitempty"`
-	// ParentRef is the Tally VoucherGuid when this row is one slice of a
-	// consolidated voucher (pain #8). The server persists parent_ref as-is;
-	// the inline-unique index on (company_id, gstin, invoice_number_normalized,
-	// invoice_date) keeps each bill ref from landing twice.
+	Narration        *string  `json:"narration,omitempty"`
+	// ParentRef is the best voucher-level reference the agent has when this
+	// row is one slice of a consolidated voucher (pain #8). GUID is preferred,
+	// but Tally sometimes omits it on invoice vouchers so the agent falls back
+	// to voucher/invoice-facing references instead. The server persists
+	// parent_ref as-is; the inline-unique index on (company_id, gstin,
+	// invoice_number_normalized, invoice_date) keeps each bill ref from
+	// landing twice.
 	ParentRef *string `json:"parent_ref,omitempty"`
 	// Side pins the note to purchase or sales books when Tally's voucher
 	// doesn't make the direction obvious. For purchase/sales kinds the
@@ -94,13 +98,19 @@ type IngestMastersRequest struct {
 // IngestRequestBody is the full request shape. One run_id can span many
 // batches (each is_final=false), with the last batch carrying is_final=true.
 type IngestRequestBody struct {
-	RunID        string             `json:"run_id"`
-	Kind         IngestKind         `json:"kind"`
-	TallyCompany string             `json:"tally_company"`
-	Batch        []IngestVoucherRow `json:"batch"`
-	CursorBefore any                `json:"cursor_before,omitempty"`
-	CursorAfter  any                `json:"cursor_after,omitempty"`
-	IsFinal      bool               `json:"is_final,omitempty"`
+	RunID         string             `json:"run_id"`
+	Kind          IngestKind         `json:"kind"`
+	TallyCompany  string             `json:"tally_company"`
+	TallyEndpoint *string            `json:"tally_endpoint,omitempty"`
+	Batch         []IngestVoucherRow `json:"batch"`
+	CursorBefore  any                `json:"cursor_before,omitempty"`
+	CursorAfter   any                `json:"cursor_after,omitempty"`
+	IsFinal       bool               `json:"is_final,omitempty"`
+	// PeriodFrom/PeriodTo are YYYY-MM-DD bounds for the Tally window that
+	// produced this batch. The app stores them on tally_sync_runs so support
+	// and operators can prove which month a Sync now actually fetched.
+	PeriodFrom *string `json:"period_from,omitempty"`
+	PeriodTo   *string `json:"period_to,omitempty"`
 	// RunKind is "full" | "incremental" | "manual". The server stamps it on
 	// the first batch of a run and ignores it on subsequent batches.
 	RunKind   string `json:"run_kind,omitempty"`
