@@ -75,14 +75,14 @@ func (f *fakeSender) Send(_ context.Context, body tally.IngestRequestBody) (inge
 
 func makeReq() Request {
 	return Request{
-		TallyCompany: "PLLUM CASA",
+		TallyCompany:  "PLLUM CASA",
 		TallyEndpoint: "http://127.0.0.1:9000",
-		TallyKind:    tally.VoucherPurchase,
-		IngestKind:   tally.IngestKindPurchase,
-		From:         time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
-		To:           time.Date(2026, 4, 30, 0, 0, 0, 0, time.UTC),
-		RunID:        "test-run-1",
-		RunKind:      "manual",
+		TallyKind:     tally.VoucherPurchase,
+		IngestKind:    tally.IngestKindPurchase,
+		From:          time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
+		To:            time.Date(2026, 4, 30, 0, 0, 0, 0, time.UTC),
+		RunID:         "test-run-1",
+		RunKind:       "manual",
 	}
 }
 
@@ -99,6 +99,12 @@ func TestRunOne_HappyPath_PostsOneBatch(t *testing.T) {
 	}
 	if snd.sent[0].TallyEndpoint == nil || *snd.sent[0].TallyEndpoint != "http://127.0.0.1:9000" {
 		t.Errorf("TallyEndpoint=%v, want http://127.0.0.1:9000", snd.sent[0].TallyEndpoint)
+	}
+	if snd.sent[0].PeriodFrom == nil || *snd.sent[0].PeriodFrom != "2026-04-01" {
+		t.Errorf("PeriodFrom=%v, want 2026-04-01", snd.sent[0].PeriodFrom)
+	}
+	if snd.sent[0].PeriodTo == nil || *snd.sent[0].PeriodTo != "2026-04-30" {
+		t.Errorf("PeriodTo=%v, want 2026-04-30", snd.sent[0].PeriodTo)
 	}
 	if res.RowCount != 1 {
 		t.Errorf("RowCount=%d, want 1", res.RowCount)

@@ -106,6 +106,11 @@ type IngestRequestBody struct {
 	CursorBefore  any                `json:"cursor_before,omitempty"`
 	CursorAfter   any                `json:"cursor_after,omitempty"`
 	IsFinal       bool               `json:"is_final,omitempty"`
+	// PeriodFrom/PeriodTo are YYYY-MM-DD bounds for the Tally window that
+	// produced this batch. The app stores them on tally_sync_runs so support
+	// and operators can prove which month a Sync now actually fetched.
+	PeriodFrom *string `json:"period_from,omitempty"`
+	PeriodTo   *string `json:"period_to,omitempty"`
 	// RunKind is "full" | "incremental" | "manual". The server stamps it on
 	// the first batch of a run and ignores it on subsequent batches.
 	RunKind   string `json:"run_kind,omitempty"`

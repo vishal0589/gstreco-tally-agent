@@ -222,8 +222,10 @@ func RunOne(
 	if req.TallyEndpoint != "" {
 		tallyEndpoint = &req.TallyEndpoint
 	}
+	periodFrom := req.From.Format("2006-01-02")
+	periodTo := req.To.Format("2006-01-02")
 	batches := ingest.BuildBatches(req.RunID, req.RunID, req.IngestKind,
-		req.TallyCompany, tallyEndpoint, req.RunKind, chunks)
+		req.TallyCompany, tallyEndpoint, req.RunKind, &periodFrom, &periodTo, chunks)
 
 	for i, body := range batches {
 		// Honour ctx cancellation between batches. Without this, a

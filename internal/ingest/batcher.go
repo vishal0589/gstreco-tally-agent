@@ -41,19 +41,23 @@ func BuildBatches(
 	tallyCompany string,
 	tallyEndpoint *string,
 	runKind string,
+	periodFrom *string,
+	periodTo *string,
 	chunks [][]tally.IngestVoucherRow,
 ) []tally.IngestRequestBody {
 	out := make([]tally.IngestRequestBody, 0, len(chunks))
 	for i, chunk := range chunks {
 		body := tally.IngestRequestBody{
-			RunID:        runID,
-			Kind:         kind,
-			TallyCompany: tallyCompany,
+			RunID:         runID,
+			Kind:          kind,
+			TallyCompany:  tallyCompany,
 			TallyEndpoint: tallyEndpoint,
-			Batch:        chunk,
-			RunKind:      runKind,
-			RequestID:    requestIDPrefix + "-" + intToStr(i+1),
-			IsFinal:      i == len(chunks)-1,
+			Batch:         chunk,
+			RunKind:       runKind,
+			PeriodFrom:    periodFrom,
+			PeriodTo:      periodTo,
+			RequestID:     requestIDPrefix + "-" + intToStr(i+1),
+			IsFinal:       i == len(chunks)-1,
 		}
 		out = append(out, body)
 	}
