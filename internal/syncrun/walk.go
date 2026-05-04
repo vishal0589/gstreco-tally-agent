@@ -3,6 +3,7 @@ package syncrun
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,14 +23,17 @@ type KindPair struct {
 }
 
 // DefaultKinds is the full set the daemon and `agentctl sync-all`
-// cycle through on each run. The order matches what an operator
-// thinks of when troubleshooting (purchase first because it's the
-// volume kind for ITC reconciliation).
+// cycle through on each run. The order matches how an operator
+// investigates GST completeness: invoice books first, then journal /
+// payment evidence, then the month-end Duties & Taxes control ledgers.
 var DefaultKinds = []KindPair{
 	{Name: "purchase", Tally: tally.VoucherPurchase, Ingest: tally.IngestKindPurchase},
 	{Name: "sales", Tally: tally.VoucherSales, Ingest: tally.IngestKindSales},
 	{Name: "credit_note", Tally: tally.VoucherCreditNote, Ingest: tally.IngestKindCreditNote},
 	{Name: "debit_note", Tally: tally.VoucherDebitNote, Ingest: tally.IngestKindDebitNote},
+	{Name: "journal", Tally: tally.VoucherJournal},
+	{Name: "payment", Tally: tally.VoucherPayment},
+	{Name: "tax_ledger"},
 }
 
 // WalkOptions configures one WalkAll invocation. Callers pre-resolve
@@ -151,15 +155,16 @@ func WalkAll(ctx context.Context, opts WalkOptions) WalkResult {
 
 			runCtx, cancelRun := context.WithTimeout(ctx, timeout)
 			runRes, runErr := RunOne(runCtx, tallyClient, opts.Sender, Request{
-				TallyCompany: m.TallyCompanyName,
+				KindName:      kind.Name,
+				TallyCompany:  m.TallyCompanyName,
 				TallyEndpoint: m.TallyEndpoint,
-				TallyKind:    kind.Tally,
-				IngestKind:   kind.Ingest,
-				From:         opts.From,
-				To:           opts.To,
-				RunID:        runID,
-				RunKind:      opts.RunKind,
-				BatchSize:    opts.BatchSize,
+				TallyKind:     kind.Tally,
+				IngestKind:    kind.Ingest,
+				From:          opts.From,
+				To:            opts.To,
+				RunID:         runID,
+				RunKind:       opts.RunKind,
+				BatchSize:     opts.BatchSize,
 			}, progress)
 			cancelRun()
 
@@ -193,7 +198,7 @@ func WalkAll(ctx context.Context, opts WalkOptions) WalkResult {
 // by the CLI's --kinds flag and any other code that takes a
 // user-supplied kind name.
 func MapKindByName(name string) (KindPair, error) {
-	switch name {
+	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "purchase":
 		return KindPair{Name: "purchase", Tally: tally.VoucherPurchase, Ingest: tally.IngestKindPurchase}, nil
 	case "sales":
@@ -202,6 +207,12 @@ func MapKindByName(name string) (KindPair, error) {
 		return KindPair{Name: "credit_note", Tally: tally.VoucherCreditNote, Ingest: tally.IngestKindCreditNote}, nil
 	case "debit_note", "debit-note", "debitnote":
 		return KindPair{Name: "debit_note", Tally: tally.VoucherDebitNote, Ingest: tally.IngestKindDebitNote}, nil
+	case "journal":
+		return KindPair{Name: "journal", Tally: tally.VoucherJournal}, nil
+	case "payment":
+		return KindPair{Name: "payment", Tally: tally.VoucherPayment}, nil
+	case "tax_ledger", "tax-ledger", "taxledger":
+		return KindPair{Name: "tax_ledger"}, nil
 	default:
 		return KindPair{}, fmt.Errorf("unknown kind %q", name)
 	}

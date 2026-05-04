@@ -73,7 +73,7 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 	serverFlag := fs.String("server", "", "override server URL (default: from config)")
 	tallyURL := fs.String("tally-url", "", "Tally HTTP endpoint (default: from config or http://localhost:9000)")
 	tallyCompany := fs.String("tally-company", "", "Tally company name as it appears in Tally (required)")
-	kindFlag := fs.String("kind", "", "voucher kind: purchase | sales | credit_note | debit_note (required)")
+	kindFlag := fs.String("kind", "", "sync kind: purchase | sales | credit_note | debit_note | journal | payment | tax_ledger (required)")
 	period := fs.String("period", "", "month shorthand MMYYYY (e.g. 042026 for Apr 2026); mutually exclusive with --from/--to")
 	fromFlag := fs.String("from", "", "window start YYYY-MM-DD (use with --to instead of --period)")
 	toFlag := fs.String("to", "", "window end YYYY-MM-DD inclusive")
@@ -88,11 +88,11 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 		return 2
 	}
 	if *kindFlag == "" {
-		fmt.Fprintln(stderr, "agentctl sync: --kind is required (one of: purchase, sales, credit_note, debit_note)")
+		fmt.Fprintln(stderr, "agentctl sync: --kind is required (one of: purchase, sales, credit_note, debit_note, journal, payment, tax_ledger)")
 		return 2
 	}
 
-	tallyKind, ingestKind, err := mapKind(*kindFlag)
+	kind, err := mapKind(*kindFlag)
 	if err != nil {
 		fmt.Fprintf(stderr, "agentctl sync: %v\n", err)
 		return 2
@@ -206,10 +206,11 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 	defer cancelRun()
 
 	res, runErr := syncrun.RunOne(runCtx, tallyClient, sender, syncrun.Request{
+		KindName:      kind.Name,
 		TallyCompany:  *tallyCompany,
 		TallyEndpoint: tallyEndpoint,
-		TallyKind:     tallyKind,
-		IngestKind:    ingestKind,
+		TallyKind:     kind.Tally,
+		IngestKind:    kind.Ingest,
 		From:          from,
 		To:            to,
 		RunID:         runID,
@@ -265,6 +266,18 @@ func (noopSender) Send(_ context.Context, _ tally.IngestRequestBody) (ingest.Acc
 	return ingest.AcceptedResponse{}, nil
 }
 
+func (noopSender) SendJournal(_ context.Context, _ tally.JournalIngestRequestBody) (tally.AccountingAcceptedResponse, error) {
+	return tally.AccountingAcceptedResponse{}, nil
+}
+
+func (noopSender) SendPayment(_ context.Context, _ tally.PaymentIngestRequestBody) (tally.AccountingAcceptedResponse, error) {
+	return tally.AccountingAcceptedResponse{}, nil
+}
+
+func (noopSender) SendTaxLedgers(_ context.Context, _ tally.TaxLedgerIngestRequestBody) (tally.AccountingAcceptedResponse, error) {
+	return tally.AccountingAcceptedResponse{}, nil
+}
+
 func formatServerFinding(f ingest.ValidationFinding) string {
 	location := fmt.Sprintf("row_index=%d", f.RowIndex)
 	if f.Scope != "" {
@@ -280,19 +293,12 @@ func formatServerFinding(f ingest.ValidationFinding) string {
 // filter, server-side ingest kind) pair. The two enums diverge for
 // `rcm_self_invoice`, which the agent infers per-voucher from the
 // IsRcmApplicable flag rather than asking the user to know in advance.
-func mapKind(s string) (tally.VoucherKind, tally.IngestKind, error) {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "purchase":
-		return tally.VoucherPurchase, tally.IngestKindPurchase, nil
-	case "sales":
-		return tally.VoucherSales, tally.IngestKindSales, nil
-	case "credit_note", "credit-note", "creditnote":
-		return tally.VoucherCreditNote, tally.IngestKindCreditNote, nil
-	case "debit_note", "debit-note", "debitnote":
-		return tally.VoucherDebitNote, tally.IngestKindDebitNote, nil
-	default:
-		return "", "", fmt.Errorf("unknown --kind %q (want one of: purchase, sales, credit_note, debit_note)", s)
+func mapKind(s string) (syncrun.KindPair, error) {
+	k, err := syncrun.MapKindByName(strings.ToLower(strings.TrimSpace(s)))
+	if err != nil {
+		return syncrun.KindPair{}, fmt.Errorf("unknown --kind %q (want one of: purchase, sales, credit_note, debit_note, journal, payment, tax_ledger)", s)
 	}
+	return k, nil
 }
 
 // resolveWindow accepts EITHER --period MMYYYY OR (--from + --to) and returns

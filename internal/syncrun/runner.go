@@ -27,11 +27,18 @@ type TallyPoster interface {
 // Real callers pass a *ingest.Client; tests pass fakes.
 type IngestSender interface {
 	Send(ctx context.Context, body tally.IngestRequestBody) (ingest.AcceptedResponse, error)
+	SendJournal(ctx context.Context, body tally.JournalIngestRequestBody) (tally.AccountingAcceptedResponse, error)
+	SendPayment(ctx context.Context, body tally.PaymentIngestRequestBody) (tally.AccountingAcceptedResponse, error)
+	SendTaxLedgers(ctx context.Context, body tally.TaxLedgerIngestRequestBody) (tally.AccountingAcceptedResponse, error)
 }
 
 // Request describes one fetch-and-ingest cycle: a single (Tally
 // company, voucher kind, date window) tuple.
 type Request struct {
+	// KindName is the user-facing kind label ("purchase", "journal",
+	// "tax_ledger"). RunOne dispatches on this so invoice, accounting-voucher,
+	// and ledger-control syncs can share one orchestration surface.
+	KindName string
 	// TallyCompany is the SVCURRENTCOMPANY value the envelope uses.
 	// Whitespace matters — pass exactly what Tally exports.
 	TallyCompany string
@@ -150,6 +157,16 @@ func RunOne(
 	if req.RunID == "" {
 		return res, fmt.Errorf("syncrun: Request.RunID is required")
 	}
+	if req.KindName == "" {
+		switch {
+		case req.IngestKind != "":
+			req.KindName = string(req.IngestKind)
+		case req.TallyKind != "":
+			req.KindName = string(req.TallyKind)
+		default:
+			return res, fmt.Errorf("syncrun: Request.KindName is required")
+		}
+	}
 
 	emit := func(stage, msg string) {
 		if progress != nil {
@@ -168,116 +185,14 @@ func RunOne(
 		}
 	}
 
-	envelope, err := tally.BuildDayBookXML(tally.DayBookRequest{
-		Company: req.TallyCompany,
-		From:    req.From,
-		To:      req.To,
-		Kind:    req.TallyKind,
-	})
-	if err != nil {
-		return res, fmt.Errorf("build envelope: %w", err)
+	switch req.KindName {
+	case "journal":
+		return runJournalSync(ctx, tallyClient, sender, req, res, emit, emitBatch)
+	case "payment":
+		return runPaymentSync(ctx, tallyClient, sender, req, res, emit, emitBatch)
+	case "tax_ledger":
+		return runTaxLedgerSync(ctx, tallyClient, sender, req, res, emit, emitBatch)
+	default:
+		return runInvoiceSync(ctx, tallyClient, sender, req, res, emit, emitBatch)
 	}
-
-	emit("fetching", fmt.Sprintf("fetching %s vouchers for %q (%s..%s)",
-		req.TallyKind, req.TallyCompany,
-		req.From.Format("2006-01-02"), req.To.Format("2006-01-02")))
-
-	respXML, err := tallyClient.PostXML(ctx, envelope)
-	if err != nil {
-		return res, fmt.Errorf("tally fetch: %w", err)
-	}
-
-	parsed, err := tally.ParseDayBookV3(respXML)
-	if err != nil {
-		return res, fmt.Errorf("parse response: %w", err)
-	}
-	res.ParseStatus = parsed.Status
-	res.ParseWarnings = parsed.Warnings
-	emit("parsed", fmt.Sprintf("parsed %d vouchers (status=%d, warnings=%d)",
-		len(parsed.Vouchers), parsed.Status, len(parsed.Warnings)))
-
-	rows := make([]tally.IngestVoucherRow, 0, len(parsed.Vouchers))
-	for _, v := range parsed.Vouchers {
-		out, normErr := tally.Normalize(v, tally.NormalizeOptions{
-			Kind:    req.IngestKind,
-			RunKind: req.RunKind,
-		})
-		if normErr != nil {
-			res.DroppedOnNormalize++
-			continue
-		}
-		rows = append(rows, out...)
-	}
-	res.RowCount = len(rows)
-	emit("normalized", fmt.Sprintf("%d ingest rows (dropped %d on normalize)",
-		len(rows), res.DroppedOnNormalize))
-
-	if len(rows) == 0 {
-		emit("complete", "nothing to send")
-		return res, nil
-	}
-
-	chunks := ingest.SplitRows(rows, req.BatchSize)
-	var tallyEndpoint *string
-	if req.TallyEndpoint != "" {
-		tallyEndpoint = &req.TallyEndpoint
-	}
-	periodFrom := req.From.Format("2006-01-02")
-	periodTo := req.To.Format("2006-01-02")
-	batches := ingest.BuildBatches(req.RunID, req.RunID, req.IngestKind,
-		req.TallyCompany, tallyEndpoint, req.RunKind, &periodFrom, &periodTo, chunks)
-
-	for i, body := range batches {
-		// Honour ctx cancellation between batches. Without this, a
-		// user Ctrl+C mid-sync produces N "network error" entries in
-		// BatchErrors (each subsequent Send fails with ctx.Err()
-		// wrapped in ErrorKindNetwork). Checking here gives a clean
-		// abort: the loop exits, BatchesSent reflects what actually
-		// landed, and the caller sees no false "the server is down"
-		// noise.
-		if err := ctx.Err(); err != nil {
-			emit("complete", fmt.Sprintf("aborted: %v (sent=%d, remaining=%d)",
-				err, res.BatchesSent, len(batches)-i))
-			return res, err
-		}
-		emitBatch("batch_sending", i+1, len(batches),
-			fmt.Sprintf("batch %d/%d (%d rows, request_id=%s, is_final=%t)",
-				i+1, len(batches), len(body.Batch), body.RequestID, body.IsFinal),
-			nil)
-		accepted, sendErr := sender.Send(ctx, body)
-		if sendErr != nil {
-			res.BatchesFailed++
-			res.BatchErrors = append(res.BatchErrors, BatchError{
-				Index:     i + 1,
-				Total:     len(batches),
-				RequestID: body.RequestID,
-				Err:       sendErr,
-			})
-			emitBatch("batch_failed", i+1, len(batches),
-				sendErr.Error(), sendErr)
-			// Continue past per-batch failures so the caller gets a
-			// complete picture in one run rather than one error at a
-			// time.
-			continue
-		}
-		res.ServerInserted += accepted.Counters.Inserted
-		res.ServerAmended += accepted.Counters.Amended
-		res.ServerSkipped += accepted.Counters.Skipped
-		res.ServerErrors += accepted.Counters.Errors
-		if findings := accepted.AllFindings(); len(findings) > 0 {
-			res.ServerFindings = append(res.ServerFindings, findings...)
-		}
-		res.BatchesSent++
-		emitBatch("batch_sent", i+1, len(batches),
-			fmt.Sprintf("accepted (inserted=%d amended=%d skipped=%d errors=%d)",
-				accepted.Counters.Inserted,
-				accepted.Counters.Amended,
-				accepted.Counters.Skipped,
-				accepted.Counters.Errors),
-			nil)
-	}
-
-	emit("complete", fmt.Sprintf("sent=%d failed=%d rows=%d",
-		res.BatchesSent, res.BatchesFailed, res.RowCount))
-	return res, nil
 }
