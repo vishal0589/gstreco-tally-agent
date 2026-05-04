@@ -85,7 +85,7 @@ func TestBuildDayBookXML_Validation(t *testing.T) {
 			Company: "Acme",
 			From:    time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
 			To:      time.Date(2026, 4, 30, 0, 0, 0, 0, time.UTC),
-			Kind:    VoucherKind("journal"),
+			Kind:    VoucherKind("mystery_kind"),
 		}},
 		{"control char", DayBookRequest{
 			Company: "Acme\x01Corp",

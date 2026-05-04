@@ -37,6 +37,9 @@ type fakeSyncAllIngest struct {
 	mappings    *ingest.ActiveMappingsResponse
 	fetchErr    error
 	sent        []tally.IngestRequestBody
+	journalSent []tally.JournalIngestRequestBody
+	paymentSent []tally.PaymentIngestRequestBody
+	taxSent     []tally.TaxLedgerIngestRequestBody
 	sendErr     error
 }
 
@@ -44,6 +47,31 @@ func (f *fakeSyncAllIngest) Send(_ context.Context, body tally.IngestRequestBody
 	f.sent = append(f.sent, body)
 	return f.sendErr
 }
+
+func (f *fakeSyncAllIngest) SendJournal(_ context.Context, body tally.JournalIngestRequestBody) (tally.AccountingAcceptedResponse, error) {
+	f.journalSent = append(f.journalSent, body)
+	if f.sendErr != nil {
+		return tally.AccountingAcceptedResponse{}, f.sendErr
+	}
+	return tally.AccountingAcceptedResponse{Processed: len(body.Batch)}, nil
+}
+
+func (f *fakeSyncAllIngest) SendPayment(_ context.Context, body tally.PaymentIngestRequestBody) (tally.AccountingAcceptedResponse, error) {
+	f.paymentSent = append(f.paymentSent, body)
+	if f.sendErr != nil {
+		return tally.AccountingAcceptedResponse{}, f.sendErr
+	}
+	return tally.AccountingAcceptedResponse{Processed: len(body.Batch)}, nil
+}
+
+func (f *fakeSyncAllIngest) SendTaxLedgers(_ context.Context, body tally.TaxLedgerIngestRequestBody) (tally.AccountingAcceptedResponse, error) {
+	f.taxSent = append(f.taxSent, body)
+	if f.sendErr != nil {
+		return tally.AccountingAcceptedResponse{}, f.sendErr
+	}
+	return tally.AccountingAcceptedResponse{Processed: len(body.Batch)}, nil
+}
+
 func (f *fakeSyncAllIngest) FetchActiveMappings(_ context.Context) (*ingest.ActiveMappingsResponse, error) {
 	if f.fetchErr != nil {
 		return nil, f.fetchErr
@@ -78,18 +106,19 @@ func setupKeyring(t *testing.T, connectionID string) keyring.Store {
 
 func TestParseKinds(t *testing.T) {
 	cases := []struct {
-		in       string
-		wantLen  int
-		wantErr  bool
+		in        string
+		wantLen   int
+		wantErr   bool
 		wantNames []string
 	}{
 		{"purchase,sales", 2, false, []string{"purchase", "sales"}},
 		{"sales, purchase, credit_note, debit_note", 4, false, []string{"sales", "purchase", "credit_note", "debit_note"}},
 		{"sales,sales,sales", 1, false, []string{"sales"}}, // dedup
 		{" purchase ", 1, false, []string{"purchase"}},
+		{"journal,payment,tax_ledger", 3, false, []string{"journal", "payment", "tax_ledger"}},
+		{"tax-ledger,tax_ledger", 1, false, []string{"tax_ledger"}},
 		{"", 0, true, nil},
 		{",,,", 0, true, nil},
-		{"journal", 0, true, nil},
 	}
 	for _, c := range cases {
 		got, err := parseKinds(c.in)

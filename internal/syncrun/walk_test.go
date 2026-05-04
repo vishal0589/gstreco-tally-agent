@@ -1,6 +1,7 @@
 package syncrun
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"sync/atomic"
@@ -26,18 +27,39 @@ func makeMappings(n int) []ingest.ActiveMapping {
 	return out
 }
 
+const stubTaxLedgerResponse = `<ENVELOPE>
+  <HEADER><STATUS>1</STATUS></HEADER>
+  <BODY><DATA><COLLECTION>
+    <LEDGER>
+      <NAME>Input IGST</NAME>
+      <PARENT>Duties &amp; Taxes</PARENT>
+      <PERIODOPENINGBALANCE>100.00</PERIODOPENINGBALANCE>
+      <PERIODDEBITTOTALS>1200.00</PERIODDEBITTOTALS>
+      <PERIODCREDITTOTALS>300.00</PERIODCREDITTOTALS>
+      <PERIODCLOSINGBALANCE>1000.00</PERIODCLOSINGBALANCE>
+    </LEDGER>
+  </COLLECTION></DATA></BODY>
+</ENVELOPE>`
+
 func TestWalkAll_HappyPath_AllMappingsAllKinds(t *testing.T) {
-	tly := &fakeTally{resp: []byte(stubResponse)}
+	tly := &fakeTally{
+		respond: func(body []byte) []byte {
+			if bytes.Contains(body, []byte("GstrecoTaxLedgerCollection")) {
+				return []byte(stubTaxLedgerResponse)
+			}
+			return []byte(stubResponse)
+		},
+	}
 	snd := &fakeSender{}
 	mappings := makeMappings(2)
 
 	res := WalkAll(context.Background(), WalkOptions{
-		Mappings:    mappings,
-		Kinds:       DefaultKinds,
-		From:        time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
-		To:          time.Date(2026, 4, 30, 0, 0, 0, 0, time.UTC),
-		RunIDPrefix: "test",
-		RunKind:     "manual",
+		Mappings:        mappings,
+		Kinds:           DefaultKinds,
+		From:            time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
+		To:              time.Date(2026, 4, 30, 0, 0, 0, 0, time.UTC),
+		RunIDPrefix:     "test",
+		RunKind:         "manual",
 		ContinueOnError: true,
 		NewTallyClient: func(string) TallyPoster {
 			return tly
@@ -47,12 +69,12 @@ func TestWalkAll_HappyPath_AllMappingsAllKinds(t *testing.T) {
 	if res.MappingsRun != 2 {
 		t.Errorf("MappingsRun=%d, want 2", res.MappingsRun)
 	}
-	// 2 mappings × 4 kinds × 1 voucher per stub = 8 rows total
-	if res.TotalRows != 8 {
-		t.Errorf("TotalRows=%d, want 8", res.TotalRows)
+	// 2 mappings × 7 kinds × 1 row per stub response = 14 rows total.
+	if res.TotalRows != 14 {
+		t.Errorf("TotalRows=%d, want 14", res.TotalRows)
 	}
-	if res.TotalBatchesSent != 8 {
-		t.Errorf("TotalBatchesSent=%d, want 8", res.TotalBatchesSent)
+	if res.TotalBatchesSent != 14 {
+		t.Errorf("TotalBatchesSent=%d, want 14", res.TotalBatchesSent)
 	}
 	if res.FatalErrors != 0 {
 		t.Errorf("FatalErrors=%d, want 0", res.FatalErrors)
@@ -68,8 +90,8 @@ func TestWalkAll_ContinuesOnFatalErrorWhenFlagTrue(t *testing.T) {
 	mappings := makeMappings(2)
 
 	res := WalkAll(context.Background(), WalkOptions{
-		Mappings:    mappings,
-		Kinds:       []KindPair{{Name: "purchase"}}, // narrow to 1 kind for clarity
+		Mappings:        mappings,
+		Kinds:           []KindPair{{Name: "purchase"}}, // narrow to 1 kind for clarity
 		ContinueOnError: true,
 		NewTallyClient:  func(string) TallyPoster { return tly },
 		Sender:          snd,
@@ -96,8 +118,8 @@ func TestWalkAll_StopsEarlyWhenContinueFalse(t *testing.T) {
 	hookCalls := int32(0)
 
 	res := WalkAll(context.Background(), WalkOptions{
-		Mappings:    mappings,
-		Kinds:       []KindPair{{Name: "purchase"}},
+		Mappings:        mappings,
+		Kinds:           []KindPair{{Name: "purchase"}},
 		ContinueOnError: false,
 		NewTallyClient:  func(string) TallyPoster { return tly },
 		Sender:          snd,
@@ -127,8 +149,8 @@ func TestWalkAll_HookFiringOrder(t *testing.T) {
 	events := []string{}
 
 	WalkAll(context.Background(), WalkOptions{
-		Mappings:    mappings,
-		Kinds:       []KindPair{{Name: "purchase"}, {Name: "sales"}},
+		Mappings:        mappings,
+		Kinds:           []KindPair{{Name: "purchase"}, {Name: "sales"}},
 		ContinueOnError: true,
 		NewTallyClient:  func(string) TallyPoster { return tly },
 		Sender:          snd,
@@ -169,21 +191,31 @@ func TestWalkAll_EmptyMappingsReturnsZeroes(t *testing.T) {
 }
 
 func TestWalkAll_DefaultKindsFallback(t *testing.T) {
-	tly := &fakeTally{resp: []byte(stubResponse)}
+	tly := &fakeTally{
+		respond: func(body []byte) []byte {
+			if bytes.Contains(body, []byte("GstrecoTaxLedgerCollection")) {
+				return []byte(stubTaxLedgerResponse)
+			}
+			return []byte(stubResponse)
+		},
+	}
 	snd := &fakeSender{}
 	res := WalkAll(context.Background(), WalkOptions{
-		Mappings:    makeMappings(1),
-		// Kinds intentionally nil — should default to all 4.
+		Mappings: makeMappings(1),
+		// Kinds intentionally nil — should default to the full supported set.
 		ContinueOnError: true,
 		NewTallyClient:  func(string) TallyPoster { return tly },
 		Sender:          snd,
-		From:            time.Now(),
-		To:              time.Now(),
+		From:            time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
+		To:              time.Date(2026, 4, 30, 0, 0, 0, 0, time.UTC),
 		RunIDPrefix:     "test",
 		RunKind:         "manual",
 	})
-	if res.TotalRows != 4 {
-		t.Errorf("TotalRows=%d, want 4 (1 mapping × 4 default kinds × 1 voucher per stub)", res.TotalRows)
+	if res.TotalRows != 7 {
+		t.Errorf("TotalRows=%d, want 7 (1 mapping × 7 default kinds × 1 row per stub)", res.TotalRows)
+	}
+	if res.FatalErrors != 0 {
+		t.Errorf("FatalErrors=%d, want 0", res.FatalErrors)
 	}
 }
 
@@ -200,7 +232,10 @@ func TestMapKindByName(t *testing.T) {
 		{"creditnote", "credit_note", false},
 		{"debit_note", "debit_note", false},
 		{"debit-note", "debit_note", false},
-		{"journal", "", true},
+		{"journal", "journal", false},
+		{"payment", "payment", false},
+		{"tax_ledger", "tax_ledger", false},
+		{"tax-ledger", "tax_ledger", false},
 		{"", "", true},
 	}
 	for _, c := range cases {
@@ -223,15 +258,15 @@ func TestWalkAll_PerRunProgressIsKeyed(t *testing.T) {
 	progressKinds := []string{}
 
 	WalkAll(context.Background(), WalkOptions{
-		Mappings: makeMappings(1),
-		Kinds:    []KindPair{{Name: "purchase"}, {Name: "sales"}},
+		Mappings:        makeMappings(1),
+		Kinds:           []KindPair{{Name: "purchase"}, {Name: "sales"}},
 		ContinueOnError: true,
-		From:        time.Now(),
-		To:          time.Now(),
-		RunIDPrefix: "test",
-		RunKind:     "manual",
-		NewTallyClient: func(string) TallyPoster { return tly },
-		Sender:         snd,
+		From:            time.Now(),
+		To:              time.Now(),
+		RunIDPrefix:     "test",
+		RunKind:         "manual",
+		NewTallyClient:  func(string) TallyPoster { return tly },
+		Sender:          snd,
 		PerRunProgress: func(_ ingest.ActiveMapping, k KindPair) Progress {
 			progressKinds = append(progressKinds, k.Name)
 			return func(Event) {}
@@ -255,16 +290,16 @@ func TestWalkAll_CtxCancellationPropagates(t *testing.T) {
 	cancel() // already cancelled
 
 	res := WalkAll(ctx, WalkOptions{
-		Mappings: makeMappings(1),
-		Kinds:    []KindPair{{Name: "purchase"}},
+		Mappings:        makeMappings(1),
+		Kinds:           []KindPair{{Name: "purchase"}},
 		ContinueOnError: true,
-		From:        time.Now(),
-		To:          time.Now(),
-		RunIDPrefix: "test",
-		RunKind:     "manual",
-		PerRunTimeout: 100 * time.Millisecond,
-		NewTallyClient: func(string) TallyPoster { return tly },
-		Sender:         snd,
+		From:            time.Now(),
+		To:              time.Now(),
+		RunIDPrefix:     "test",
+		RunKind:         "manual",
+		PerRunTimeout:   100 * time.Millisecond,
+		NewTallyClient:  func(string) TallyPoster { return tly },
+		Sender:          snd,
 	})
 	// At least one fatal error from the cancelled fetch.
 	if res.FatalErrors == 0 {
