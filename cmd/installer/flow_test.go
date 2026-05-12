@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -205,6 +207,74 @@ func TestRunInstallerMain_HelpBypassesWindowsGate(t *testing.T) {
 	exitCode := runInstallerMain(os.Stdout, os.Stderr, os.Stdin, []string{"--help"}, deps)
 	if exitCode != 0 {
 		t.Fatalf("exitCode=%d want 0", exitCode)
+	}
+}
+
+func TestDownloadAsset_DoesNotClobberExistingBinaryOnChecksumMismatch(t *testing.T) {
+	tmp := t.TempDir()
+	dest := filepath.Join(tmp, "gstreco-tally-agent.exe")
+	if err := os.WriteFile(dest, []byte("old-binary"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	httpClient := &http.Client{
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return binaryResponse(200, []byte("new-binary")), nil
+		}),
+	}
+
+	err := downloadAsset(
+		context.Background(),
+		httpClient,
+		"https://example.com/gstreco-tally-agent.exe",
+		dest,
+		strings.Repeat("0", 64),
+	)
+	if err == nil {
+		t.Fatal("expected checksum mismatch")
+	}
+
+	got, readErr := os.ReadFile(dest)
+	if readErr != nil {
+		t.Fatalf("read existing binary: %v", readErr)
+	}
+	if string(got) != "old-binary" {
+		t.Fatalf("binary was clobbered: got %q", string(got))
+	}
+}
+
+func TestDownloadAsset_ReplacesExistingBinaryAfterVerification(t *testing.T) {
+	tmp := t.TempDir()
+	dest := filepath.Join(tmp, "gstreco-tally-agent.exe")
+	if err := os.WriteFile(dest, []byte("old-binary"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	payload := []byte("new-binary")
+	sum := sha256.Sum256(payload)
+	httpClient := &http.Client{
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return binaryResponse(200, payload), nil
+		}),
+	}
+
+	err := downloadAsset(
+		context.Background(),
+		httpClient,
+		"https://example.com/gstreco-tally-agent.exe",
+		dest,
+		hex.EncodeToString(sum[:]),
+	)
+	if err != nil {
+		t.Fatalf("downloadAsset: %v", err)
+	}
+
+	got, readErr := os.ReadFile(dest)
+	if readErr != nil {
+		t.Fatalf("read replaced binary: %v", readErr)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("binary mismatch: got %q want %q", string(got), string(payload))
 	}
 }
 

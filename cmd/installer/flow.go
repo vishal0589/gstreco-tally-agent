@@ -25,15 +25,15 @@ import (
 )
 
 type installerDeps struct {
-	goos             func() string
-	version          func() string
-	httpClient       *http.Client
-	isAdmin          func() (bool, error)
-	relaunchAsAdmin  func(args []string) error
-	openBrowser      func(url string) error
-	runCommand       func(ctx context.Context, name string, args ...string) (commandResult, error)
-	persistPair      func(opts pair.PersistOptions) error
-	loadLocalPair    func(configPath string) (localPairState, error)
+	goos            func() string
+	version         func() string
+	httpClient      *http.Client
+	isAdmin         func() (bool, error)
+	relaunchAsAdmin func(args []string) error
+	openBrowser     func(url string) error
+	runCommand      func(ctx context.Context, name string, args ...string) (commandResult, error)
+	persistPair     func(opts pair.PersistOptions) error
+	loadLocalPair   func(configPath string) (localPairState, error)
 }
 
 func defaultInstallerDeps() installerDeps {
@@ -158,13 +158,13 @@ type startSessionRequest struct {
 }
 
 type startSessionResponse struct {
-	SessionID      string `json:"session_id"`
-	SessionToken   string `json:"session_token"`
-	UserCode       string `json:"user_code"`
+	SessionID       string `json:"session_id"`
+	SessionToken    string `json:"session_token"`
+	UserCode        string `json:"user_code"`
 	VerificationURL string `json:"verification_url"`
-	ExpiresAt      string `json:"expires_at"`
-	PollIntervalMS int    `json:"poll_interval_ms"`
-	Status         string `json:"status"`
+	ExpiresAt       string `json:"expires_at"`
+	PollIntervalMS  int    `json:"poll_interval_ms"`
+	Status          string `json:"status"`
 }
 
 type sessionStatusResponse struct {
@@ -333,9 +333,9 @@ func (c *installerSessionClient) doJSON(ctx context.Context, method, path, sessi
 }
 
 type localPairState struct {
-	State        string
-	ConfigPath   string
-	Config       *config.Config
+	State      string
+	ConfigPath string
+	Config     *config.Config
 }
 
 func detectLocalPairState(configPath string) (localPairState, error) {
@@ -802,13 +802,26 @@ func downloadAsset(ctx context.Context, httpClient *http.Client, url, dest, expe
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return fmt.Errorf("download %s failed: %s", url, strings.TrimSpace(string(body)))
 	}
-	file, err := os.Create(dest)
+	file, err := os.CreateTemp(filepath.Dir(dest), filepath.Base(dest)+".*.download")
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	tempPath := file.Name()
+	cleanupTemp := true
+	defer func() {
+		_ = file.Close()
+		if cleanupTemp {
+			_ = os.Remove(tempPath)
+		}
+	}()
 	hasher := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(file, hasher), resp.Body); err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
 		return err
 	}
 	if strings.TrimSpace(expectedSHA) != "" {
@@ -816,6 +829,47 @@ func downloadAsset(ctx context.Context, httpClient *http.Client, url, dest, expe
 		if !strings.EqualFold(actual, strings.TrimSpace(expectedSHA)) {
 			return fmt.Errorf("sha256 mismatch for %s", dest)
 		}
+	}
+	if err := replaceDownloadedFile(tempPath, dest); err != nil {
+		return err
+	}
+	cleanupTemp = false
+	return nil
+}
+
+func replaceDownloadedFile(tempPath, dest string) error {
+	backupPath := dest + ".bak"
+	movedExisting := false
+
+	if _, err := os.Stat(dest); err == nil {
+		_ = os.Remove(backupPath)
+		if err := os.Rename(dest, backupPath); err != nil {
+			return fmt.Errorf("move existing %s aside: %w", dest, err)
+		}
+		movedExisting = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	if err := os.Rename(tempPath, dest); err != nil {
+		if movedExisting {
+			if restoreErr := os.Rename(backupPath, dest); restoreErr != nil {
+				return fmt.Errorf(
+					"replace %s: %w (restore failed: %v)",
+					dest,
+					err,
+					restoreErr,
+				)
+			}
+		}
+		return fmt.Errorf("replace %s: %w", dest, err)
+	}
+
+	if err := os.Chmod(dest, 0o755); err != nil {
+		return err
+	}
+	if movedExisting {
+		_ = os.Remove(backupPath)
 	}
 	return nil
 }
