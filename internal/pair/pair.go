@@ -176,33 +176,74 @@ func Claim(ctx context.Context, opts Options) (*ClaimResponse, error) {
 		return nil, fmt.Errorf("pair: server response missing connection_id/hmac_secret/token")
 	}
 
+	if err := PersistCredentials(PersistOptions{
+		ConfigPath:   configPath,
+		Keyring:      opts.Keyring,
+		Server:       opts.Server,
+		DeviceName:   deviceName,
+		ConnectionID: claim.ConnectionID,
+		Token:        claim.Token,
+		HmacSecret:   claim.HmacSecret,
+		PairedAt:     time.Now().UTC(),
+	}); err != nil {
+		return nil, err
+	}
+
+	return &claim, nil
+}
+
+type PersistOptions struct {
+	ConfigPath   string
+	Keyring      keyring.Store
+	Server       string
+	DeviceName   string
+	ConnectionID string
+	Token        string
+	HmacSecret   string
+	PairedAt     time.Time
+}
+
+func PersistCredentials(opts PersistOptions) error {
+	if opts.ConfigPath == "" {
+		opts.ConfigPath = config.DefaultPath()
+	}
+	if opts.Keyring == nil {
+		return fmt.Errorf("pair: Keyring is required")
+	}
+	if opts.ConnectionID == "" || opts.Token == "" || opts.HmacSecret == "" {
+		return fmt.Errorf("pair: connection_id, token, and hmac_secret are required")
+	}
+	pairedAt := opts.PairedAt
+	if pairedAt.IsZero() {
+		pairedAt = time.Now().UTC()
+	}
+
 	// Persist secrets to keyring FIRST. If the keyring write fails, the
 	// config is never touched and the agent remains in the "unpaired" state
 	// so the user can retry without clobbering anything.
-	hmacKey, bearerKey := keyring.ConnectionKeys(claim.ConnectionID)
-	if err := opts.Keyring.Set(keyring.ServiceName, hmacKey, claim.HmacSecret); err != nil {
-		return nil, fmt.Errorf("pair: store hmac secret: %w", err)
+	hmacKey, bearerKey := keyring.ConnectionKeys(opts.ConnectionID)
+	if err := opts.Keyring.Set(keyring.ServiceName, hmacKey, opts.HmacSecret); err != nil {
+		return fmt.Errorf("pair: store hmac secret: %w", err)
 	}
-	if err := opts.Keyring.Set(keyring.ServiceName, bearerKey, claim.Token); err != nil {
+	if err := opts.Keyring.Set(keyring.ServiceName, bearerKey, opts.Token); err != nil {
 		// Roll back the hmac write to keep the two-of-two invariant.
 		_ = opts.Keyring.Delete(keyring.ServiceName, hmacKey)
-		return nil, fmt.Errorf("pair: store bearer token: %w", err)
+		return fmt.Errorf("pair: store bearer token: %w", err)
 	}
 
 	cfg := &Config{
 		Server:       strings.TrimRight(opts.Server, "/"),
-		ConnectionID: claim.ConnectionID,
-		DeviceName:   deviceName,
-		PairedAt:     time.Now().UTC(),
+		ConnectionID: opts.ConnectionID,
+		DeviceName:   opts.DeviceName,
+		PairedAt:     pairedAt,
 	}
-	if err := config.Save(configPath, (*config.Config)(cfg)); err != nil {
+	if err := config.Save(opts.ConfigPath, (*config.Config)(cfg)); err != nil {
 		// Roll back both keyring writes so the agent stays clean-unpaired.
 		_ = opts.Keyring.Delete(keyring.ServiceName, hmacKey)
 		_ = opts.Keyring.Delete(keyring.ServiceName, bearerKey)
-		return nil, fmt.Errorf("pair: save config: %w", err)
+		return fmt.Errorf("pair: save config: %w", err)
 	}
-
-	return &claim, nil
+	return nil
 }
 
 // Config is a local alias so we can use struct conversion to config.Config

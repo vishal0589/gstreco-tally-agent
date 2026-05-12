@@ -24,6 +24,16 @@ jobs:
       - name: build release artifacts
         run: make release
 
+      - name: flatten raw artifacts
+        run: |
+          cp dist/windows-amd64/gstreco-tally-agentctl.exe dist/gstreco-tally-agentctl-windows-amd64.exe
+          cp dist/windows-amd64/gstreco-tally-agent.exe dist/gstreco-tally-agent-windows-amd64.exe
+          cp dist/windows-amd64/gstreco-tally-installer.exe dist/gstreco-tally-installer-windows-amd64.exe
+          cp dist/linux-amd64/gstreco-tally-agentctl dist/gstreco-tally-agentctl-linux-amd64
+          cp dist/linux-amd64/gstreco-tally-agent dist/gstreco-tally-agent-linux-amd64
+          cp dist/darwin-arm64/gstreco-tally-agentctl dist/gstreco-tally-agentctl-darwin-arm64
+          cp dist/darwin-arm64/gstreco-tally-agent dist/gstreco-tally-agent-darwin-arm64
+
       - name: package
         run: |
           cd dist
@@ -34,12 +44,27 @@ jobs:
       - name: compute checksums
         run: |
           cd dist
-          sha256sum gstreco-tally-agent-*.zip > SHA256SUMS
+          sha256sum \
+            gstreco-tally-agentctl-windows-amd64.exe \
+            gstreco-tally-agent-windows-amd64.exe \
+            gstreco-tally-installer-windows-amd64.exe \
+            gstreco-tally-agentctl-linux-amd64 \
+            gstreco-tally-agent-linux-amd64 \
+            gstreco-tally-agentctl-darwin-arm64 \
+            gstreco-tally-agent-darwin-arm64 \
+            gstreco-tally-agent-*.zip > SHA256SUMS
 
       - name: create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           files: |
+            dist/gstreco-tally-agentctl-windows-amd64.exe
+            dist/gstreco-tally-agent-windows-amd64.exe
+            dist/gstreco-tally-installer-windows-amd64.exe
+            dist/gstreco-tally-agentctl-linux-amd64
+            dist/gstreco-tally-agent-linux-amd64
+            dist/gstreco-tally-agentctl-darwin-arm64
+            dist/gstreco-tally-agent-darwin-arm64
             dist/gstreco-tally-agent-*.zip
             dist/SHA256SUMS
           draft: true
