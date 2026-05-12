@@ -17,7 +17,7 @@ BUILDENV  := CGO_ENABLED=0
 BIN  := bin
 DIST := dist
 
-CMDS := agent tray agentctl
+CMDS := agent tray agentctl installer
 
 # Per-platform cross-compile uses recursive make so each invocation gets its
 # own GOOS/GOARCH/EXT/PLATFORM variables and the `_cross` target is rebuilt
@@ -26,7 +26,7 @@ CMDS := agent tray agentctl
 
 all: build
 
-build: ## Build all three binaries for the host platform into ./bin
+build: ## Build all four binaries for the host platform into ./bin
 	@mkdir -p $(BIN)
 	@for cmd in $(CMDS); do \
 	  echo "→ $$cmd (host)"; \

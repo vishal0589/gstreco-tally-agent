@@ -4,6 +4,15 @@ Windows agent that polls Tally Prime (3.x+) on the customer's LAN and pushes vou
 
 See `~/GST_Reco/docs/plans/2026-04-tally-agent/master-plan.md` for the full architecture + decisions log (server-side repo, master plan).
 
+## Installer-first preview
+
+The primary Windows onboarding flow is now **installer-first**:
+
+- `gstreco-tally-installer.exe` is the happy path for normal Windows users.
+- The installer starts a browser-authorized session with GST Reco, opens the approval page, claims credentials after approval, installs or repairs the Windows service, and runs discovery-first against the common Tally ports.
+- `agentctl pair --code` and app-side `install.ps1` remain available as **support fallbacks**, not the default product path.
+- Manual Tally port entry is a fallback-only step after automatic discovery fails.
+
 ## Status
 
 Phase A + Phase B + v0.1.2 shipped. Pilot install on PLLUM uncovered four pre-existing install-path bugs (TLS 1.2 not forced; `2>$null` not suppressing native errors under `ErrorActionPreference=Stop`; `$env:ProgramFiles` resolving to `(x86)` under 32-bit PowerShell; Windows Credential Manager scoped per-user so `LocalSystem`-running service couldn't read what `Administrator`-running pair wrote). v0.1.2 fixes all four:
@@ -13,9 +22,7 @@ Phase A + Phase B + v0.1.2 shipped. Pilot install on PLLUM uncovered four pre-ex
 - Default discovery range widened from 9000–9009 to 9000–9020 plus alternates `2026, 8989` to cover the common non-default ports we've seen in pilot installs.
 - `install.ps1` (in the GST_Reco repo) prepends TLS 1.2, uses `Get-Service` existence check before stop/uninstall, hardcodes the install dir to `C:\Program Files\GST Reco Agent`, and accepts `GSTRECO_TALLY_PORTS` for non-default-port customers.
 
-The pair modal in `/settings/tally` now has an optional "Tally port(s)" field that bakes the value into the install one-liner.
-
-A fresh customer install: paste one PowerShell line, type your Tally port (or leave blank), wait ~60s. Agent finds the companies, populates the mapping UI, the operator maps GSTINs to companies in the web app, scheduled syncs run.
+A fresh customer install is now: download the Windows installer, approve the machine in the browser, let the installer try the common Tally ports automatically, and only enter custom ports if discovery still fails. The older PowerShell flow remains available for recovery and support.
 
 **v0.1.3 — Tally Prime 6.x discovery hardening.** The PLLUM pilot install on Tally Prime 6.1 surfaced three protocol assumptions baked into v0.1.2's discovery path that only held for Tally Prime 3.x:
 
@@ -71,7 +78,7 @@ The full target layout (ingest, pair, tally, scheduler, keyring, service, update
 ## Build
 
 ```bash
-make              # build all three binaries for the host platform → ./bin
+make              # build all four binaries for the host platform → ./bin
 make windows      # cross-compile for windows/amd64 → ./dist/windows-amd64
 make release      # build all platforms → ./dist
 go test ./...
@@ -79,6 +86,12 @@ go vet ./...
 ```
 
 Go 1.24+ required. CI builds on `ubuntu-latest`.
+
+`make windows` now produces `gstreco-tally-installer.exe` alongside
+`gstreco-tally-agent.exe`, `gstreco-tally-agentctl.exe`, and the tray binary.
+The release workflow also publishes raw Windows/Linux/macOS agent assets so
+GST Reco's installer metadata endpoint can advertise direct download URLs
+without forcing the app or installer to unpack zip bundles first.
 
 ## Signing
 
