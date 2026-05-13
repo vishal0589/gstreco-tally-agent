@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vishal0589/gstreco-tally-agent/internal/ingest"
 	"github.com/vishal0589/gstreco-tally-agent/internal/tally"
 )
 
@@ -44,36 +45,88 @@ const stubResponse = `<ENVELOPE>
 </ENVELOPE>`
 
 type fakeTally struct {
-	resp []byte
-	err  error
-	got  []byte
+	resp    []byte
+	err     error
+	got     []byte
+	respond func(body []byte) []byte
 }
 
 func (f *fakeTally) PostXML(_ context.Context, body []byte) ([]byte, error) {
 	f.got = body
+	if f.respond != nil {
+		return f.respond(body), f.err
+	}
 	return f.resp, f.err
 }
 
 type fakeSender struct {
-	sent []tally.IngestRequestBody
-	err  error
+	sent           []tally.IngestRequestBody
+	journalSent    []tally.JournalIngestRequestBody
+	paymentSent    []tally.PaymentIngestRequestBody
+	taxLedgerSent  []tally.TaxLedgerIngestRequestBody
+	err            error
+	resp           ingest.AcceptedResponse
+	accountingResp tally.AccountingAcceptedResponse
 }
 
-func (f *fakeSender) Send(_ context.Context, body tally.IngestRequestBody) error {
+func (f *fakeSender) Send(_ context.Context, body tally.IngestRequestBody) (ingest.AcceptedResponse, error) {
 	f.sent = append(f.sent, body)
-	return f.err
+	if f.err != nil {
+		return ingest.AcceptedResponse{}, f.err
+	}
+	resp := f.resp
+	if resp.Counters == (ingest.AcceptedCounters{}) {
+		resp.Counters.Inserted = len(body.Batch)
+	}
+	return resp, nil
+}
+
+func (f *fakeSender) SendJournal(_ context.Context, body tally.JournalIngestRequestBody) (tally.AccountingAcceptedResponse, error) {
+	f.journalSent = append(f.journalSent, body)
+	if f.err != nil {
+		return tally.AccountingAcceptedResponse{}, f.err
+	}
+	resp := f.accountingResp
+	if resp.Processed == 0 {
+		resp.Processed = len(body.Batch)
+	}
+	return resp, nil
+}
+
+func (f *fakeSender) SendPayment(_ context.Context, body tally.PaymentIngestRequestBody) (tally.AccountingAcceptedResponse, error) {
+	f.paymentSent = append(f.paymentSent, body)
+	if f.err != nil {
+		return tally.AccountingAcceptedResponse{}, f.err
+	}
+	resp := f.accountingResp
+	if resp.Processed == 0 {
+		resp.Processed = len(body.Batch)
+	}
+	return resp, nil
+}
+
+func (f *fakeSender) SendTaxLedgers(_ context.Context, body tally.TaxLedgerIngestRequestBody) (tally.AccountingAcceptedResponse, error) {
+	f.taxLedgerSent = append(f.taxLedgerSent, body)
+	if f.err != nil {
+		return tally.AccountingAcceptedResponse{}, f.err
+	}
+	resp := f.accountingResp
+	if resp.Processed == 0 {
+		resp.Processed = len(body.Batch)
+	}
+	return resp, nil
 }
 
 func makeReq() Request {
 	return Request{
-		TallyCompany: "PLLUM CASA",
+		TallyCompany:  "PLLUM CASA",
 		TallyEndpoint: "http://127.0.0.1:9000",
-		TallyKind:    tally.VoucherPurchase,
-		IngestKind:   tally.IngestKindPurchase,
-		From:         time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
-		To:           time.Date(2026, 4, 30, 0, 0, 0, 0, time.UTC),
-		RunID:        "test-run-1",
-		RunKind:      "manual",
+		TallyKind:     tally.VoucherPurchase,
+		IngestKind:    tally.IngestKindPurchase,
+		From:          time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
+		To:            time.Date(2026, 4, 30, 0, 0, 0, 0, time.UTC),
+		RunID:         "test-run-1",
+		RunKind:       "manual",
 	}
 }
 
@@ -91,6 +144,12 @@ func TestRunOne_HappyPath_PostsOneBatch(t *testing.T) {
 	if snd.sent[0].TallyEndpoint == nil || *snd.sent[0].TallyEndpoint != "http://127.0.0.1:9000" {
 		t.Errorf("TallyEndpoint=%v, want http://127.0.0.1:9000", snd.sent[0].TallyEndpoint)
 	}
+	if snd.sent[0].PeriodFrom == nil || *snd.sent[0].PeriodFrom != "2026-04-01" {
+		t.Errorf("PeriodFrom=%v, want 2026-04-01", snd.sent[0].PeriodFrom)
+	}
+	if snd.sent[0].PeriodTo == nil || *snd.sent[0].PeriodTo != "2026-04-30" {
+		t.Errorf("PeriodTo=%v, want 2026-04-30", snd.sent[0].PeriodTo)
+	}
 	if res.RowCount != 1 {
 		t.Errorf("RowCount=%d, want 1", res.RowCount)
 	}
@@ -102,6 +161,10 @@ func TestRunOne_HappyPath_PostsOneBatch(t *testing.T) {
 	}
 	if res.ParseStatus != 1 {
 		t.Errorf("ParseStatus=%d, want 1", res.ParseStatus)
+	}
+	if res.ServerInserted != 1 || res.ServerSkipped != 0 || res.ServerErrors != 0 {
+		t.Errorf("server counters = inserted:%d skipped:%d errors:%d, want 1/0/0",
+			res.ServerInserted, res.ServerSkipped, res.ServerErrors)
 	}
 }
 
@@ -214,6 +277,208 @@ func TestRunOne_BatchFailureCapturedNotFatal(t *testing.T) {
 	}
 }
 
+func TestRunOne_JournalPathPostsOneBatch(t *testing.T) {
+	const journalResponse = `<ENVELOPE>
+  <HEADER><STATUS>1</STATUS></HEADER>
+  <BODY><DATA><COLLECTION>
+    <VOUCHER>
+      <DATE>20260415</DATE>
+      <GUID>j-001</GUID>
+      <ALTERID>84</ALTERID>
+      <VOUCHERTYPENAME>Journal</VOUCHERTYPENAME>
+      <VOUCHERNUMBER>JV-001</VOUCHERNUMBER>
+      <PARTYLEDGERNAME>ABC Vendors Pvt Ltd</PARTYLEDGERNAME>
+      <PARTYGSTIN>29ABCDE1234F1Z5</PARTYGSTIN>
+      <ISCANCELLED>No</ISCANCELLED>
+      <ALLLEDGERENTRIES.LIST>
+        <LEDGERNAME>ABC Vendors Pvt Ltd</LEDGERNAME>
+        <AMOUNT>11800.00</AMOUNT>
+        <BILLALLOCATIONS.LIST>
+          <NAME>PI-5501</NAME>
+          <BILLTYPE>Agst Ref</BILLTYPE>
+          <AMOUNT>11800.00</AMOUNT>
+        </BILLALLOCATIONS.LIST>
+      </ALLLEDGERENTRIES.LIST>
+      <ALLLEDGERENTRIES.LIST>
+        <LEDGERNAME>Purchases A/c</LEDGERNAME>
+        <AMOUNT>-10000.00</AMOUNT>
+      </ALLLEDGERENTRIES.LIST>
+      <ALLLEDGERENTRIES.LIST>
+        <LEDGERNAME>IGST @ 18%</LEDGERNAME>
+        <GSTCLASS>IGST@18</GSTCLASS>
+        <AMOUNT>-1800.00</AMOUNT>
+      </ALLLEDGERENTRIES.LIST>
+    </VOUCHER>
+  </COLLECTION></DATA></BODY>
+</ENVELOPE>`
+
+	tly := &fakeTally{resp: []byte(journalResponse)}
+	snd := &fakeSender{}
+	req := makeReq()
+	req.KindName = "journal"
+	req.TallyKind = tally.VoucherJournal
+	req.IngestKind = ""
+
+	res, err := RunOne(context.Background(), tly, snd, req, nil)
+	if err != nil {
+		t.Fatalf("RunOne journal: %v", err)
+	}
+	if len(snd.journalSent) != 1 || res.BatchesSent != 1 {
+		t.Fatalf("journal sends=%d batchesSent=%d, want 1", len(snd.journalSent), res.BatchesSent)
+	}
+	if len(snd.sent) != 0 {
+		t.Fatalf("invoice sends=%d, want 0", len(snd.sent))
+	}
+	if got := snd.journalSent[0].Batch[0].VoucherNumber; got != "JV-001" {
+		t.Errorf("VoucherNumber=%q, want JV-001", got)
+	}
+	if got := snd.journalSent[0].Batch[0].AgainstInvoiceRefs[0].Reference; got != "PI-5501" {
+		t.Errorf("AgainstInvoiceRefs[0]=%q, want PI-5501", got)
+	}
+	if res.RowCount != 1 {
+		t.Errorf("RowCount=%d, want 1", res.RowCount)
+	}
+}
+
+func TestRunOne_PaymentPathPostsOneBatch(t *testing.T) {
+	const paymentResponse = `<ENVELOPE>
+  <HEADER><STATUS>1</STATUS></HEADER>
+  <BODY><DATA><COLLECTION>
+    <VOUCHER>
+      <DATE>20260418</DATE>
+      <GUID>p-001</GUID>
+      <ALTERID>85</ALTERID>
+      <VOUCHERTYPENAME>Bank Payment</VOUCHERTYPENAME>
+      <VOUCHERNUMBER>BP-001</VOUCHERNUMBER>
+      <PARTYLEDGERNAME>ABC Vendors Pvt Ltd</PARTYLEDGERNAME>
+      <PARTYGSTIN>29ABCDE1234F1Z5</PARTYGSTIN>
+      <ISCANCELLED>No</ISCANCELLED>
+      <ALLLEDGERENTRIES.LIST>
+        <LEDGERNAME>ABC Vendors Pvt Ltd</LEDGERNAME>
+        <AMOUNT>-11800.00</AMOUNT>
+        <BILLALLOCATIONS.LIST>
+          <NAME>PI-5501</NAME>
+          <BILLTYPE>Agst Ref</BILLTYPE>
+          <AMOUNT>-11800.00</AMOUNT>
+        </BILLALLOCATIONS.LIST>
+      </ALLLEDGERENTRIES.LIST>
+      <ALLLEDGERENTRIES.LIST>
+        <LEDGERNAME>HDFC Bank</LEDGERNAME>
+        <AMOUNT>11800.00</AMOUNT>
+      </ALLLEDGERENTRIES.LIST>
+    </VOUCHER>
+  </COLLECTION></DATA></BODY>
+</ENVELOPE>`
+
+	tly := &fakeTally{resp: []byte(paymentResponse)}
+	snd := &fakeSender{}
+	req := makeReq()
+	req.KindName = "payment"
+	req.TallyKind = tally.VoucherPayment
+	req.IngestKind = ""
+
+	res, err := RunOne(context.Background(), tly, snd, req, nil)
+	if err != nil {
+		t.Fatalf("RunOne payment: %v", err)
+	}
+	if len(snd.paymentSent) != 1 || res.BatchesSent != 1 {
+		t.Fatalf("payment sends=%d batchesSent=%d, want 1", len(snd.paymentSent), res.BatchesSent)
+	}
+	if len(snd.sent) != 0 {
+		t.Fatalf("invoice sends=%d, want 0", len(snd.sent))
+	}
+	row := snd.paymentSent[0].Batch[0]
+	if row.VoucherNumber != "BP-001" {
+		t.Errorf("VoucherNumber=%q, want BP-001", row.VoucherNumber)
+	}
+	if row.InstrumentType == nil || *row.InstrumentType != "bank" {
+		t.Errorf("InstrumentType=%v, want bank", row.InstrumentType)
+	}
+	if res.RowCount != 1 {
+		t.Errorf("RowCount=%d, want 1", res.RowCount)
+	}
+}
+
+func TestRunOne_TaxLedgerPathPostsOneBatch(t *testing.T) {
+	const taxLedgerResponse = `<ENVELOPE>
+  <HEADER><STATUS>1</STATUS></HEADER>
+  <BODY><DATA><COLLECTION>
+    <LEDGER>
+      <NAME>Input IGST</NAME>
+      <PARENT>Duties &amp; Taxes</PARENT>
+      <PERIODOPENINGBALANCE>100.00</PERIODOPENINGBALANCE>
+      <PERIODDEBITTOTALS>1200.00</PERIODDEBITTOTALS>
+      <PERIODCREDITTOTALS>300.00</PERIODCREDITTOTALS>
+      <PERIODCLOSINGBALANCE>1000.00</PERIODCLOSINGBALANCE>
+    </LEDGER>
+  </COLLECTION></DATA></BODY>
+</ENVELOPE>`
+
+	tly := &fakeTally{resp: []byte(taxLedgerResponse)}
+	snd := &fakeSender{}
+	req := makeReq()
+	req.KindName = "tax_ledger"
+	req.TallyKind = ""
+	req.IngestKind = ""
+
+	res, err := RunOne(context.Background(), tly, snd, req, nil)
+	if err != nil {
+		t.Fatalf("RunOne tax_ledger: %v", err)
+	}
+	if len(snd.taxLedgerSent) != 1 || res.BatchesSent != 1 {
+		t.Fatalf("tax-ledger sends=%d batchesSent=%d, want 1", len(snd.taxLedgerSent), res.BatchesSent)
+	}
+	if len(snd.sent) != 0 {
+		t.Fatalf("invoice sends=%d, want 0", len(snd.sent))
+	}
+	row := snd.taxLedgerSent[0].Batch[0]
+	if row.Period != "042026" {
+		t.Errorf("Period=%q, want 042026", row.Period)
+	}
+	if row.LedgerName != "Input IGST" {
+		t.Errorf("LedgerName=%q, want Input IGST", row.LedgerName)
+	}
+	if row.DebitAmount != 1200 {
+		t.Errorf("DebitAmount=%v, want 1200", row.DebitAmount)
+	}
+}
+
+func TestRunOne_CollectsServerCountersAndFindings(t *testing.T) {
+	tly := &fakeTally{resp: []byte(stubResponse)}
+	snd := &fakeSender{
+		resp: ingest.AcceptedResponse{
+			Counters: ingest.AcceptedCounters{
+				Inserted: 0,
+				Skipped:  1,
+			},
+			Findings: ingest.AcceptedFindings{
+				MissingGSTIN: []ingest.ValidationFinding{
+					{
+						RowIndex:    0,
+						ErrorType:   "invalid_gstin",
+						ErrorDetail: "Vendor GSTIN is missing.",
+						Severity:    "error",
+					},
+				},
+			},
+		},
+	}
+
+	res, err := RunOne(context.Background(), tly, snd, makeReq(), nil)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.ServerSkipped != 1 || res.ServerInserted != 0 {
+		t.Fatalf("server counters = %+v", res)
+	}
+	if len(res.ServerFindings) != 1 {
+		t.Fatalf("ServerFindings=%v, want 1 finding", res.ServerFindings)
+	}
+	if got := res.ServerFindings[0].Scope; got != "missing_gstin" {
+		t.Fatalf("finding scope=%q, want missing_gstin", got)
+	}
+}
+
 func TestRunOne_TallyFetchFailureIsFatal(t *testing.T) {
 	tly := &fakeTally{err: errors.New("tally down")}
 	snd := &fakeSender{}
@@ -307,13 +572,25 @@ type cancellingSender struct {
 	calls  int
 }
 
-func (c *cancellingSender) Send(_ context.Context, _ tally.IngestRequestBody) error {
+func (c *cancellingSender) Send(_ context.Context, _ tally.IngestRequestBody) (ingest.AcceptedResponse, error) {
 	c.calls++
 	if c.calls == 1 {
 		c.cancel()
-		return nil
+		return ingest.AcceptedResponse{Counters: ingest.AcceptedCounters{Inserted: 1}}, nil
 	}
-	return errors.New("cancellingSender: should not be called after ctx cancel")
+	return ingest.AcceptedResponse{}, errors.New("cancellingSender: should not be called after ctx cancel")
+}
+
+func (c *cancellingSender) SendJournal(_ context.Context, _ tally.JournalIngestRequestBody) (tally.AccountingAcceptedResponse, error) {
+	return tally.AccountingAcceptedResponse{}, errors.New("cancellingSender: unexpected SendJournal call")
+}
+
+func (c *cancellingSender) SendPayment(_ context.Context, _ tally.PaymentIngestRequestBody) (tally.AccountingAcceptedResponse, error) {
+	return tally.AccountingAcceptedResponse{}, errors.New("cancellingSender: unexpected SendPayment call")
+}
+
+func (c *cancellingSender) SendTaxLedgers(_ context.Context, _ tally.TaxLedgerIngestRequestBody) (tally.AccountingAcceptedResponse, error) {
+	return tally.AccountingAcceptedResponse{}, errors.New("cancellingSender: unexpected SendTaxLedgers call")
 }
 
 func TestRunOne_NoVouchersStillEmitsCompleteEvent(t *testing.T) {

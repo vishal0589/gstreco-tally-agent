@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +14,7 @@ import (
 	"github.com/vishal0589/gstreco-tally-agent/internal/config"
 	"github.com/vishal0589/gstreco-tally-agent/internal/ingest"
 	"github.com/vishal0589/gstreco-tally-agent/internal/keyring"
+	"github.com/vishal0589/gstreco-tally-agent/internal/period"
 	"github.com/vishal0589/gstreco-tally-agent/internal/syncrun"
 	"github.com/vishal0589/gstreco-tally-agent/internal/tally"
 )
@@ -33,13 +33,13 @@ import (
 //	2 — user-fixable configuration error (bad flags, agent not paired, unknown kind)
 func syncCmd(args []string) int {
 	return runSync(os.Stdout, os.Stderr, args, syncDeps{
-		now:           time.Now,
-		newOSKeyring:  defaultSecretStore,
+		now:          time.Now,
+		newOSKeyring: defaultSecretStore,
 		newTallyClient: func(endpoint string) tallyPoster {
 			return tally.NewClient(endpoint)
 		},
 		newIngestClient: defaultNewIngestClient,
-		loadConfig:     config.Load,
+		loadConfig:      config.Load,
 	})
 }
 
@@ -73,7 +73,7 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 	serverFlag := fs.String("server", "", "override server URL (default: from config)")
 	tallyURL := fs.String("tally-url", "", "Tally HTTP endpoint (default: from config or http://localhost:9000)")
 	tallyCompany := fs.String("tally-company", "", "Tally company name as it appears in Tally (required)")
-	kindFlag := fs.String("kind", "", "voucher kind: purchase | sales | credit_note | debit_note (required)")
+	kindFlag := fs.String("kind", "", "sync kind: purchase | sales | credit_note | debit_note | journal | payment | tax_ledger (required)")
 	period := fs.String("period", "", "month shorthand MMYYYY (e.g. 042026 for Apr 2026); mutually exclusive with --from/--to")
 	fromFlag := fs.String("from", "", "window start YYYY-MM-DD (use with --to instead of --period)")
 	toFlag := fs.String("to", "", "window end YYYY-MM-DD inclusive")
@@ -88,11 +88,11 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 		return 2
 	}
 	if *kindFlag == "" {
-		fmt.Fprintln(stderr, "agentctl sync: --kind is required (one of: purchase, sales, credit_note, debit_note)")
+		fmt.Fprintln(stderr, "agentctl sync: --kind is required (one of: purchase, sales, credit_note, debit_note, journal, payment, tax_ledger)")
 		return 2
 	}
 
-	tallyKind, ingestKind, err := mapKind(*kindFlag)
+	kind, err := mapKind(*kindFlag)
 	if err != nil {
 		fmt.Fprintf(stderr, "agentctl sync: %v\n", err)
 		return 2
@@ -191,7 +191,7 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 		case "batch_sending":
 			fmt.Fprintf(stdout, "→ %s\n", e.Message)
 		case "batch_sent":
-			fmt.Fprintln(stdout, "  ✓ accepted")
+			fmt.Fprintf(stdout, "  ✓ %s\n", e.Message)
 		case "batch_failed":
 			if se := ingest.IsSendError(e.Err); se != nil {
 				fmt.Fprintf(stderr, "  ✗ %s status=%d snippet=%q retryable=%t\n",
@@ -206,15 +206,16 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 	defer cancelRun()
 
 	res, runErr := syncrun.RunOne(runCtx, tallyClient, sender, syncrun.Request{
-		TallyCompany: *tallyCompany,
+		KindName:      kind.Name,
+		TallyCompany:  *tallyCompany,
 		TallyEndpoint: tallyEndpoint,
-		TallyKind:    tallyKind,
-		IngestKind:   ingestKind,
-		From:         from,
-		To:           to,
-		RunID:        runID,
-		RunKind:      "manual",
-		BatchSize:    *batchSize,
+		TallyKind:     kind.Tally,
+		IngestKind:    kind.Ingest,
+		From:          from,
+		To:            to,
+		RunID:         runID,
+		RunKind:       "manual",
+		BatchSize:     *batchSize,
 	}, progress)
 	if runErr != nil {
 		fmt.Fprintf(stderr, "agentctl sync: %v\n", runErr)
@@ -223,6 +224,9 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 
 	for _, w := range res.ParseWarnings {
 		fmt.Fprintf(stdout, "  ⚠ %s\n", w)
+	}
+	for _, f := range res.ServerFindings {
+		fmt.Fprintf(stdout, "  ⚠ %s\n", formatServerFinding(f))
 	}
 
 	if *dryRun {
@@ -236,9 +240,15 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 		return 0
 	}
 
-	fmt.Fprintf(stdout, "\nrun_id=%s  sent=%d  failed=%d  rows=%d\n",
-		runID, res.BatchesSent, res.BatchesFailed, res.RowCount)
-	if res.BatchesFailed > 0 {
+	fmt.Fprintf(stdout, "\nrun_id=%s  sent=%d  failed=%d  rows=%d  landed=%d  skipped=%d  server_errors=%d\n",
+		runID,
+		res.BatchesSent,
+		res.BatchesFailed,
+		res.RowCount,
+		res.ServerInserted+res.ServerAmended,
+		res.ServerSkipped,
+		res.ServerErrors)
+	if res.BatchesFailed > 0 || res.ServerErrors > 0 {
 		return 1
 	}
 	fmt.Fprintln(stdout, "✓ sync complete")
@@ -252,25 +262,43 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 // sender on dry-run paths.
 type noopSender struct{}
 
-func (noopSender) Send(_ context.Context, _ tally.IngestRequestBody) error { return nil }
+func (noopSender) Send(_ context.Context, _ tally.IngestRequestBody) (ingest.AcceptedResponse, error) {
+	return ingest.AcceptedResponse{}, nil
+}
+
+func (noopSender) SendJournal(_ context.Context, _ tally.JournalIngestRequestBody) (tally.AccountingAcceptedResponse, error) {
+	return tally.AccountingAcceptedResponse{}, nil
+}
+
+func (noopSender) SendPayment(_ context.Context, _ tally.PaymentIngestRequestBody) (tally.AccountingAcceptedResponse, error) {
+	return tally.AccountingAcceptedResponse{}, nil
+}
+
+func (noopSender) SendTaxLedgers(_ context.Context, _ tally.TaxLedgerIngestRequestBody) (tally.AccountingAcceptedResponse, error) {
+	return tally.AccountingAcceptedResponse{}, nil
+}
+
+func formatServerFinding(f ingest.ValidationFinding) string {
+	location := fmt.Sprintf("row_index=%d", f.RowIndex)
+	if f.Scope != "" {
+		location = f.Scope + " " + location
+	}
+	if f.ErrorType == "" {
+		return fmt.Sprintf("%s: %s", location, f.ErrorDetail)
+	}
+	return fmt.Sprintf("%s %s: %s", location, f.ErrorType, f.ErrorDetail)
+}
 
 // mapKind translates the user-facing --kind string to the (Tally envelope
 // filter, server-side ingest kind) pair. The two enums diverge for
 // `rcm_self_invoice`, which the agent infers per-voucher from the
 // IsRcmApplicable flag rather than asking the user to know in advance.
-func mapKind(s string) (tally.VoucherKind, tally.IngestKind, error) {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "purchase":
-		return tally.VoucherPurchase, tally.IngestKindPurchase, nil
-	case "sales":
-		return tally.VoucherSales, tally.IngestKindSales, nil
-	case "credit_note", "credit-note", "creditnote":
-		return tally.VoucherCreditNote, tally.IngestKindCreditNote, nil
-	case "debit_note", "debit-note", "debitnote":
-		return tally.VoucherDebitNote, tally.IngestKindDebitNote, nil
-	default:
-		return "", "", fmt.Errorf("unknown --kind %q (want one of: purchase, sales, credit_note, debit_note)", s)
+func mapKind(s string) (syncrun.KindPair, error) {
+	k, err := syncrun.MapKindByName(strings.ToLower(strings.TrimSpace(s)))
+	if err != nil {
+		return syncrun.KindPair{}, fmt.Errorf("unknown --kind %q (want one of: purchase, sales, credit_note, debit_note, journal, payment, tax_ledger)", s)
 	}
+	return k, nil
 }
 
 // resolveWindow accepts EITHER --period MMYYYY OR (--from + --to) and returns
@@ -310,22 +338,10 @@ func resolveWindow(period, fromStr, toStr string) (time.Time, time.Time, error) 
 // the agent uses UTC; Tally's date filter is calendar-day so the timezone
 // doesn't change which vouchers come back.
 func parsePeriod(s string) (time.Time, time.Time, error) {
-	s = strings.TrimSpace(s)
-	if len(s) != 6 {
-		return time.Time{}, time.Time{}, fmt.Errorf("--period %q: want MMYYYY (6 digits)", s)
+	from, to, err := period.ParseMonthCode(s)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("--period %q: %v", strings.TrimSpace(s), err)
 	}
-	mm, err := strconv.Atoi(s[:2])
-	if err != nil || mm < 1 || mm > 12 {
-		return time.Time{}, time.Time{}, fmt.Errorf("--period %q: month must be 01..12", s)
-	}
-	yyyy, err := strconv.Atoi(s[2:])
-	if err != nil || yyyy < 2000 || yyyy > 2100 {
-		return time.Time{}, time.Time{}, fmt.Errorf("--period %q: year out of range", s)
-	}
-	from := time.Date(yyyy, time.Month(mm), 1, 0, 0, 0, 0, time.UTC)
-	// Last day = first day of next month minus 1 day. Handles February + leap
-	// years correctly without a calendar table.
-	to := from.AddDate(0, 1, -1)
 	return from, to, nil
 }
 

@@ -46,9 +46,10 @@ func (f *fakeHeartbeatClient) Heartbeat(_ context.Context, body ingest.Heartbeat
 
 // recordingHandler captures action names so tests can assert order.
 type recordingHandler struct {
-	mu      sync.Mutex
-	actions []string
-	syncErr error
+	mu          sync.Mutex
+	actions     []string
+	syncPeriods []string
+	syncErr     error
 }
 
 func (h *recordingHandler) record(name string) {
@@ -57,7 +58,10 @@ func (h *recordingHandler) record(name string) {
 	h.mu.Unlock()
 }
 
-func (h *recordingHandler) OnSyncNow(_ context.Context) error {
+func (h *recordingHandler) OnSyncNow(_ context.Context, period string) error {
+	h.mu.Lock()
+	h.syncPeriods = append(h.syncPeriods, period)
+	h.mu.Unlock()
 	h.record("sync_now")
 	return h.syncErr
 }
@@ -109,8 +113,9 @@ func TestPoll_DispatchesActionsInOrder(t *testing.T) {
 				ingest.HeartbeatActionPause,
 				ingest.HeartbeatActionRefetchMappings,
 			},
-			ScheduleCron: "0 2 * * *",
-			ServerTime:   "2026-04-26T10:00:00Z",
+			PendingSyncPeriod: "032026",
+			ScheduleCron:      "0 2 * * *",
+			ServerTime:        "2026-04-26T10:00:00Z",
 		}},
 	}
 	handler := &recordingHandler{}
@@ -147,6 +152,12 @@ func TestPoll_DispatchesActionsInOrder(t *testing.T) {
 		if got[i] != w {
 			t.Errorf("action[%d]=%q, want %q (got=%v)", i, got[i], w, got)
 		}
+	}
+	handler.mu.Lock()
+	gotPeriods := append([]string{}, handler.syncPeriods...)
+	handler.mu.Unlock()
+	if len(gotPeriods) != 1 || gotPeriods[0] != "032026" {
+		t.Errorf("syncPeriods=%v, want [032026]", gotPeriods)
 	}
 }
 
@@ -254,8 +265,8 @@ func TestPoll_LastTickReporterFillsBody(t *testing.T) {
 	tickAt := time.Date(2026, 4, 26, 10, 0, 0, 0, time.UTC)
 	p, _ := New(Options{
 		Client: client, Handler: handler,
-		Interval: time.Hour,
-		Logger:   quietLogger(),
+		Interval:     time.Hour,
+		Logger:       quietLogger(),
 		AgentVersion: "0.5.0",
 		LastTickReporter: func() (time.Time, string) {
 			return tickAt, "ok"

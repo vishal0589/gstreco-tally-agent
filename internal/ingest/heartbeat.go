@@ -36,6 +36,9 @@ type HeartbeatRequest struct {
 // the server only delivered each action once).
 type HeartbeatResponse struct {
 	PendingActions []HeartbeatAction `json:"pending_actions"`
+	// Optional MMYYYY month code attached to a queued sync_now.
+	// Empty means "run the daemon's current-month window".
+	PendingSyncPeriod string `json:"pending_sync_period,omitempty"`
 	// Authoritative cron expression. When the daemon's local
 	// schedule disagrees, it should re-schedule to match.
 	ScheduleCron string `json:"schedule_cron"`

@@ -8,10 +8,9 @@ package tally
 import "time"
 
 // VoucherKind is the filtered slice of the day-book the agent is asking for.
-// Tally exposes many voucher types (Journal, Payment, Receipt, Contra, …);
-// for V1 the agent handles purchase, sales, credit_note, and debit_note —
-// the four kinds the server's /api/tally/ingest accepts. Journal and
-// payment vouchers ship to separate endpoints (S9, not yet built).
+// Tally exposes many voucher types (Journal, Payment, Receipt, Contra, …).
+// GST Reco's invoice ingest uses purchase/sales/credit_note/debit_note, while
+// journal/payment vouchers ship to their own accounting-completeness routes.
 type VoucherKind string
 
 const (
@@ -19,6 +18,8 @@ const (
 	VoucherSales      VoucherKind = "sales"
 	VoucherCreditNote VoucherKind = "credit_note"
 	VoucherDebitNote  VoucherKind = "debit_note"
+	VoucherJournal    VoucherKind = "journal"
+	VoucherPayment    VoucherKind = "payment"
 )
 
 // RawVoucher is the unnormalised shape of a Tally voucher. Every field is
@@ -30,6 +31,10 @@ type RawVoucher struct {
 	// includes it. Some real-world invoice vouchers omit GUID entirely, so
 	// downstream logic must tolerate it being blank.
 	GUID string
+	// MasterID is Tally's internal transaction master identifier. Unlike
+	// AlterID, it does not change on every edit, so it is the safest fallback
+	// identity when invoice-facing fields are absent.
+	MasterID string
 	// AlterID increases every time the voucher is touched. Used as the
 	// incremental sync cursor ($AlterID watermark, pain #13).
 	AlterID int64

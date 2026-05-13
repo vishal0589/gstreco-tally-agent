@@ -76,8 +76,8 @@ func runSyncAll(stdout, stderr io.Writer, args []string, deps syncAllDeps) int {
 	period := fs.String("period", "", "month shorthand MMYYYY (e.g. 042026); mutually exclusive with --from/--to")
 	fromFlag := fs.String("from", "", "window start YYYY-MM-DD (use with --to instead of --period)")
 	toFlag := fs.String("to", "", "window end YYYY-MM-DD inclusive")
-	kindsFlag := fs.String("kinds", "purchase,sales,credit_note,debit_note",
-		"comma-separated voucher kinds to fetch per mapping")
+	kindsFlag := fs.String("kinds", "purchase,sales,credit_note,debit_note,journal,payment,tax_ledger",
+		"comma-separated sync kinds to fetch per mapping")
 	batchSize := fs.Int("batch-size", ingest.DefaultBatchSize, "max rows per ingest request")
 	dryRun := fs.Bool("dry-run", false, "fetch + parse only; do not POST ingest")
 	continueOnError := fs.Bool("continue-on-error", true,
@@ -168,7 +168,7 @@ func runSyncAll(stdout, stderr io.Writer, args []string, deps syncAllDeps) int {
 	runIDPrefix := fmt.Sprintf("syncall-%d", deps.now().Unix())
 	res := syncrun.WalkAll(context.Background(), syncrun.WalkOptions{
 		Mappings:        mappings.Mappings,
-		Kinds:           kindsResolvedToWalk(kinds),
+		Kinds:           kinds,
 		From:            from,
 		To:              to,
 		BatchSize:       *batchSize,
@@ -189,10 +189,19 @@ func runSyncAll(stdout, stderr io.Writer, args []string, deps syncAllDeps) int {
 				fmt.Fprintf(stderr, "  ✗ %s: %v\n", k.Name, fatalErr)
 				return
 			}
-			fmt.Fprintf(stdout, "    %s: rows=%d sent=%d failed=%d\n",
-				k.Name, r.RowCount, r.BatchesSent, r.BatchesFailed)
+			fmt.Fprintf(stdout, "    %s: rows=%d sent=%d failed=%d landed=%d skipped=%d server_errors=%d\n",
+				k.Name,
+				r.RowCount,
+				r.BatchesSent,
+				r.BatchesFailed,
+				r.ServerInserted+r.ServerAmended,
+				r.ServerSkipped,
+				r.ServerErrors)
 			for _, w := range r.ParseWarnings {
 				fmt.Fprintf(stdout, "      ⚠ %s\n", w)
+			}
+			for _, f := range r.ServerFindings {
+				fmt.Fprintf(stdout, "      ⚠ %s\n", formatServerFinding(f))
 			}
 		},
 		PerRunProgress: func(_ ingest.ActiveMapping, k syncrun.KindPair) syncrun.Progress {
@@ -206,11 +215,12 @@ func runSyncAll(stdout, stderr io.Writer, args []string, deps syncAllDeps) int {
 	}
 
 	fmt.Fprintf(stdout,
-		"\nsummary: %d/%d mapping(s) ran · rows=%d · batches sent=%d failed=%d · fatal errors=%d\n",
+		"\nsummary: %d/%d mapping(s) ran · rows=%d · batches sent=%d failed=%d · skipped=%d · server errors=%d · fatal errors=%d\n",
 		res.MappingsRun, len(mappings.Mappings), res.TotalRows,
-		res.TotalBatchesSent, res.TotalBatchesFailed, res.FatalErrors)
+		res.TotalBatchesSent, res.TotalBatchesFailed,
+		res.TotalServerSkipped, res.TotalServerErrors, res.FatalErrors)
 
-	if res.FatalErrors > 0 || res.TotalBatchesFailed > 0 {
+	if res.FatalErrors > 0 || res.TotalBatchesFailed > 0 || res.TotalServerErrors > 0 {
 		return 1
 	}
 	if *dryRun {
@@ -221,62 +231,39 @@ func runSyncAll(stdout, stderr io.Writer, args []string, deps syncAllDeps) int {
 	return 0
 }
 
-// kindsResolvedToWalk maps the CLI's local kindResolved struct onto
-// syncrun.KindPair so WalkAll consumes a single canonical type. Kept
-// as a small adapter rather than collapsing the two — the CLI's
-// kindResolved still drives flag parsing here, while syncrun.KindPair
-// is the package-public contract for downstream callers (daemon, A5
-// scheduler).
-func kindsResolvedToWalk(kinds []kindResolved) []syncrun.KindPair {
-	out := make([]syncrun.KindPair, len(kinds))
-	for i, k := range kinds {
-		out[i] = syncrun.KindPair{Name: k.name, Tally: k.tally, Ingest: k.ingest}
-	}
-	return out
-}
-
 // kindNamesFromResolved returns just the names — used for the
 // "kinds: purchase,sales,..." header.
-func kindNamesFromResolved(kinds []kindResolved) []string {
+func kindNamesFromResolved(kinds []syncrun.KindPair) []string {
 	out := make([]string, len(kinds))
 	for i, k := range kinds {
-		out[i] = k.name
+		out[i] = k.Name
 	}
 	return out
-}
-
-// kindResolved is a kind string + its tally + ingest enums. Resolved
-// once at flag-parse time so the per-mapping inner loop doesn't
-// repeat the mapKind lookup per iteration.
-type kindResolved struct {
-	name   string
-	tally  tally.VoucherKind
-	ingest tally.IngestKind
 }
 
 // parseKinds expands the comma-separated --kinds flag into resolved
 // pairs. Order is preserved so operators can run kinds in the order
 // they specified ("--kinds sales,purchase" → sales first).
-func parseKinds(s string) ([]kindResolved, error) {
-	out := make([]kindResolved, 0, 4)
+func parseKinds(s string) ([]syncrun.KindPair, error) {
+	out := make([]syncrun.KindPair, 0, 7)
 	seen := map[string]struct{}{}
 	for _, raw := range strings.Split(s, ",") {
 		k := strings.TrimSpace(raw)
 		if k == "" {
 			continue
 		}
-		if _, dup := seen[k]; dup {
-			continue
-		}
-		seen[k] = struct{}{}
-		tk, ik, err := mapKind(k)
+		pair, err := mapKind(k)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, kindResolved{name: k, tally: tk, ingest: ik})
+		if _, dup := seen[pair.Name]; dup {
+			continue
+		}
+		seen[pair.Name] = struct{}{}
+		out = append(out, pair)
 	}
 	if len(out) == 0 {
-		return nil, errors.New("--kinds is empty after parsing (use a comma-separated list of: purchase, sales, credit_note, debit_note)")
+		return nil, errors.New("--kinds is empty after parsing (use a comma-separated list of: purchase, sales, credit_note, debit_note, journal, payment, tax_ledger)")
 	}
 	return out, nil
 }
@@ -292,7 +279,7 @@ func makeSyncAllProgress(stdout, stderr io.Writer, kindName string) syncrun.Prog
 		case "batch_sending":
 			fmt.Fprintf(stdout, "    → %s %s\n", kindName, e.Message)
 		case "batch_sent":
-			fmt.Fprintf(stdout, "      ✓ accepted\n")
+			fmt.Fprintf(stdout, "      ✓ %s\n", e.Message)
 		case "batch_failed":
 			if se := ingest.IsSendError(e.Err); se != nil {
 				fmt.Fprintf(stderr, "      ✗ %s status=%d snippet=%q retryable=%t\n",
