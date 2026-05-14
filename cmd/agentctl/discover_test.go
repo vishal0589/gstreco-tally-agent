@@ -242,7 +242,7 @@ func TestRunDiscover_NoTallyExits2(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("exit=%d, want 2 (no Tally found)", code)
 	}
-	if !strings.Contains(stderr.String(), "no Tally Prime 3.x instances found") {
+	if !strings.Contains(stderr.String(), "no Tally instances were found on the scanned ports") {
 		t.Errorf("stderr missing helpful message: %s", stderr.String())
 	}
 }

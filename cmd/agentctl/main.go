@@ -181,7 +181,7 @@ Usage:
                     [--server <URL>] [--config <PATH>]
       probe localhost (or --host) for Tally instances, persist the
       discovered endpoints to config, and push the company catalog
-      to the server's mapping list. Default port range: 9000-9009.
+      to the server's mapping list. Default port range: 9000-9020.
 
   agentctl sync-all (--period MMYYYY | --from YYYY-MM-DD --to YYYY-MM-DD)
                     [--kinds purchase,sales,credit_note,debit_note]

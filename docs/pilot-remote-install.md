@@ -1,5 +1,12 @@
 # Pilot — remote-server install runbook
 
+> Historical note: this document describes the older `agentctl` / PowerShell
+> pilot workflow. The current product direction is installer-first on Windows:
+> download `gstreco-tally-installer.exe`, approve the machine in the browser,
+> and let the installer handle service repair plus discovery-first setup.
+> Keep this runbook for support recovery, diagnostics, and direct `agentctl`
+> usage when the installer path cannot complete.
+
 This is the operator-facing runbook for installing the GST Reco Tally
 agent on a remote Windows server that runs **multiple Tally Prime
 instances on different ports** (the multi-tenant SaaS shape — one
@@ -88,7 +95,7 @@ Get-Process tally* -ErrorAction SilentlyContinue | ForEach-Object {
 } | Sort-Object LocalPort | Format-Table
 ```
 
-Save the output. The agent's discover sweep covers `9000-9009` by
+Save the output. The agent's discover sweep covers `9000-9020` by
 default; if any of your Tally ports fall outside that range, you'll
 need to pass `--ports` or `--endpoint` to discover.
 
@@ -155,7 +162,7 @@ If the pair fails:
 gstreco-tally-agentctl.exe discover
 ```
 
-Default flags scan `127.0.0.1:9000-9009` with 5-second per-port
+Default flags scan `127.0.0.1:9000-9020` with 5-second per-port
 timeout, 4 parallel workers. Override if needed:
 
 ```bash
@@ -199,7 +206,7 @@ http://127.0.0.1:9001
 → next step: open the mapping UI at https://...vercel.app/settings/tally and choose a GSTIN per company.
 ```
 
-If discover exits 2 with **"no Tally Prime 3.x instances found"**:
+If discover exits 2 with **"no Tally instances were found on the scanned ports"**:
 double-check Tally is running, ODBC is enabled (Step 1b), and the
 port range covers your instances.
 
