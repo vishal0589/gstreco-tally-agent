@@ -31,6 +31,10 @@ const (
 // parse Tally's string-first XML into real numbers before submitting.
 type IngestVoucherRow struct {
 	TallyVoucherGUID *string  `json:"tally_voucher_guid,omitempty"`
+	VoucherNumber    *string  `json:"voucher_number,omitempty"`
+	VoucherDate      *string  `json:"voucher_date,omitempty"` // YYYY-MM-DD
+	VoucherTypeName  *string  `json:"voucher_type_name,omitempty"`
+	VoucherReference *string  `json:"voucher_reference,omitempty"`
 	VendorGSTIN      *string  `json:"vendor_gstin,omitempty"`
 	VendorName       *string  `json:"vendor_name,omitempty"`
 	CustomerGSTIN    *string  `json:"customer_gstin,omitempty"`

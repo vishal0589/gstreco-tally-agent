@@ -143,6 +143,28 @@ func baseRow(v RawVoucher, kind IngestKind, side IngestSide, invoice, taxable fl
 		g := v.GUID
 		row.TallyVoucherGUID = &g
 	}
+	if v.VoucherNumber != "" {
+		n := strings.TrimSpace(v.VoucherNumber)
+		if n != "" {
+			row.VoucherNumber = &n
+		}
+	}
+	if !v.Date.IsZero() {
+		d := v.Date.Format("2006-01-02")
+		row.VoucherDate = &d
+	}
+	if v.VoucherType != "" {
+		vt := strings.TrimSpace(v.VoucherType)
+		if vt != "" {
+			row.VoucherTypeName = &vt
+		}
+	}
+	if v.Reference != "" {
+		ref := strings.TrimSpace(v.Reference)
+		if ref != "" {
+			row.VoucherReference = &ref
+		}
+	}
 	if v.PlaceOfSupply != "" {
 		p := v.PlaceOfSupply
 		row.PlaceOfSupply = &p

@@ -55,6 +55,18 @@ func TestNormalize_PurchaseSingleFromFixture(t *testing.T) {
 	if r.InvoiceDate != "2026-04-10" {
 		t.Errorf("InvoiceDate = %q", r.InvoiceDate)
 	}
+	if r.VoucherNumber == nil || *r.VoucherNumber != "PI/001/26-27" {
+		t.Errorf("VoucherNumber = %v, want PI/001/26-27", r.VoucherNumber)
+	}
+	if r.VoucherDate == nil || *r.VoucherDate != "2026-04-10" {
+		t.Errorf("VoucherDate = %v, want 2026-04-10", r.VoucherDate)
+	}
+	if r.VoucherTypeName == nil || *r.VoucherTypeName != "GST Purchase" {
+		t.Errorf("VoucherTypeName = %v, want GST Purchase", r.VoucherTypeName)
+	}
+	if r.VoucherReference == nil || *r.VoucherReference != "SUPP-INV-5501" {
+		t.Errorf("VoucherReference = %v, want SUPP-INV-5501", r.VoucherReference)
+	}
 }
 
 func TestNormalize_SalesCGSTSGST(t *testing.T) {
@@ -213,6 +225,56 @@ func TestNormalize_NarrationFallbackPrefersInvoiceLikeToken(t *testing.T) {
 	}
 	if rows[0].InvoiceNumber != "SUPP-INV-5501" {
 		t.Errorf("InvoiceNumber = %q, want SUPP-INV-5501", rows[0].InvoiceNumber)
+	}
+}
+
+func TestNormalize_PurchaseDebitNoteCarriesVoucherProvenanceSeparatelyFromSupplierReference(t *testing.T) {
+	v := RawVoucher{
+		GUID:            "fixture-rahul-note-0001",
+		IsInvoice:       true,
+		Date:            parseDate(t, "2026-04-07"),
+		VoucherType:     "Debit Note",
+		VoucherNumber:   "DIPLDN/APR26/003",
+		Reference:       "RE/26-27/061",
+		PartyLedgerName: "Rahul Enterprises - MSME",
+		PartyGSTIN:      "06ACJPG5816D1ZW",
+		LedgerEntries: []LedgerEntry{
+			{
+				LedgerName:    "Rahul Enterprises - MSME",
+				Amount:        2620,
+				IsPartyLedger: true,
+				BillAllocations: []BillRef{
+					{Name: "RE/26-27/061", Amount: 2620, BillType: "Agst Ref"},
+				},
+			},
+			{LedgerName: "Purchase Returns @ 18%", Amount: -2220.36},
+			{LedgerName: "CGST @ 9%", Amount: -199.82, GSTClass: "CGST@9"},
+			{LedgerName: "SGST @ 9%", Amount: -199.82, GSTClass: "SGST@9"},
+		},
+	}
+
+	rows, err := Normalize(v, NormalizeOptions{})
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	row := rows[0]
+	if row.InvoiceNumber != "RE/26-27/061" {
+		t.Errorf("InvoiceNumber = %q, want supplier reference RE/26-27/061", row.InvoiceNumber)
+	}
+	if row.VoucherNumber == nil || *row.VoucherNumber != "DIPLDN/APR26/003" {
+		t.Errorf("VoucherNumber = %v, want DIPLDN/APR26/003", row.VoucherNumber)
+	}
+	if row.VoucherReference == nil || *row.VoucherReference != "RE/26-27/061" {
+		t.Errorf("VoucherReference = %v, want RE/26-27/061", row.VoucherReference)
+	}
+	if row.VoucherTypeName == nil || *row.VoucherTypeName != "Debit Note" {
+		t.Errorf("VoucherTypeName = %v, want Debit Note", row.VoucherTypeName)
+	}
+	if row.VoucherDate == nil || *row.VoucherDate != "2026-04-07" {
+		t.Errorf("VoucherDate = %v, want 2026-04-07", row.VoucherDate)
 	}
 }
 

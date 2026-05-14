@@ -227,6 +227,81 @@ func TestRunOne_ReferenceOnlyVoucherStillPostsBatch(t *testing.T) {
 	}
 }
 
+func TestRunOne_InvoiceBatchCarriesVoucherProvenance(t *testing.T) {
+	const noteResponse = `<ENVELOPE>
+  <HEADER><STATUS>1</STATUS></HEADER>
+  <BODY><DATA><COLLECTION>
+    <VOUCHER>
+      <DATE>20260407</DATE>
+      <GUID>rahul-note-001</GUID>
+      <VOUCHERTYPENAME>Debit Note</VOUCHERTYPENAME>
+      <VOUCHERNUMBER>DIPLDN/APR26/003</VOUCHERNUMBER>
+      <REFERENCE>RE/26-27/061</REFERENCE>
+      <PARTYLEDGERNAME>Rahul Enterprises - MSME</PARTYLEDGERNAME>
+      <PARTYGSTIN>06ACJPG5816D1ZW</PARTYGSTIN>
+      <ISINVOICE>Yes</ISINVOICE>
+      <ISCANCELLED>No</ISCANCELLED>
+      <ALLLEDGERENTRIES.LIST>
+        <LEDGERNAME>Rahul Enterprises - MSME</LEDGERNAME>
+        <AMOUNT>2620.00</AMOUNT>
+        <BILLALLOCATIONS.LIST>
+          <NAME>RE/26-27/061</NAME>
+          <BILLTYPE>Agst Ref</BILLTYPE>
+          <AMOUNT>2620.00</AMOUNT>
+        </BILLALLOCATIONS.LIST>
+      </ALLLEDGERENTRIES.LIST>
+      <ALLLEDGERENTRIES.LIST>
+        <LEDGERNAME>Purchase Returns @ 18%</LEDGERNAME>
+        <AMOUNT>-2220.36</AMOUNT>
+      </ALLLEDGERENTRIES.LIST>
+      <ALLLEDGERENTRIES.LIST>
+        <LEDGERNAME>CGST @ 9%</LEDGERNAME>
+        <GSTCLASS>CGST@9</GSTCLASS>
+        <AMOUNT>-199.82</AMOUNT>
+      </ALLLEDGERENTRIES.LIST>
+      <ALLLEDGERENTRIES.LIST>
+        <LEDGERNAME>SGST @ 9%</LEDGERNAME>
+        <GSTCLASS>SGST@9</GSTCLASS>
+        <AMOUNT>-199.82</AMOUNT>
+      </ALLLEDGERENTRIES.LIST>
+    </VOUCHER>
+  </COLLECTION></DATA></BODY>
+</ENVELOPE>`
+
+	tly := &fakeTally{resp: []byte(noteResponse)}
+	snd := &fakeSender{}
+	req := makeReq()
+	req.TallyKind = tally.VoucherDebitNote
+	req.IngestKind = tally.IngestKindDebitNote
+
+	res, err := RunOne(context.Background(), tly, snd, req, nil)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if len(snd.sent) != 1 || res.BatchesSent != 1 {
+		t.Fatalf("sent=%d batchesSent=%d, want 1", len(snd.sent), res.BatchesSent)
+	}
+	if len(snd.sent[0].Batch) != 1 {
+		t.Fatalf("batch rows=%d, want 1", len(snd.sent[0].Batch))
+	}
+	row := snd.sent[0].Batch[0]
+	if row.InvoiceNumber != "RE/26-27/061" {
+		t.Errorf("InvoiceNumber=%q, want RE/26-27/061", row.InvoiceNumber)
+	}
+	if row.VoucherNumber == nil || *row.VoucherNumber != "DIPLDN/APR26/003" {
+		t.Errorf("VoucherNumber=%v, want DIPLDN/APR26/003", row.VoucherNumber)
+	}
+	if row.VoucherReference == nil || *row.VoucherReference != "RE/26-27/061" {
+		t.Errorf("VoucherReference=%v, want RE/26-27/061", row.VoucherReference)
+	}
+	if row.VoucherTypeName == nil || *row.VoucherTypeName != "Debit Note" {
+		t.Errorf("VoucherTypeName=%v, want Debit Note", row.VoucherTypeName)
+	}
+	if row.VoucherDate == nil || *row.VoucherDate != "2026-04-07" {
+		t.Errorf("VoucherDate=%v, want 2026-04-07", row.VoucherDate)
+	}
+}
+
 func TestRunOne_NormalizeFailureCountsButContinues(t *testing.T) {
 	// Voucher with PartyLedgerName but zero ledger entries — parses
 	// fine, but the normaliser can't find a party ledger and returns
