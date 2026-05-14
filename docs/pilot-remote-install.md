@@ -206,7 +206,7 @@ http://127.0.0.1:9001
 → next step: open the mapping UI at https://...vercel.app/settings/tally and choose a GSTIN per company.
 ```
 
-If discover exits 2 with **"no Tally Prime 3.x instances found"**:
+If discover exits 2 with **"no Tally instances were found on the scanned ports"**:
 double-check Tally is running, ODBC is enabled (Step 1b), and the
 port range covers your instances.
 

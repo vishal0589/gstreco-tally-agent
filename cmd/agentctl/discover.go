@@ -131,9 +131,9 @@ func runDiscover(stdout, stderr io.Writer, args []string, deps discoverDeps) int
 
 	printSummary(stdout, results)
 
-	v3Reachable := filterReachableTally(results)
-	if len(v3Reachable) == 0 {
-		fmt.Fprintln(stderr, "\nagentctl discover: no Tally Prime 3.x instances found.")
+	reachableTally := filterReachableTally(results)
+	if len(reachableTally) == 0 {
+		fmt.Fprintln(stderr, "\nagentctl discover: no Tally instances were found on the scanned ports.")
 		fmt.Fprintln(stderr, "Check that Tally is running, that ODBC HTTP server is enabled (F1 → Settings → Connectivity → Client/Server),")
 		fmt.Fprintln(stderr, "and that the port is in the scanned range. Use --ports or --endpoint for non-default setups.")
 		return 2
@@ -142,8 +142,8 @@ func runDiscover(stdout, stderr io.Writer, args []string, deps discoverDeps) int
 	// Save discovered endpoints to config so the daemon can find them
 	// without re-running discover. Sorted for deterministic YAML diffs.
 	if !*noSave {
-		endpoints := make([]string, 0, len(v3Reachable))
-		for _, r := range v3Reachable {
+		endpoints := make([]string, 0, len(reachableTally))
+		for _, r := range reachableTally {
 			endpoints = append(endpoints, r.Endpoint)
 		}
 		sort.Strings(endpoints)
@@ -164,7 +164,7 @@ func runDiscover(stdout, stderr io.Writer, args []string, deps discoverDeps) int
 	// company) pair across all V3-reachable endpoints. Same name at
 	// two different endpoints emits two items — server's S14
 	// constraint treats them as distinct mapping rows.
-	items := buildCatalogItems(v3Reachable)
+		items := buildCatalogItems(reachableTally)
 	if len(items) == 0 {
 		fmt.Fprintln(stdout, "✓ no companies to push (Tally instances responded but no company is loaded)")
 		return 0
@@ -201,7 +201,7 @@ func runDiscover(stdout, stderr io.Writer, args []string, deps discoverDeps) int
 		return 1
 	}
 	fmt.Fprintf(stdout, "✓ pushed catalog (%d companies across %d endpoints, request_id=%s)\n",
-		len(items), len(v3Reachable), requestID)
+		len(items), len(reachableTally), requestID)
 	fmt.Fprintf(stdout, "→ next step: open the mapping UI at %s/settings/tally and choose a GSTIN per company.\n", server)
 	return 0
 }
