@@ -15,6 +15,9 @@ import (
 	"time"
 
 	"github.com/vishal0589/gstreco-tally-agent/internal/config"
+	"github.com/vishal0589/gstreco-tally-agent/internal/keyring"
+	"github.com/vishal0589/gstreco-tally-agent/internal/pair"
+	"github.com/vishal0589/gstreco-tally-agent/internal/secretstore"
 )
 
 type fakeUI struct {
@@ -197,6 +200,171 @@ func TestRunInstaller_RerunRepairsServiceWithoutApproval(t *testing.T) {
 	}
 	if strings.Contains(strings.Join(flattenCommands(commands), " "), "/api/tally/installer/sessions/start") {
 		t.Fatal("rerun should not start a fresh installer session when already paired")
+	}
+}
+
+func TestRunInstaller_AddTenantStartsFreshApprovalOnPairedMachine(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "config.yaml")
+	if err := config.Save(cfgPath, &config.Config{
+		Connections: []config.PairedConnection{
+			{
+				Server:       "https://example.com",
+				ConnectionID: "conn-1",
+				CompanyID:    "company-1",
+				DeviceName:   "DESKTOP-1",
+				PairedAt:     time.Now().UTC(),
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ui := &fakeUI{}
+	var commands [][]string
+	var persistCalls []pair.PersistOptions
+	loadCalls := 0
+	deps := defaultInstallerDeps()
+	deps.isAdmin = func() (bool, error) { return true, nil }
+	deps.openBrowser = func(string) error { return nil }
+	deps.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch {
+			case strings.HasSuffix(req.URL.Path, "/api/tally/installer/sessions/start"):
+				return jsonResponse(200, startSessionResponse{
+					SessionID:       "sess-1",
+					SessionToken:    "session-token-1",
+					UserCode:        "ABC-D23",
+					VerificationURL: "https://example.com/approve",
+					PollIntervalMS:  1,
+					Status:          "pending_approval",
+				}), nil
+			case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/api/tally/installer/sessions/sess-1"):
+				return jsonResponse(200, sessionStatusResponse{Status: "approved"}), nil
+			case strings.HasSuffix(req.URL.Path, "/api/tally/installer/sessions/sess-1/claim"):
+				return jsonResponse(200, claimSessionResponse{
+					SessionID:    "sess-1",
+					Status:       "claimed",
+					ConnectionID: "conn-2",
+					CompanyID:    "company-2",
+					Token:        "bearer-2",
+					HmacSecret:   "hmac-2",
+				}), nil
+			case strings.HasSuffix(req.URL.Path, "/api/tally/agent/version"):
+				return jsonResponse(200, versionMetadataResponse{
+					Latest: "0.1.21",
+					Platforms: map[string]installerAsset{
+						"windows-amd64": {URL: "https://example.com/agentctl.exe"},
+					},
+					Daemon: map[string]installerAsset{
+						"windows-amd64": {URL: "https://example.com/agent.exe"},
+					},
+				}), nil
+			default:
+				return binaryResponse(200, []byte("binary")), nil
+			}
+		}),
+	}
+	deps.persistPair = func(opts pair.PersistOptions) error {
+		persistCalls = append(persistCalls, opts)
+		return nil
+	}
+	deps.loadLocalPair = func(string) (localPairState, error) {
+		loadCalls++
+		return localPairState{
+			State:      "paired",
+			ConfigPath: cfgPath,
+			Config: &config.Config{
+				Connections: []config.PairedConnection{
+					{
+						Server:       "https://example.com",
+						ConnectionID: "conn-1",
+						CompanyID:    "company-1",
+						DeviceName:   "DESKTOP-1",
+						PairedAt:     time.Now().UTC(),
+					},
+				},
+			},
+		}, nil
+	}
+	deps.runCommand = func(_ context.Context, name string, args ...string) (commandResult, error) {
+		commands = append(commands, append([]string{name}, args...))
+		switch {
+		case len(args) >= 2 && args[0] == "service" && args[1] == "status":
+			return commandResult{Output: "service status: running", ExitCode: 0}, nil
+		default:
+			return commandResult{Output: "ok", ExitCode: 0}, nil
+		}
+	}
+
+	exitCode := runInstaller(context.Background(), ui, installerOptions{
+		server:     "https://example.com",
+		configPath: cfgPath,
+		installDir: tmp,
+		addTenant:  true,
+	}, deps)
+	if exitCode != 0 {
+		t.Fatalf("exitCode=%d", exitCode)
+	}
+	if len(persistCalls) != 1 {
+		t.Fatalf("persistCalls=%d want 1", len(persistCalls))
+	}
+	if persistCalls[0].ConnectionID != "conn-2" {
+		t.Fatalf("persisted connection=%q want conn-2", persistCalls[0].ConnectionID)
+	}
+	if persistCalls[0].CompanyID != "company-2" {
+		t.Fatalf("persisted company=%q want company-2", persistCalls[0].CompanyID)
+	}
+	if loadCalls < 2 {
+		t.Fatalf("loadLocalPair called %d times, want at least 2", loadCalls)
+	}
+	if len(commands) == 0 {
+		t.Fatal("expected service/discover commands")
+	}
+}
+
+func TestDetectLocalPairState_MultiConnectionPairedIfAnyConnectionSecretsExist(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "config.yaml")
+	cfg := &config.Config{}
+	cfg.SetPairedConnections([]config.PairedConnection{
+		{
+			Server:       "https://example.com",
+			ConnectionID: "conn-1",
+			CompanyID:    "company-1",
+			DeviceName:   "DESKTOP-1",
+			PairedAt:     time.Now().UTC(),
+		},
+		{
+			Server:       "https://example.com",
+			ConnectionID: "conn-2",
+			CompanyID:    "company-2",
+			DeviceName:   "DESKTOP-1",
+			PairedAt:     time.Now().UTC(),
+		},
+	})
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	store := secretstore.NewFileStore(
+		secretstore.DefaultDir(filepath.Dir(cfgPath)),
+		secretstore.ReadMachineID,
+	)
+	hmacKey, bearerKey := keyring.ConnectionKeys("conn-2")
+	if err := store.Set(keyring.ServiceName, hmacKey, "hmac-2"); err != nil {
+		t.Fatalf("store hmac: %v", err)
+	}
+	if err := store.Set(keyring.ServiceName, bearerKey, "bearer-2"); err != nil {
+		t.Fatalf("store bearer: %v", err)
+	}
+
+	state, err := detectLocalPairState(cfgPath)
+	if err != nil {
+		t.Fatalf("detectLocalPairState: %v", err)
+	}
+	if state.State != "paired" {
+		t.Fatalf("state=%q want paired", state.State)
 	}
 }
 

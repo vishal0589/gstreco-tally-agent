@@ -191,7 +191,7 @@ func TestRunSyncAll_HappyPath_WalksAllMappingsAndKinds(t *testing.T) {
 	if got := len(tly.got); got != 4 {
 		t.Errorf("tally fetches = %d, want 4", got)
 	}
-	if !strings.Contains(stdout.String(), "summary: 2/2 mapping(s) ran") {
+	if !strings.Contains(stdout.String(), "summary: connections_with_mappings=1/1 · mappings_ran=2/2") {
 		t.Errorf("stdout missing summary: %s", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "sync-all complete") {

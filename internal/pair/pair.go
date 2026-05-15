@@ -49,11 +49,10 @@ type ClaimRequest struct {
 	OS           string `json:"os"`
 }
 
-// ErrAlreadyPaired is returned by Claim when the local config shows an
-// existing connection. Pair flow refuses to clobber — caller must revoke
-// the old connection first via agentctl unpair (A5) or edit/delete the
-// config file manually.
-var ErrAlreadyPaired = errors.New("pair: this agent is already paired; revoke first")
+// ErrAlreadyPaired is retained for backward compatibility with older callers.
+// Multi-tenant installs no longer treat an existing paired connection as a
+// hard stop — the new connection is appended to config instead.
+var ErrAlreadyPaired = errors.New("pair: local config refused an additional connection")
 
 // ErrInvalidCode wraps 400 responses for visibly malformed codes — caller
 // shows a clear "check the code" message instead of a generic error.
@@ -103,12 +102,6 @@ func Claim(ctx context.Context, opts Options) (*ClaimResponse, error) {
 	configPath := opts.ConfigPath
 	if configPath == "" {
 		configPath = config.DefaultPath()
-	}
-
-	if existing, err := config.Load(configPath); err == nil && existing.IsPaired() {
-		return nil, fmt.Errorf("%w (connection_id=%s)", ErrAlreadyPaired, existing.ConnectionID)
-	} else if err != nil && !errors.Is(err, config.ErrNotFound) {
-		return nil, fmt.Errorf("pair: pre-check config: %w", err)
 	}
 
 	deviceName := opts.DeviceName
@@ -182,6 +175,7 @@ func Claim(ctx context.Context, opts Options) (*ClaimResponse, error) {
 		Server:       opts.Server,
 		DeviceName:   deviceName,
 		ConnectionID: claim.ConnectionID,
+		CompanyID:    claim.CompanyID,
 		Token:        claim.Token,
 		HmacSecret:   claim.HmacSecret,
 		PairedAt:     time.Now().UTC(),
@@ -198,6 +192,7 @@ type PersistOptions struct {
 	Server       string
 	DeviceName   string
 	ConnectionID string
+	CompanyID    string
 	Token        string
 	HmacSecret   string
 	PairedAt     time.Time
@@ -218,6 +213,13 @@ func PersistCredentials(opts PersistOptions) error {
 		pairedAt = time.Now().UTC()
 	}
 
+	cfg := &config.Config{}
+	if existing, err := config.Load(opts.ConfigPath); err == nil {
+		cfg = existing
+	} else if err != nil && !errors.Is(err, config.ErrNotFound) {
+		return fmt.Errorf("pair: pre-check config: %w", err)
+	}
+
 	// Persist secrets to keyring FIRST. If the keyring write fails, the
 	// config is never touched and the agent remains in the "unpaired" state
 	// so the user can retry without clobbering anything.
@@ -231,13 +233,14 @@ func PersistCredentials(opts PersistOptions) error {
 		return fmt.Errorf("pair: store bearer token: %w", err)
 	}
 
-	cfg := &Config{
+	cfg.UpsertPairedConnection(config.PairedConnection{
 		Server:       strings.TrimRight(opts.Server, "/"),
 		ConnectionID: opts.ConnectionID,
+		CompanyID:    opts.CompanyID,
 		DeviceName:   opts.DeviceName,
 		PairedAt:     pairedAt,
-	}
-	if err := config.Save(opts.ConfigPath, (*config.Config)(cfg)); err != nil {
+	})
+	if err := config.Save(opts.ConfigPath, cfg); err != nil {
 		// Roll back both keyring writes so the agent stays clean-unpaired.
 		_ = opts.Keyring.Delete(keyring.ServiceName, hmacKey)
 		_ = opts.Keyring.Delete(keyring.ServiceName, bearerKey)
@@ -245,10 +248,6 @@ func PersistCredentials(opts PersistOptions) error {
 	}
 	return nil
 }
-
-// Config is a local alias so we can use struct conversion to config.Config
-// above while keeping the field set visible in one file.
-type Config config.Config
 
 // canonicalizePairCode strips whitespace and hyphens, uppercases, then
 // validates the 6-char Crockford shape. Done on the client side so the user

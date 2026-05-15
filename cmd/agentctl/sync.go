@@ -71,6 +71,7 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "", "override config file path")
 	serverFlag := fs.String("server", "", "override server URL (default: from config)")
+	connectionID := fs.String("connection-id", "", "paired connection id to use when config stores multiple connections")
 	tallyURL := fs.String("tally-url", "", "Tally HTTP endpoint (default: from config or http://localhost:9000)")
 	tallyCompany := fs.String("tally-company", "", "Tally company name as it appears in Tally (required)")
 	kindFlag := fs.String("kind", "", "sync kind: purchase | sales | credit_note | debit_note | journal | payment | tax_ledger (required)")
@@ -104,10 +105,7 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 		return 2
 	}
 
-	cfgPath := *configPath
-	if cfgPath == "" {
-		cfgPath = config.DefaultPath()
-	}
+	cfgPath := resolveConfigPath(*configPath)
 	cfg, err := deps.loadConfig(cfgPath)
 	if err != nil {
 		if errors.Is(err, config.ErrNotFound) {
@@ -122,7 +120,13 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 		return 2
 	}
 
-	server := firstNonEmpty(*serverFlag, cfg.Server)
+	conn, err := requireOneConnection(cfg, *connectionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "agentctl sync: %v\n", err)
+		return 2
+	}
+
+	server := firstNonEmpty(*serverFlag, conn.Server)
 	// Multi-endpoint config (A5-2): if more than one endpoint is
 	// configured the operator MUST pass --tally-url to disambiguate.
 	// Falling back silently to the first entry would mask a wrong
@@ -153,7 +157,7 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 	var sender ingestSender
 	if !*dryRun {
 		ks := deps.newOSKeyring()
-		hmacKey, bearerKey := keyring.ConnectionKeys(cfg.ConnectionID)
+		hmacKey, bearerKey := keyring.ConnectionKeys(conn.ConnectionID)
 		secret, secErr := ks.Get(keyring.ServiceName, hmacKey)
 		if secErr != nil {
 			fmt.Fprintf(stderr, "agentctl sync: read hmac secret from keyring: %v\n", secErr)
@@ -164,7 +168,7 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 			fmt.Fprintf(stderr, "agentctl sync: read bearer token from keyring: %v\n", bearerErr)
 			return 1
 		}
-		client, clientErr := deps.newIngestClient(server, cfg.ConnectionID, bearer, secret)
+		client, clientErr := deps.newIngestClient(server, conn.ConnectionID, bearer, secret)
 		if clientErr != nil {
 			fmt.Fprintf(stderr, "agentctl sync: build ingest client: %v\n", clientErr)
 			return 1
