@@ -61,7 +61,7 @@ Response body includes `{code_id, code, expires_at}`. Codes live for 15 minutes 
 Expected output:
 
 ```
-✓ paired successfully (connection_id=<uuid>)
+✓ paired successfully (connection_id=<uuid> company_id=<uuid>)
 ```
 
 Verification:
@@ -74,6 +74,10 @@ Verification:
 #   device_name:   <hostname>
 #   paired_at:     2026-04-23T10:30:00Z
 ```
+
+For a shared Tally machine, repeat `pair` once per GST Reco tenant.
+The agent keeps multiple stored connections in one config/keyring and
+`status` prints them all.
 
 On darwin/linux the config lives at `~/.gstreco-agent/config.yaml`. On Windows it's `%ProgramData%\GST Reco\agent\config.yaml`. The HMAC secret + bearer token land in the OS keyring under service `gstreco-tally-agent` with keys `<connection_id>.hmac_secret` and `<connection_id>.bearer_token` — they must NOT appear on disk.
 
@@ -91,7 +95,6 @@ Expected failure modes:
 | 0 | paired | — |
 | 2 + `invalid code format` | typo — not 6 Crockford chars | re-check the code |
 | 2 + `code_gone` | expired or already claimed | generate a fresh code |
-| 2 + `already paired` | local config has an existing connection | delete config.yaml first (A5 will add `agentctl unpair`) |
 | 1 + network error | server unreachable | check VPN / firewall |
 | 1 + keyring error | macOS Keychain locked | `security unlock-keychain` |
 
@@ -102,6 +105,11 @@ Write a tiny Go program that:
 1. Loads the config (`internal/config.Load`) and keyring secret.
 2. Builds a minimal `tally.IngestRequestBody` with one `IngestVoucherRow`.
 3. Calls `ingest.Client.Send()`.
+
+This historical smoke snippet assumes a single stored connection. If the
+machine now holds more than one tenant pairing, resolve the intended
+`connection_id` from `cfg.PairedConnections()` instead of reading only the
+legacy top-level fields.
 
 ```go
 // smoke/main.go

@@ -181,6 +181,91 @@ func TestRunDiscover_HappyPath_SavesAndPushes(t *testing.T) {
 	}
 }
 
+func TestRunDiscover_MultiConnectionPushesCatalogToEachConnection(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "config.yaml")
+	if err := config.Save(cfgPath, &config.Config{
+		Connections: []config.PairedConnection{
+			{
+				Server:       "https://one.example",
+				ConnectionID: "conn-1",
+				DeviceName:   "WIN-DESK",
+			},
+			{
+				Server:       "https://two.example",
+				ConnectionID: "conn-2",
+				DeviceName:   "WIN-DESK",
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ks := keyring.NewMemoryStore()
+	for _, connID := range []string{"conn-1", "conn-2"} {
+		hk, bk := keyring.ConnectionKeys(connID)
+		_ = ks.Set(keyring.ServiceName, hk, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+		_ = ks.Set(keyring.ServiceName, bk, "bearer-"+connID)
+	}
+
+	results := []tally.ProbeResult{
+		{
+			Endpoint:  "http://127.0.0.1:9012",
+			Reachable: true,
+			IsTally:   true,
+			Version:   tally.VersionUnknown,
+			Companies: []tally.TallyCompany{{Name: "HAH Intl Shipping Pvt. Ltd."}},
+			LatencyMs: 5,
+		},
+	}
+	senders := map[string]*fakeCatalogSender{}
+	servers := map[string]string{}
+	deps := discoverDeps{
+		now:          func() time.Time { return time.Unix(1700000000, 0) },
+		newOSKeyring: func() keyring.Store { return ks },
+		discover:     stubDiscover(results),
+		newCatalogClient: func(server, connectionID, _, _ string) (catalogSender, error) {
+			sender := &fakeCatalogSender{}
+			senders[connectionID] = sender
+			servers[connectionID] = server
+			return sender, nil
+		},
+		loadConfig: config.Load,
+		saveConfig: config.Save,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runDiscover(&stdout, &stderr, []string{"--config", cfgPath}, deps)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s, stdout=%s", code, stderr.String(), stdout.String())
+	}
+
+	if len(senders) != 2 {
+		t.Fatalf("catalog pushes = %d, want 2", len(senders))
+	}
+	for _, connID := range []string{"conn-1", "conn-2"} {
+		sender := senders[connID]
+		if sender == nil {
+			t.Fatalf("missing sender for %s", connID)
+		}
+		if len(sender.bodies) != 1 {
+			t.Fatalf("%s pushes=%d, want 1", connID, len(sender.bodies))
+		}
+		if len(sender.bodies[0].Items) != 1 {
+			t.Fatalf("%s items=%d, want 1", connID, len(sender.bodies[0].Items))
+		}
+	}
+	if servers["conn-1"] != "https://one.example" {
+		t.Errorf("conn-1 server=%q", servers["conn-1"])
+	}
+	if servers["conn-2"] != "https://two.example" {
+		t.Errorf("conn-2 server=%q", servers["conn-2"])
+	}
+	if !strings.Contains(stdout.String(), "to connection conn-1") || !strings.Contains(stdout.String(), "to connection conn-2") {
+		t.Errorf("stdout missing per-connection push lines: %s", stdout.String())
+	}
+}
+
 func TestRunDiscover_DryRunSkipsSaveAndPush(t *testing.T) {
 	tmp := t.TempDir()
 	cfgPath := filepath.Join(tmp, "config.yaml")

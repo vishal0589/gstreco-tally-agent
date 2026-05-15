@@ -38,6 +38,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -49,6 +50,7 @@ import (
 	"github.com/vishal0589/gstreco-tally-agent/internal/ingest"
 	"github.com/vishal0589/gstreco-tally-agent/internal/keyring"
 	"github.com/vishal0589/gstreco-tally-agent/internal/log"
+	"github.com/vishal0589/gstreco-tally-agent/internal/period"
 	"github.com/vishal0589/gstreco-tally-agent/internal/scheduler"
 	"github.com/vishal0589/gstreco-tally-agent/internal/secretstore"
 	"github.com/vishal0589/gstreco-tally-agent/internal/selfupdate"
@@ -67,6 +69,39 @@ type daemonOptions struct {
 	scheduleOverride string
 	runOnceAndExit   bool
 	showVersion      bool
+}
+
+type daemonConnectionRuntime struct {
+	info     config.PairedConnection
+	client   *ingest.Client
+	disabled atomic.Bool
+}
+
+func (r *daemonConnectionRuntime) Enabled() bool {
+	return r != nil && !r.disabled.Load()
+}
+
+func (r *daemonConnectionRuntime) Disable() {
+	if r != nil {
+		r.disabled.Store(true)
+	}
+}
+
+type multiCatalogSender struct {
+	runtimes []*daemonConnectionRuntime
+}
+
+func (m multiCatalogSender) SendCatalog(ctx context.Context, body ingest.CatalogRequest) error {
+	var firstErr error
+	for _, runtime := range m.runtimes {
+		if runtime == nil || !runtime.Enabled() {
+			continue
+		}
+		if err := runtime.client.SendCatalog(ctx, body); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 func main() {
@@ -151,27 +186,47 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 		return 2
 	}
 
-	// Resolve ingest client once. Secret store read at startup, not
-	// on every tick — keeps tick latency low and the file-system
-	// read count bounded.
+	// Resolve one ingest client per paired connection. Secret store
+	// reads happen once at startup, not on every tick — keeps tick
+	// latency low and the file-system read count bounded.
 	ks := secretstore.NewFileStore(
 		secretstore.DefaultDir(filepath.Dir(cfgPath)),
 		secretstore.ReadMachineID,
 	)
-	hmacKey, bearerKey := keyring.ConnectionKeys(cfg.ConnectionID)
-	secret, err := ks.Get(keyring.ServiceName, hmacKey)
-	if err != nil {
-		logger.Error().Err(err).Msg("read hmac secret from keyring failed")
-		return 1
+	runtimes := make([]*daemonConnectionRuntime, 0, len(cfg.PairedConnections()))
+	for _, conn := range cfg.PairedConnections() {
+		hmacKey, bearerKey := keyring.ConnectionKeys(conn.ConnectionID)
+		secret, secretErr := ks.Get(keyring.ServiceName, hmacKey)
+		if secretErr != nil {
+			logger.Error().
+				Str("connection_id", conn.ConnectionID).
+				Err(secretErr).
+				Msg("read hmac secret from keyring failed; skipping connection")
+			continue
+		}
+		bearer, bearerErr := ks.Get(keyring.ServiceName, bearerKey)
+		if bearerErr != nil {
+			logger.Error().
+				Str("connection_id", conn.ConnectionID).
+				Err(bearerErr).
+				Msg("read bearer token from keyring failed; skipping connection")
+			continue
+		}
+		client, clientErr := ingest.NewClient(conn.Server, conn.ConnectionID, bearer, secret)
+		if clientErr != nil {
+			logger.Error().
+				Str("connection_id", conn.ConnectionID).
+				Err(clientErr).
+				Msg("build ingest client failed; skipping connection")
+			continue
+		}
+		runtimes = append(runtimes, &daemonConnectionRuntime{
+			info:   conn,
+			client: client,
+		})
 	}
-	bearer, err := ks.Get(keyring.ServiceName, bearerKey)
-	if err != nil {
-		logger.Error().Err(err).Msg("read bearer token from keyring failed")
-		return 1
-	}
-	client, err := ingest.NewClient(cfg.Server, cfg.ConnectionID, bearer, secret)
-	if err != nil {
-		logger.Error().Err(err).Msg("build ingest client failed")
+	if len(runtimes) == 0 {
+		logger.Error().Msg("no usable paired connections could be initialized")
 		return 1
 	}
 
@@ -190,7 +245,7 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 	bootRes, bootErr := autodiscover.Run(bootCtx, autodiscover.Options{
 		Cfg:     cfg,
 		CfgPath: cfgPath,
-		Sender:  client,
+		Sender:  multiCatalogSender{runtimes: runtimes},
 		Logger:  logger,
 	})
 	bootCancel()
@@ -212,7 +267,7 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 		scheduleSpec = cfg.ScheduleCron
 	}
 
-	tickFn := makeTickFunc(client, tally.NewClient, logger)
+	tickFn := makeTickFunc(runtimes, tally.NewClient, logger)
 
 	if opts.runOnceAndExit {
 		// Smoke path — fire once and report. The service path uses
@@ -262,28 +317,50 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 	go autodiscover.Loop(runCtx, autodiscover.DefaultPeriodicInterval, autodiscover.Options{
 		Cfg:     cfg,
 		CfgPath: cfgPath,
-		Sender:  client,
+		Sender:  multiCatalogSender{runtimes: runtimes},
 		Logger:  logger,
 	})
 
-	hbHandler := &daemonHeartbeatHandler{
-		sched:     sched,
-		logger:    logger,
-		cancelRun: cancelRun,
+	pollers := make([]*heartbeat.Poller, 0, len(runtimes))
+	for _, runtime := range runtimes {
+		runtime := runtime
+		periodSyncFnTracked := wrapPeriodSyncWithState(
+			makePeriodSyncFunc(runtime, tally.NewClient, logger),
+			tickState,
+		)
+		currentMonthSyncFnTracked := wrapTickWithState(
+			makeSingleConnectionTickFunc(runtime, tally.NewClient, logger),
+			tickState,
+		)
+		hbHandler := &daemonHeartbeatHandler{
+			runtime:         runtime,
+			logger:          logger,
+			runCurrentSync:  currentMonthSyncFnTracked,
+			runPeriodSync:   periodSyncFnTracked,
+			cancelIfLastOne: func() { cancelRunIfAllConnectionsDisabled(runtimes, cancelRun) },
+		}
+		poller, pollerErr := heartbeat.New(heartbeat.Options{
+			Client:           runtime.client,
+			Handler:          hbHandler,
+			Logger:           logger,
+			AgentVersion:     version.Version,
+			LastTickReporter: tickState.report,
+		})
+		if pollerErr != nil {
+			logger.Error().
+				Str("connection_id", runtime.info.ConnectionID).
+				Err(pollerErr).
+				Msg("heartbeat poller init failed")
+			return 1
+		}
+		poller.Start(runCtx)
+		pollers = append(pollers, poller)
 	}
-	poller, err := heartbeat.New(heartbeat.Options{
-		Client:           client,
-		Handler:          hbHandler,
-		Logger:           logger,
-		AgentVersion:     version.Version,
-		LastTickReporter: tickState.report,
-	})
-	if err != nil {
-		logger.Error().Err(err).Msg("heartbeat poller init failed")
-		return 1
-	}
-	poller.Start(runCtx)
-	defer poller.Stop()
+	defer func() {
+		for _, poller := range pollers {
+			poller.Stop()
+		}
+	}()
 
 	// Self-update notifier (B5). Polls /api/tally/agent/version every
 	// 6 hours; logs at warn level when a newer version is available
@@ -291,7 +368,7 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 	// future tray UI reads this via IPC.
 	updateChecker, err := selfupdate.New(selfupdate.Options{
 		HTTPClient:     http.DefaultClient,
-		VersionURL:     strings.TrimRight(cfg.Server, "/") + "/api/tally/agent/version",
+		VersionURL:     strings.TrimRight(runtimes[0].info.Server, "/") + "/api/tally/agent/version",
 		CurrentVersion: version.Version,
 		Handler: func(n selfupdate.Notification) {
 			logger.Warn().
@@ -312,8 +389,7 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 	}
 
 	logger.Info().
-		Str("server", cfg.Server).
-		Str("connection_id", cfg.ConnectionID).
+		Int("connections", len(runtimes)).
 		Str("schedule", sched.Spec()).
 		Msg("daemon ready")
 
@@ -325,14 +401,34 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 // daemonHeartbeatHandler implements heartbeat.Handler by routing each
 // action to the corresponding daemon primitive.
 type daemonHeartbeatHandler struct {
-	sched     *scheduler.Scheduler
-	logger    zerolog.Logger
-	cancelRun context.CancelFunc
+	runtime         *daemonConnectionRuntime
+	logger          zerolog.Logger
+	runCurrentSync  func(ctx context.Context) error
+	runPeriodSync   func(ctx context.Context, period string) error
+	cancelIfLastOne func()
 }
 
-func (h *daemonHeartbeatHandler) OnSyncNow(ctx context.Context) error {
-	h.logger.Info().Msg("heartbeat sync_now: firing scheduler.RunNow")
-	return h.sched.RunNow(ctx)
+func (h *daemonHeartbeatHandler) OnSyncNow(ctx context.Context, syncPeriod string) error {
+	if h.runtime == nil || !h.runtime.Enabled() {
+		return fmt.Errorf("heartbeat sync_now: connection is disabled")
+	}
+	if strings.TrimSpace(syncPeriod) == "" {
+		h.logger.Info().
+			Str("connection_id", h.runtime.info.ConnectionID).
+			Msg("heartbeat sync_now: firing current-month sync for this connection")
+		if h.runCurrentSync == nil {
+			return fmt.Errorf("heartbeat sync_now: current-month sync is unavailable")
+		}
+		return h.runCurrentSync(ctx)
+	}
+	h.logger.Info().
+		Str("connection_id", h.runtime.info.ConnectionID).
+		Str("period", syncPeriod).
+		Msg("heartbeat sync_now: running explicit month window")
+	if h.runPeriodSync == nil {
+		return fmt.Errorf("heartbeat sync_now: explicit month sync is unavailable")
+	}
+	return h.runPeriodSync(ctx, syncPeriod)
 }
 
 func (h *daemonHeartbeatHandler) OnPause(_ context.Context) error {
@@ -347,8 +443,15 @@ func (h *daemonHeartbeatHandler) OnPause(_ context.Context) error {
 }
 
 func (h *daemonHeartbeatHandler) OnRevoke(_ context.Context) error {
-	h.logger.Warn().Msg("heartbeat revoke: cancelling daemon — exiting")
-	h.cancelRun()
+	if h.runtime != nil {
+		h.runtime.Disable()
+		h.logger.Warn().
+			Str("connection_id", h.runtime.info.ConnectionID).
+			Msg("heartbeat revoke: connection disabled locally")
+	}
+	if h.cancelIfLastOne != nil {
+		h.cancelIfLastOne()
+	}
 	return nil
 }
 
@@ -405,93 +508,202 @@ func wrapTickWithState(fn scheduler.TickFunc, state *tickState) scheduler.TickFu
 	}
 }
 
+func wrapPeriodSyncWithState(
+	fn func(ctx context.Context, period string) error,
+	state *tickState,
+) func(ctx context.Context, period string) error {
+	return func(ctx context.Context, period string) error {
+		err := fn(ctx, period)
+		status := "ok"
+		if err != nil {
+			status = "error"
+		}
+		state.record(time.Now().UTC(), status)
+		return err
+	}
+}
+
 // makeTickFunc returns the closure the scheduler fires on each tick.
-// One factory call at startup, one closure forever — the server URL,
-// connection id, and ingest client are bound once.
+// One factory call at startup, one closure forever — it walks every enabled
+// paired connection.
 func makeTickFunc(
-	client *ingest.Client,
+	runtimes []*daemonConnectionRuntime,
 	newTallyClient func(string, ...tally.ClientOption) *tally.Client,
 	logger zerolog.Logger,
 ) scheduler.TickFunc {
 	return func(ctx context.Context) error {
-		// Each tick runs against the current calendar month. CAs
-		// reconcile monthly; daily cron means each tick re-syncs the
-		// month-to-date state. Idempotent on the server side
-		// (ingest's ON CONFLICT DO UPDATE per migration 00033).
-		now := time.Now().In(time.Local)
-		from := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
-		to := from.AddDate(0, 1, -1)
+		from, to := currentMonthWindow(time.Now().In(time.Local))
+		return runWindowSyncAllConnections(ctx, runtimes, newTallyClient, logger, from, to, "incremental")
+	}
+}
 
-		mappings, err := client.FetchActiveMappings(ctx)
+func makePeriodSyncFunc(
+	runtime *daemonConnectionRuntime,
+	newTallyClient func(string, ...tally.ClientOption) *tally.Client,
+	logger zerolog.Logger,
+) func(ctx context.Context, periodCode string) error {
+	return func(ctx context.Context, periodCode string) error {
+		from, to, err := period.ParseMonthCode(periodCode)
 		if err != nil {
-			return fmt.Errorf("fetch active mappings: %w", err)
+			return fmt.Errorf("sync_now period %q: %w", periodCode, err)
 		}
-		if len(mappings.Mappings) == 0 {
-			logger.Warn().Msg("no active mappings — open /settings/tally and map the auto-discovered companies to GSTINs")
-			return nil
+		if runtime == nil || !runtime.Enabled() {
+			return fmt.Errorf("sync_now period %q: connection is disabled", periodCode)
 		}
-		logger.Info().
-			Int("mappings", len(mappings.Mappings)).
-			Time("from", from).Time("to", to).
-			Msg("walking mappings")
+		return runWindowSync(ctx, runtime.client, newTallyClient, logger, from, to, "manual")
+	}
+}
 
-		// Sync vendor + customer masters BEFORE walking vouchers so
-		// the server's ingest path back-fills vendor_id / customer_id
-		// on each invoice as it lands. Best-effort: per-(mapping,
-		// kind) failures log warn and the voucher walk still runs.
-		// Reusing the same Tally client per endpoint keeps connection
-		// pooling sensible (Tally HTTP is single-process anyway).
-		syncMastersForMappings(ctx, client, newTallyClient, mappings.Mappings, logger)
+func makeSingleConnectionTickFunc(
+	runtime *daemonConnectionRuntime,
+	newTallyClient func(string, ...tally.ClientOption) *tally.Client,
+	logger zerolog.Logger,
+) scheduler.TickFunc {
+	return func(ctx context.Context) error {
+		if runtime == nil || !runtime.Enabled() {
+			return fmt.Errorf("current-month sync: connection is disabled")
+		}
+		from, to := currentMonthWindow(time.Now().In(time.Local))
+		return runWindowSync(ctx, runtime.client, newTallyClient, logger, from, to, "incremental")
+	}
+}
 
-		runIDPrefix := fmt.Sprintf("daemon-%d", time.Now().Unix())
+func runWindowSyncAllConnections(
+	ctx context.Context,
+	runtimes []*daemonConnectionRuntime,
+	newTallyClient func(string, ...tally.ClientOption) *tally.Client,
+	logger zerolog.Logger,
+	from time.Time,
+	to time.Time,
+	runKind string,
+) error {
+	activeCount := 0
+	var firstErr error
+	for _, runtime := range runtimes {
+		if runtime == nil || !runtime.Enabled() {
+			continue
+		}
+		activeCount++
+		if err := runWindowSync(ctx, runtime.client, newTallyClient, logger, from, to, runKind); err != nil {
+			logger.Error().
+				Str("connection_id", runtime.info.ConnectionID).
+				Err(err).
+				Msg("connection window sync failed")
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	if activeCount == 0 {
+		logger.Warn().Msg("no enabled paired connections remain")
+		return nil
+	}
+	return firstErr
+}
 
-		res := syncrun.WalkAll(ctx, syncrun.WalkOptions{
-			Mappings:        mappings.Mappings,
-			Kinds:           syncrun.DefaultKinds,
-			From:            from,
-			To:              to,
-			RunIDPrefix:     runIDPrefix,
-			RunKind:         "incremental",
-			ContinueOnError: true,
-			NewTallyClient: func(endpoint string) syncrun.TallyPoster {
-				return newTallyClient(endpoint)
-			},
-			Sender: client,
-			PerKindResultHook: func(m ingest.ActiveMapping, k syncrun.KindPair, r syncrun.Result, fatalErr error) {
-				if fatalErr != nil {
-					logger.Error().
-						Str("mapping", m.TallyCompanyName).
-						Str("endpoint", m.TallyEndpoint).
-						Str("kind", k.Name).
-						Err(fatalErr).
-						Msg("per-kind fatal")
-					return
-				}
-				logger.Info().
+func cancelRunIfAllConnectionsDisabled(
+	runtimes []*daemonConnectionRuntime,
+	cancelRun context.CancelFunc,
+) {
+	for _, runtime := range runtimes {
+		if runtime != nil && runtime.Enabled() {
+			return
+		}
+	}
+	cancelRun()
+}
+
+func currentMonthWindow(now time.Time) (time.Time, time.Time) {
+	from := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	return from, from.AddDate(0, 1, -1)
+}
+
+func runWindowSync(
+	ctx context.Context,
+	client *ingest.Client,
+	newTallyClient func(string, ...tally.ClientOption) *tally.Client,
+	logger zerolog.Logger,
+	from time.Time,
+	to time.Time,
+	runKind string,
+) error {
+	mappings, err := client.FetchActiveMappings(ctx)
+	if err != nil {
+		return fmt.Errorf("fetch active mappings: %w", err)
+	}
+	if len(mappings.Mappings) == 0 {
+		logger.Warn().Msg("no active mappings — open /settings/tally and map the auto-discovered companies to GSTINs")
+		return nil
+	}
+	logger.Info().
+		Int("mappings", len(mappings.Mappings)).
+		Time("from", from).
+		Time("to", to).
+		Str("run_kind", runKind).
+		Msg("walking mappings")
+
+	// Sync vendor + customer masters BEFORE walking vouchers so
+	// the server's ingest path back-fills vendor_id / customer_id
+	// on each invoice as it lands. Best-effort: per-(mapping,
+	// kind) failures log warn and the voucher walk still runs.
+	// Reusing the same Tally client per endpoint keeps connection
+	// pooling sensible (Tally HTTP is single-process anyway).
+	syncMastersForMappings(ctx, client, newTallyClient, mappings.Mappings, logger)
+
+	runIDPrefix := fmt.Sprintf("%s-%d", runKind, time.Now().Unix())
+
+	res := syncrun.WalkAll(ctx, syncrun.WalkOptions{
+		Mappings:        mappings.Mappings,
+		Kinds:           syncrun.DefaultKinds,
+		From:            from,
+		To:              to,
+		RunIDPrefix:     runIDPrefix,
+		RunKind:         runKind,
+		ContinueOnError: true,
+		NewTallyClient: func(endpoint string) syncrun.TallyPoster {
+			return newTallyClient(endpoint)
+		},
+		Sender: client,
+		PerKindResultHook: func(m ingest.ActiveMapping, k syncrun.KindPair, r syncrun.Result, fatalErr error) {
+			if fatalErr != nil {
+				logger.Error().
 					Str("mapping", m.TallyCompanyName).
 					Str("endpoint", m.TallyEndpoint).
 					Str("kind", k.Name).
-					Int("rows", r.RowCount).
-					Int("sent", r.BatchesSent).
-					Int("failed", r.BatchesFailed).
-					Msg("per-kind result")
-			},
-		})
+					Err(fatalErr).
+					Msg("per-kind fatal")
+				return
+			}
+			logger.Info().
+				Str("mapping", m.TallyCompanyName).
+				Str("endpoint", m.TallyEndpoint).
+				Str("kind", k.Name).
+				Int("rows", r.RowCount).
+				Int("sent", r.BatchesSent).
+				Int("failed", r.BatchesFailed).
+				Int("landed", r.ServerInserted+r.ServerAmended).
+				Int("skipped", r.ServerSkipped).
+				Int("server_errors", r.ServerErrors).
+				Msg("per-kind result")
+		},
+	})
 
-		logger.Info().
-			Int("mappings_run", res.MappingsRun).
-			Int("rows", res.TotalRows).
-			Int("batches_sent", res.TotalBatchesSent).
-			Int("batches_failed", res.TotalBatchesFailed).
-			Int("fatal_errors", res.FatalErrors).
-			Msg("tick complete")
+	logger.Info().
+		Int("mappings_run", res.MappingsRun).
+		Int("rows", res.TotalRows).
+		Int("batches_sent", res.TotalBatchesSent).
+		Int("batches_failed", res.TotalBatchesFailed).
+		Int("server_skipped", res.TotalServerSkipped).
+		Int("server_errors", res.TotalServerErrors).
+		Int("fatal_errors", res.FatalErrors).
+		Str("run_kind", runKind).
+		Msg("tick complete")
 
-		// Tick is "successful" even with non-zero failures — the
-		// scheduler keeps firing. The operator triages via the
-		// sync-status dashboard (B4) once it ships. A non-nil return
-		// here would just produce a duplicate scheduler-level log.
-		return nil
-	}
+	// Tick is "successful" even with non-zero failures — the
+	// scheduler keeps firing. The operator triages via the
+	// sync-status dashboard (B4) once it ships. A non-nil return
+	// here would just produce a duplicate scheduler-level log.
+	return nil
 }
 
 // syncMastersForMappings fetches vendor + customer master ledgers

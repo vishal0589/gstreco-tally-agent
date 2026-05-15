@@ -80,10 +80,11 @@ func pairCmd(args []string) int {
 	ctx, cancel := signalContext(60 * time.Second)
 	defer cancel()
 
+	path := resolveConfigPath(*configPath)
 	resp, err := pair.Claim(ctx, pair.Options{
 		Server:       *server,
 		Code:         *code,
-		ConfigPath:   *configPath,
+		ConfigPath:   path,
 		Keyring:      defaultSecretStore(),
 		AgentVersion: version.Version,
 	})
@@ -93,7 +94,7 @@ func pairCmd(args []string) int {
 			fmt.Fprintf(os.Stderr, "agentctl pair: %v\n", err)
 			return 2
 		case errors.Is(err, pair.ErrAlreadyPaired):
-			fmt.Fprintf(os.Stderr, "agentctl pair: %v\nUnpair first, then re-run.\n", err)
+			fmt.Fprintf(os.Stderr, "agentctl pair: %v\nUpgrade the agent build or clear the local config, then retry.\n", err)
 			return 2
 		case errors.Is(err, pair.ErrCodeGone):
 			fmt.Fprintln(os.Stderr, "agentctl pair: this code is expired or already used. Generate a new code in the settings page and try again.")
@@ -104,7 +105,7 @@ func pairCmd(args []string) int {
 		}
 	}
 
-	fmt.Fprintf(os.Stdout, "✓ paired successfully (connection_id=%s)\n", resp.ConnectionID)
+	fmt.Fprintf(os.Stdout, "✓ paired successfully (connection_id=%s company_id=%s)\n", resp.ConnectionID, resp.CompanyID)
 	return 0
 }
 
@@ -119,10 +120,7 @@ func statusCmd(args []string) int {
 		return 2
 	}
 
-	path := *configPath
-	if path == "" {
-		path = config.DefaultPath()
-	}
+	path := resolveConfigPath(*configPath)
 	cfg, err := config.Load(path)
 	if err != nil {
 		if errors.Is(err, config.ErrNotFound) {
@@ -136,8 +134,27 @@ func statusCmd(args []string) int {
 		fmt.Fprintln(os.Stdout, "agent config exists but is incomplete — re-run `agentctl pair`")
 		return 0
 	}
-	fmt.Fprintf(os.Stdout, "paired\n  server:        %s\n  connection_id: %s\n  device_name:   %s\n  paired_at:     %s\n",
-		cfg.Server, cfg.ConnectionID, cfg.DeviceName, cfg.PairedAt.Format(time.RFC3339))
+	conns := cfg.PairedConnections()
+	if len(conns) == 1 {
+		conn := conns[0]
+		fmt.Fprintf(os.Stdout, "paired\n  server:        %s\n  connection_id: %s\n  company_id:    %s\n  device_name:   %s\n  paired_at:     %s\n",
+			conn.Server, conn.ConnectionID, conn.CompanyID, conn.DeviceName, conn.PairedAt.Format(time.RFC3339))
+		return 0
+	}
+
+	fmt.Fprintf(os.Stdout, "paired (%d connections)\n", len(conns))
+	for i, conn := range conns {
+		fmt.Fprintf(
+			os.Stdout,
+			"  [%d]\n    server:        %s\n    connection_id: %s\n    company_id:    %s\n    device_name:   %s\n    paired_at:     %s\n",
+			i+1,
+			conn.Server,
+			conn.ConnectionID,
+			conn.CompanyID,
+			conn.DeviceName,
+			conn.PairedAt.Format(time.RFC3339),
+		)
+	}
 	return 0
 }
 
@@ -163,17 +180,19 @@ func usage() {
 
 Usage:
   agentctl pair --code <CODE> [--server <URL>] [--config <PATH>]
-      pair this agent with a GST Reco connection
+      pair this agent with a GST Reco connection; repeat per tenant
 
   agentctl status [--config <PATH>]
-      print local pairing state
+      print local pairing state (all stored connections)
 
   agentctl sync --tally-company <NAME> --kind <KIND>
                 (--period MMYYYY | --from YYYY-MM-DD --to YYYY-MM-DD)
                 [--tally-url <URL>] [--server <URL>] [--config <PATH>]
+                [--connection-id <UUID>]
                 [--batch-size N] [--dry-run]
       one-shot fetch from a Tally endpoint → parse → ingest a single window.
-      KIND is one of: purchase, sales, credit_note, debit_note.
+      KIND is one of: purchase, sales, credit_note, debit_note,
+      journal, payment, tax_ledger.
 
   agentctl discover [--ports START-END] [--host HOST] [--endpoint URL]...
                     [--timeout DURATION] [--concurrency N]
@@ -184,13 +203,14 @@ Usage:
       to the server's mapping list. Default port range: 9000-9009.
 
   agentctl sync-all (--period MMYYYY | --from YYYY-MM-DD --to YYYY-MM-DD)
-                    [--kinds purchase,sales,credit_note,debit_note]
+                    [--kinds purchase,sales,credit_note,debit_note,journal,payment,tax_ledger]
+                    [--connection-id <UUID>]
                     [--batch-size N] [--dry-run]
                     [--continue-on-error]
                     [--server <URL>] [--config <PATH>]
-      walk every active mapping for this connection (fetched from the
-      server), run the fetch → parse → ingest pipeline per
-      (endpoint, company, kind), report a per-mapping + grand-total
+      walk every active mapping for every stored connection (or one
+      selected connection), run the fetch → parse → ingest pipeline
+      per (endpoint, company, kind), report a per-mapping + grand-total
       summary. The pre-A5 daemon driver for multi-port pilots.
 
   agentctl version

@@ -310,6 +310,86 @@ func TestRunSync_NotPairedExits2(t *testing.T) {
 	}
 }
 
+func TestRunSync_RequiresConnectionIDWhenConfigHasMultipleConnections(t *testing.T) {
+	deps := syncDeps{
+		now:             time.Now,
+		newOSKeyring:    func() keyring.Store { return keyring.NewMemoryStore() },
+		newTallyClient:  func(string) tallyPoster { return &fakeTallyPoster{} },
+		newIngestClient: func(_, _, _, _ string) (ingestSender, error) { return &fakeIngestSender{}, nil },
+		loadConfig: func(string) (*config.Config, error) {
+			return &config.Config{
+				Connections: []config.PairedConnection{
+					{Server: "https://one.example", ConnectionID: "conn-1", DeviceName: "WIN-1"},
+					{Server: "https://two.example", ConnectionID: "conn-2", DeviceName: "WIN-1"},
+				},
+			}, nil
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runSync(&stdout, &stderr, []string{
+		"--tally-company", "PLLUM CASA",
+		"--kind", "purchase",
+		"--period", "042026",
+	}, deps)
+	if code != 2 {
+		t.Fatalf("exit=%d, want 2 (stderr=%s)", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "multiple connections configured") {
+		t.Errorf("stderr missing disambiguation hint: %s", stderr.String())
+	}
+}
+
+func TestRunSync_UsesRequestedConnectionIDFromMultiConfig(t *testing.T) {
+	tallyClient := &fakeTallyPoster{resp: []byte(stubResponse)}
+	sender := &fakeIngestSender{}
+	store := keyring.NewMemoryStore()
+	hk, bk := keyring.ConnectionKeys("conn-2")
+	_ = store.Set(keyring.ServiceName, hk, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+	_ = store.Set(keyring.ServiceName, bk, "bearer-token-2")
+
+	var gotConnectionID string
+	var gotServer string
+	deps := syncDeps{
+		now:            func() time.Time { return time.Unix(1700000000, 0) },
+		newOSKeyring:   func() keyring.Store { return store },
+		newTallyClient: func(string) tallyPoster { return tallyClient },
+		newIngestClient: func(server, connectionID, _, _ string) (ingestSender, error) {
+			gotServer = server
+			gotConnectionID = connectionID
+			return sender, nil
+		},
+		loadConfig: func(string) (*config.Config, error) {
+			return &config.Config{
+				Connections: []config.PairedConnection{
+					{Server: "https://one.example", ConnectionID: "conn-1", DeviceName: "WIN-1"},
+					{Server: "https://two.example", ConnectionID: "conn-2", DeviceName: "WIN-1"},
+				},
+			}, nil
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runSync(&stdout, &stderr, []string{
+		"--connection-id", "conn-2",
+		"--tally-company", "PLLUM CASA",
+		"--kind", "purchase",
+		"--period", "042026",
+	}, deps)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s, stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if gotConnectionID != "conn-2" {
+		t.Errorf("connectionID=%q, want conn-2", gotConnectionID)
+	}
+	if gotServer != "https://two.example" {
+		t.Errorf("server=%q, want https://two.example", gotServer)
+	}
+	if len(sender.sent) != 1 {
+		t.Fatalf("want 1 batch sent, got %d", len(sender.sent))
+	}
+}
+
 func TestRunSync_BadFlags(t *testing.T) {
 	deps := syncDeps{
 		now:             time.Now,
