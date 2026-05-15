@@ -28,9 +28,9 @@ const DefaultCheckInterval = 6 * time.Hour
 // stays opaque so future server-side additions don't break old
 // agents.
 type VersionResponse struct {
-	Latest               string `json:"latest"`
-	ReleasedAt           string `json:"released_at,omitempty"`
-	PollIntervalSeconds  int    `json:"poll_interval_seconds,omitempty"`
+	Latest              string `json:"latest"`
+	ReleasedAt          string `json:"released_at,omitempty"`
+	PollIntervalSeconds int    `json:"poll_interval_seconds,omitempty"`
 }
 
 // Notification carries the comparison result so the caller can
@@ -73,10 +73,10 @@ type Checker struct {
 
 // Options configures a new Checker.
 type Options struct {
-	HTTPClient     HTTPClient
+	HTTPClient HTTPClient
 	// VersionURL is the full URL of /api/tally/agent/version.
 	// Server URL + the route path; daemon's caller composes it.
-	VersionURL     string
+	VersionURL string
 	// CurrentVersion is the agent's own semver string. Comparison
 	// is plain string equality — semver-aware logic ships if/when
 	// we have downgrade-block scenarios. Today the server only
@@ -218,11 +218,16 @@ func shouldNotify(current, latest string) bool {
 	}
 	// Strip dev-build suffix from current ("a27a610-dirty (a27a610,
 	// 2026-04-26T...)") — just match the semver/short-sha prefix.
-	currentBase := stripBuildMeta(current)
-	if currentBase == latest {
+	currentBase := normalizeComparableVersion(stripBuildMeta(current))
+	latestBase := normalizeComparableVersion(stripBuildMeta(latest))
+	if currentBase == latestBase {
 		return false
 	}
 	return true
+}
+
+func normalizeComparableVersion(s string) string {
+	return strings.TrimPrefix(strings.TrimSpace(s), "v")
 }
 
 // stripBuildMeta returns the prefix before the first space or '+'.

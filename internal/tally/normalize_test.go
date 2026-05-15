@@ -278,6 +278,144 @@ func TestNormalize_PurchaseDebitNoteCarriesVoucherProvenanceSeparatelyFromSuppli
 	}
 }
 
+func TestNormalize_PurchaseVoucherAddsBackTDSWithoutShrinkingTaxableBase(t *testing.T) {
+	v := RawVoucher{
+		GUID:            "fixture-raj-industrial-0001",
+		IsInvoice:       true,
+		Date:            parseDate(t, "2026-04-16"),
+		VoucherType:     "GST Purchase",
+		VoucherNumber:   "RAJ/26-27/007",
+		Reference:       "RAJ/26-27/007",
+		PartyLedgerName: "Raj Industrial Corporation",
+		PartyGSTIN:      "06ATRPP2063N1Z2",
+		LedgerEntries: []LedgerEntry{
+			{
+				LedgerName:    "Raj Industrial Corporation",
+				Amount:        -57505,
+				IsPartyLedger: true,
+				BillAllocations: []BillRef{
+					{Name: "RAJ/26-27/007", Amount: -57505, BillType: "New Ref"},
+				},
+			},
+			{LedgerName: "Purchase Raw Material Local - GST Registered", Amount: 49150},
+			{LedgerName: "CGST Input Credit", Amount: 4423.50, GSTClass: "CGST@9"},
+			{LedgerName: "SGST Input Credit", Amount: 4423.50, GSTClass: "SGST@9"},
+			{LedgerName: "Tds Payable (94C) @ 1% (Non-Company)", Amount: -492},
+		},
+	}
+
+	rows, err := Normalize(v, NormalizeOptions{})
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	row := rows[0]
+	if row.InvoiceValue != 57997 {
+		t.Errorf("InvoiceValue = %v, want 57997", row.InvoiceValue)
+	}
+	if row.TaxableValue != 49150 {
+		t.Errorf("TaxableValue = %v, want 49150", row.TaxableValue)
+	}
+	if row.CGST != 4423.50 || row.SGST != 4423.50 || row.IGST != 0 {
+		t.Errorf("tax buckets: igst=%v cgst=%v sgst=%v", row.IGST, row.CGST, row.SGST)
+	}
+}
+
+func TestNormalize_PurchaseVoucherKeepsFreightInTaxableAndExcludesTDS(t *testing.T) {
+	v := RawVoucher{
+		GUID:            "fixture-universal-metalloys-0001",
+		IsInvoice:       true,
+		Date:            parseDate(t, "2026-04-30"),
+		VoucherType:     "GST Purchase",
+		VoucherNumber:   "84/2026-27",
+		Reference:       "84/2026-27",
+		PartyLedgerName: "Universal Metalloys Pvt Ltd - MSME",
+		PartyGSTIN:      "06AABCU4457B2ZL",
+		LedgerEntries: []LedgerEntry{
+			{
+				LedgerName:    "Universal Metalloys Pvt Ltd - MSME",
+				Amount:        -751303,
+				IsPartyLedger: true,
+				BillAllocations: []BillRef{
+					{Name: "84/2026-27", Amount: -751303, BillType: "New Ref"},
+				},
+			},
+			{LedgerName: "Purchase Raw Material Local - GST Registered", Amount: 647065},
+			{LedgerName: "Freight & Courier Charges on Purchase", Amount: 600},
+			{LedgerName: "CGST Input Credit", Amount: 58289.85, GSTClass: "CGST@9"},
+			{LedgerName: "SGST Input Credit", Amount: 58289.85, GSTClass: "SGST@9"},
+			{LedgerName: "TDS Payable Under CGST @ 1%", Amount: -6471},
+			{LedgerName: "TDS Payable Under SGST @ 1%", Amount: -6471},
+			{LedgerName: "Round Off", Amount: 0.30},
+		},
+	}
+
+	rows, err := Normalize(v, NormalizeOptions{})
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	row := rows[0]
+	if row.InvoiceValue != 764245 {
+		t.Errorf("InvoiceValue = %v, want 764245", row.InvoiceValue)
+	}
+	if row.TaxableValue != 647665 {
+		t.Errorf("TaxableValue = %v, want 647665", row.TaxableValue)
+	}
+	if row.CGST != 58289.85 || row.SGST != 58289.85 || row.IGST != 0 {
+		t.Errorf("tax buckets: igst=%v cgst=%v sgst=%v", row.IGST, row.CGST, row.SGST)
+	}
+}
+
+func TestNormalize_ConsolidatedUsesGrossInvoiceShareWhenTDSReducesNetPartyAmount(t *testing.T) {
+	v := RawVoucher{
+		GUID:            "fixture-consolidated-tds-0001",
+		IsInvoice:       true,
+		Date:            parseDate(t, "2026-04-10"),
+		VoucherType:     "GST Purchase",
+		VoucherNumber:   "PI/TDS/001",
+		Reference:       "SUPP-TDS-001",
+		PartyLedgerName: "TDS Vendor",
+		LedgerEntries: []LedgerEntry{
+			{
+				LedgerName:    "TDS Vendor",
+				Amount:        -2324,
+				IsPartyLedger: true,
+				BillAllocations: []BillRef{
+					{Name: "INV-A", Amount: -1162, BillType: "New Ref"},
+					{Name: "INV-B", Amount: -1162, BillType: "New Ref"},
+				},
+			},
+			{LedgerName: "Purchase A/c", Amount: 2000},
+			{LedgerName: "IGST @ 18%", Amount: 360, GSTClass: "IGST@18"},
+			{LedgerName: "Tds Payable (94C)", Amount: -36},
+		},
+	}
+
+	rows, err := Normalize(v, NormalizeOptions{})
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(rows))
+	}
+	for i, row := range rows {
+		if row.InvoiceValue != 1180 {
+			t.Errorf("rows[%d].InvoiceValue = %v, want 1180", i, row.InvoiceValue)
+		}
+		if row.TaxableValue != 1000 {
+			t.Errorf("rows[%d].TaxableValue = %v, want 1000", i, row.TaxableValue)
+		}
+		if row.IGST != 180 {
+			t.Errorf("rows[%d].IGST = %v, want 180", i, row.IGST)
+		}
+	}
+}
+
 func TestNormalize_ConsolidatedThreeBillsSumToOriginal(t *testing.T) {
 	// Three equal bills with a tax total that doesn't divide evenly (₹55 /
 	// 3 = 18.333...). With naive proration each row rounds to 18.33 and the
