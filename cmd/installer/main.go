@@ -40,11 +40,12 @@ func runInstallerMain(stdout, stderr, stdin *os.File, args []string, deps instal
 }
 
 type installerOptions struct {
-	server     string
-	configPath string
-	installDir string
+	server      string
+	configPath  string
+	installDir  string
 	customPorts string
-	noBrowser  bool
+	addTenant   bool
+	noBrowser   bool
 }
 
 type installerAction string
@@ -64,6 +65,7 @@ func parseInstallerArgs(stdout, stderr *os.File, args []string) (installerOption
 	fs.StringVar(&opts.configPath, "config", "", "override config file path")
 	fs.StringVar(&opts.installDir, "install-dir", defaultInstallDir(), "directory for agent binaries")
 	fs.StringVar(&opts.customPorts, "custom-ports", "", "comma-separated custom Tally ports to try after default discovery fails")
+	fs.BoolVar(&opts.addTenant, "add-tenant", false, "start a fresh browser approval to add another GST Reco tenant on this machine")
 	fs.BoolVar(&opts.noBrowser, "no-browser", false, "print the approval URL instead of opening it automatically")
 
 	versionFlag := fs.Bool("version", false, "print version and exit")
@@ -87,7 +89,7 @@ func printInstallerUsage(stdout *os.File) {
 
 Usage:
   gstreco-tally-installer [--server <URL>] [--config <PATH>] [--install-dir <PATH>]
-                          [--custom-ports 2026,9000] [--no-browser]
+                          [--custom-ports 2026,9000] [--add-tenant] [--no-browser]
 
 Behavior:
   - Starts a browser-authorized installer session
@@ -96,6 +98,7 @@ Behavior:
   - Downloads or refreshes the agent binaries
   - Installs or repairs the Windows service
   - Runs discovery-first and only falls back to custom ports if needed
+  - On an already paired machine, rerun with --add-tenant to pair another GST Reco tenant
 
 Fallbacks:
   - agentctl pair --code <CODE> stays available for support scenarios

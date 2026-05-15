@@ -4,13 +4,15 @@
 > pilot workflow. The current product direction is installer-first on Windows:
 > download `gstreco-tally-installer.exe`, approve the machine in the browser,
 > and let the installer handle service repair plus discovery-first setup.
+> On a machine that already serves one GST Reco tenant, rerun the installer
+> with `--add-tenant` (or use the fallback `agentctl pair`) before discovery.
 > Keep this runbook for support recovery, diagnostics, and direct `agentctl`
 > usage when the installer path cannot complete.
 
 This is the operator-facing runbook for installing the GST Reco Tally
 agent on a remote Windows server that runs **multiple Tally Prime
 instances on different ports** (the multi-tenant SaaS shape — one
-agent, many endpoints, one pair).
+agent install, many endpoints, one pair per tenant).
 
 This runbook supersedes `docs/smoke-test-runbook.md` for the
 remote-server pilot. The smoke runbook is still valid for end-to-end
@@ -127,7 +129,7 @@ gstreco-tally-agentctl.exe pair ^
 Expected output:
 
 ```
-✓ paired successfully (connection_id=<uuid>)
+✓ paired successfully (connection_id=<uuid> company_id=<uuid>)
 ```
 
 Verify:
@@ -141,6 +143,11 @@ gstreco-tally-agentctl.exe status
 #   paired_at:     2026-04-26T...Z
 ```
 
+If the same Windows machine needs to serve multiple GST Reco tenants,
+repeat `pair` once per tenant. The agent keeps one stored connection
+per tenant in the same config/keyring, and `status` will list every
+stored connection.
+
 The HMAC secret + bearer token are stored in **Windows Credential
 Manager** under service `gstreco-tally-agent` (NOT on disk). The
 config file at `%ProgramData%\GST Reco\agent\config.yaml` holds only
@@ -152,7 +159,6 @@ If the pair fails:
 |---|---|---|
 | `2` + `invalid code format` | typo — not 6 Crockford chars | re-check the code |
 | `2` + `code_gone` | expired (15 min TTL) or already claimed | regenerate in the UI |
-| `2` + `already paired` | local config has an existing connection | delete `config.yaml` first |
 | `1` + network error | server unreachable / VPN / firewall | check connectivity |
 | `1` + keyring error | Credential Manager unreachable | check Windows user session |
 

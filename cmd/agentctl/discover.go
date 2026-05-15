@@ -97,10 +97,7 @@ func runDiscover(stdout, stderr io.Writer, args []string, deps discoverDeps) int
 		return 2
 	}
 
-	cfgPath := *configPath
-	if cfgPath == "" {
-		cfgPath = config.DefaultPath()
-	}
+	cfgPath := resolveConfigPath(*configPath)
 	cfg, err := deps.loadConfig(cfgPath)
 	if err != nil {
 		if errors.Is(err, config.ErrNotFound) {
@@ -112,6 +109,11 @@ func runDiscover(stdout, stderr io.Writer, args []string, deps discoverDeps) int
 	}
 	if !cfg.IsPaired() {
 		fmt.Fprintln(stderr, "agentctl discover: config exists but is incomplete — re-run `agentctl pair`")
+		return 2
+	}
+	connections, err := requireAllConnections(cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "agentctl discover: %v\n", err)
 		return 2
 	}
 
@@ -170,39 +172,53 @@ func runDiscover(stdout, stderr io.Writer, args []string, deps discoverDeps) int
 		return 0
 	}
 
-	server := firstNonEmpty(*serverFlag, cfg.Server)
 	ks := deps.newOSKeyring()
-	hmacKey, bearerKey := keyring.ConnectionKeys(cfg.ConnectionID)
-	secret, err := ks.Get(keyring.ServiceName, hmacKey)
-	if err != nil {
-		fmt.Fprintf(stderr, "agentctl discover: read hmac secret from keyring: %v\n", err)
-		return 1
-	}
-	bearer, err := ks.Get(keyring.ServiceName, bearerKey)
-	if err != nil {
-		fmt.Fprintf(stderr, "agentctl discover: read bearer token from keyring: %v\n", err)
-		return 1
-	}
+	pushesSucceeded := 0
+	for idx, conn := range connections {
+		server := firstNonEmpty(*serverFlag, conn.Server)
+		hmacKey, bearerKey := keyring.ConnectionKeys(conn.ConnectionID)
+		secret, secErr := ks.Get(keyring.ServiceName, hmacKey)
+		if secErr != nil {
+			fmt.Fprintf(stderr, "agentctl discover: read hmac secret for %s: %v\n", conn.ConnectionID, secErr)
+			return 1
+		}
+		bearer, bearerErr := ks.Get(keyring.ServiceName, bearerKey)
+		if bearerErr != nil {
+			fmt.Fprintf(stderr, "agentctl discover: read bearer token for %s: %v\n", conn.ConnectionID, bearerErr)
+			return 1
+		}
 
-	client, err := deps.newCatalogClient(server, cfg.ConnectionID, bearer, secret)
-	if err != nil {
-		fmt.Fprintf(stderr, "agentctl discover: build ingest client: %v\n", err)
-		return 1
-	}
+		client, clientErr := deps.newCatalogClient(server, conn.ConnectionID, bearer, secret)
+		if clientErr != nil {
+			fmt.Fprintf(stderr, "agentctl discover: build ingest client for %s: %v\n", conn.ConnectionID, clientErr)
+			return 1
+		}
 
-	pushCtx, pushCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer pushCancel()
-	requestID := fmt.Sprintf("discover-%d", deps.now().Unix())
-	if err := client.SendCatalog(pushCtx, ingest.CatalogRequest{
-		Items:     items,
-		RequestID: requestID,
-	}); err != nil {
-		fmt.Fprintf(stderr, "agentctl discover: push catalog: %v\n", err)
+		pushCtx, pushCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		requestID := fmt.Sprintf("discover-%d-%d", deps.now().Unix(), idx+1)
+		if err := client.SendCatalog(pushCtx, ingest.CatalogRequest{
+			Items:     items,
+			RequestID: requestID,
+		}); err != nil {
+			pushCancel()
+			fmt.Fprintf(stderr, "agentctl discover: push catalog for %s: %v\n", conn.ConnectionID, err)
+			return 1
+		}
+		pushCancel()
+		pushesSucceeded++
+		if len(connections) == 1 {
+			fmt.Fprintf(stdout, "✓ pushed catalog (%d companies across %d endpoints, request_id=%s)\n",
+				len(items), len(v3Reachable), requestID)
+		} else {
+			fmt.Fprintf(stdout, "✓ pushed catalog to connection %s (%d companies across %d endpoints, request_id=%s)\n",
+				conn.ConnectionID, len(items), len(v3Reachable), requestID)
+		}
+		fmt.Fprintf(stdout, "→ next step: open the mapping UI at %s/settings/tally and choose a GSTIN per company.\n", server)
+	}
+	if pushesSucceeded == 0 {
+		fmt.Fprintln(stderr, "agentctl discover: no connection received the catalog push")
 		return 1
 	}
-	fmt.Fprintf(stdout, "✓ pushed catalog (%d companies across %d endpoints, request_id=%s)\n",
-		len(items), len(v3Reachable), requestID)
-	fmt.Fprintf(stdout, "→ next step: open the mapping UI at %s/settings/tally and choose a GSTIN per company.\n", server)
 	return 0
 }
 

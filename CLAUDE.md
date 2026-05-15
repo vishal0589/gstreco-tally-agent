@@ -32,7 +32,7 @@ The Windows side of GST Reco's Tally sync. The server side lives at `~/GST_Reco`
 ## Security
 
 - Agent secret (HMAC key) lives in the OS keyring, never on disk, never in logs.
-- Config file (`config.yaml` at `%ProgramData%\GST Reco\agent\`) holds connection_id + server URL, nothing secret.
+- Config file (`config.yaml` at `%ProgramData%\GST Reco\agent\`) holds non-secret connection metadata only. It may store more than one paired connection on shared Tally machines, but never stores bearer tokens or HMAC secrets.
 - All outbound HTTP requests to the server are HMAC-signed per the scheme in the master plan's "HMAC scheme" section.
 - Logs rotate via lumberjack, 10 MB × 5 files, stored under `%ProgramData%\GST Reco\agent\logs\`.
 

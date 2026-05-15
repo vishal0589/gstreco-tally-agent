@@ -356,14 +356,17 @@ func detectLocalPairState(configPath string) (localPairState, error) {
 		secretstore.DefaultDir(filepath.Dir(configPath)),
 		secretstore.ReadMachineID,
 	)
-	hmacKey, bearerKey := keyring.ConnectionKeys(cfg.ConnectionID)
-	if _, err := store.Get(keyring.ServiceName, hmacKey); err != nil {
-		return localPairState{State: "incomplete", ConfigPath: configPath, Config: cfg}, nil
+	for _, conn := range cfg.PairedConnections() {
+		hmacKey, bearerKey := keyring.ConnectionKeys(conn.ConnectionID)
+		if _, err := store.Get(keyring.ServiceName, hmacKey); err != nil {
+			continue
+		}
+		if _, err := store.Get(keyring.ServiceName, bearerKey); err != nil {
+			continue
+		}
+		return localPairState{State: "paired", ConfigPath: configPath, Config: cfg}, nil
 	}
-	if _, err := store.Get(keyring.ServiceName, bearerKey); err != nil {
-		return localPairState{State: "incomplete", ConfigPath: configPath, Config: cfg}, nil
-	}
-	return localPairState{State: "paired", ConfigPath: configPath, Config: cfg}, nil
+	return localPairState{State: "incomplete", ConfigPath: configPath, Config: cfg}, nil
 }
 
 type serviceState string
@@ -433,7 +436,15 @@ func runInstaller(ctx context.Context, ui installerUI, opts installerOptions, de
 	}
 
 	var activeSession *sessionRef
-	if pairState.State != "paired" {
+	shouldStartApproval := pairState.State != "paired"
+	if pairState.State == "paired" && !shouldStartApproval {
+		if opts.addTenant {
+			shouldStartApproval = true
+		} else if ui.Confirm("This machine is already paired. Start a fresh browser approval to add another GST Reco tenant?", false) {
+			shouldStartApproval = true
+		}
+	}
+	if shouldStartApproval {
 		session, claim, exitCode, err := runApprovalFlow(ctx, ui, opts, deps, api, deviceName)
 		if err != nil {
 			ui.Errorf("%v", err)
@@ -445,6 +456,7 @@ func runInstaller(ctx context.Context, ui installerUI, opts installerOptions, de
 			Server:       serverURL,
 			DeviceName:   deviceName,
 			ConnectionID: claim.ConnectionID,
+			CompanyID:    claim.CompanyID,
 			Token:        claim.Token,
 			HmacSecret:   claim.HmacSecret,
 			PairedAt:     time.Now().UTC(),
@@ -459,6 +471,8 @@ func runInstaller(ctx context.Context, ui installerUI, opts installerOptions, de
 			ui.Errorf("Could not reload local pairing state after claim: %v", err)
 			return 1
 		}
+	} else if pairState.State == "paired" {
+		ui.Infof("Reusing the existing local pairing on this machine.")
 	}
 
 	versionMeta, err := api.FetchVersion(ctx)
