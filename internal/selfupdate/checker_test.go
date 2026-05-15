@@ -39,6 +39,8 @@ func TestShouldNotify(t *testing.T) {
 	}{
 		{"0.1.0", "0.2.0", true},
 		{"0.1.0", "0.1.0", false},
+		{"v0.1.19", "0.1.19", false},
+		{"0.1.19", "v0.1.19", false},
 		{"", "0.1.0", false},
 		{"0.1.0", "", false},
 		{"a27a610-dirty (a27a610, 2026-04-26T07:59:23Z)", "a27a610-dirty", false}, // dev build matches itself

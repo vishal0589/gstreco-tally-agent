@@ -3,6 +3,7 @@ package tally
 import (
 	"fmt"
 	"math"
+	"regexp"
 	"strings"
 )
 
@@ -29,9 +30,10 @@ type NormalizeOptions struct {
 //     the voucher type name and ReverseCharge flag, unless overridden in opts.
 //  2. Classify every LedgerEntry as IGST / CGST / SGST / CESS / party / other,
 //     preferring GSTClass over name-pattern. Sum the tax buckets.
-//  3. Compute invoice_value from the party ledger's magnitude (Tally's
-//     double-entry invariant means |partyAmount| equals invoice total).
-//  4. Compute taxable_value = invoice_value - (igst + cgst + sgst + cess).
+//  3. Compute invoice_value from the party ledger's net payable plus any
+//     withholding/TDS ledgers that reduced that payable.
+//  4. Compute taxable_value from the substantive non-tax base ledgers so
+//     withholding and round-off entries don't leak into the taxable base.
 //  5. For single-bill vouchers, emit one row. For multi-bill, prorate the
 //     per-bill amounts by allocation share.
 func Normalize(v RawVoucher, opts NormalizeOptions) ([]IngestVoucherRow, error) {
@@ -53,13 +55,16 @@ func Normalize(v RawVoucher, opts NormalizeOptions) ([]IngestVoucherRow, error) 
 		return nil, fmt.Errorf("voucher %s: no party ledger (expected LedgerName=%q)", voucherID(v), v.PartyLedgerName)
 	}
 
-	invoiceValue := math.Abs(party.Amount)
 	taxTotal := tax.IGST + tax.CGST + tax.SGST + tax.CESS
-	taxableValue := invoiceValue - taxTotal
+	invoiceValue := math.Abs(party.Amount) + sumWithholdingAddbacks(v.LedgerEntries, party)
+	taxableValue := sumBaseLedgers(v.LedgerEntries, party)
+	if taxableValue <= 0 {
+		taxableValue = invoiceValue - taxTotal
+	}
 	if taxableValue < 0 {
-		// Defensive: if totals don't match (missing child ledgers, rounding),
-		// fall back to summing the non-tax non-party ledgers so the value is
-		// never negative on the wire.
+		// Defensive: if totals still don't match (missing child ledgers or
+		// damaged signs), fall back to the widest non-tax non-party sum while
+		// still excluding withholding and round-off style adjustments.
 		taxableValue = sumNonTaxNonPartyLedgers(v.LedgerEntries, party)
 	}
 
@@ -87,6 +92,7 @@ func Normalize(v RawVoucher, opts NormalizeOptions) ([]IngestVoucherRow, error) 
 	// row guarantees every tax + value bucket sums exactly.
 	rows := make([]IngestVoucherRow, 0, len(bills))
 	var accInvoice, accTaxable, accIGST, accCGST, accSGST, accCESS float64
+	totalBillAmount := sumBillAmounts(bills)
 	last := len(bills) - 1
 	for i, b := range bills {
 		row := base
@@ -105,10 +111,12 @@ func Normalize(v RawVoucher, opts NormalizeOptions) ([]IngestVoucherRow, error) 
 			row.CESS = round2(tax.CESS - accCESS)
 		} else {
 			share := 0.0
-			if invoiceValue > 0 {
+			if totalBillAmount > 0 {
+				share = math.Abs(b.Amount) / totalBillAmount
+			} else if invoiceValue > 0 {
 				share = math.Abs(b.Amount) / invoiceValue
 			}
-			row.InvoiceValue = round2(math.Abs(b.Amount))
+			row.InvoiceValue = round2(invoiceValue * share)
 			row.TaxableValue = round2(taxableValue * share)
 			row.IGST = round2(tax.IGST * share)
 			row.CGST = round2(tax.CGST * share)
@@ -125,6 +133,11 @@ func Normalize(v RawVoucher, opts NormalizeOptions) ([]IngestVoucherRow, error) 
 	}
 	return rows, nil
 }
+
+var (
+	adjustmentLedgerPattern  = regexp.MustCompile(`\b(round\s*off|rounding|tds|tcs|tax\s+deducted|withholding|income\s+tax)\b`)
+	withholdingLedgerPattern = regexp.MustCompile(`\b(tds|tax\s+deducted|withholding|income\s+tax)\b`)
+)
 
 // baseRow fills the fields that don't depend on the single-vs-consolidated
 // branch. Separated out so both branches can start from the same struct.
@@ -332,6 +345,9 @@ func classifyTaxLedger(gstClass, name string) string {
 			return "CESS"
 		}
 	}
+	if isAdjustmentLedger(LedgerEntry{LedgerName: name, GSTClass: gstClass}) {
+		return ""
+	}
 	n := strings.ToUpper(name)
 	switch {
 	case strings.Contains(n, "IGST"):
@@ -344,6 +360,24 @@ func classifyTaxLedger(gstClass, name string) string {
 		return "CESS"
 	}
 	return ""
+}
+
+func normalizeLedgerToken(name, gstClass string) string {
+	return strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(name+" "+gstClass)), " "))
+}
+
+func isAdjustmentLedger(e LedgerEntry) bool {
+	token := normalizeLedgerToken(e.LedgerName, e.GSTClass)
+	return token != "" && adjustmentLedgerPattern.MatchString(token)
+}
+
+func isWithholdingLedger(e LedgerEntry) bool {
+	token := normalizeLedgerToken(e.LedgerName, e.GSTClass)
+	return token != "" && withholdingLedgerPattern.MatchString(token)
+}
+
+func signsDiffer(left, right float64) bool {
+	return (left > 0 && right < 0) || (left < 0 && right > 0)
 }
 
 // relevantBillRefs filters BillAllocations to New Ref and Agst Ref — the
@@ -401,6 +435,48 @@ func voucherParentRef(v RawVoucher) string {
 	return bestVoucherReference(v)
 }
 
+func sumBillAmounts(bills []BillRef) float64 {
+	total := 0.0
+	for _, bill := range bills {
+		total += math.Abs(bill.Amount)
+	}
+	return total
+}
+
+func sumWithholdingAddbacks(entries []LedgerEntry, party *LedgerEntry) float64 {
+	total := 0.0
+	for i := range entries {
+		e := &entries[i]
+		if party != nil && e == party {
+			continue
+		}
+		if !isWithholdingLedger(*e) {
+			continue
+		}
+		if !signsDiffer(e.Amount, party.Amount) {
+			total += math.Abs(e.Amount)
+		}
+	}
+	return total
+}
+
+func sumBaseLedgers(entries []LedgerEntry, party *LedgerEntry) float64 {
+	total := 0.0
+	for i := range entries {
+		e := &entries[i]
+		if party != nil && e == party {
+			continue
+		}
+		if classifyTaxLedger(e.GSTClass, e.LedgerName) != "" || isAdjustmentLedger(*e) {
+			continue
+		}
+		if signsDiffer(e.Amount, party.Amount) {
+			total += math.Abs(e.Amount)
+		}
+	}
+	return total
+}
+
 // sumNonTaxNonPartyLedgers is the fallback for taxable_value when the
 // straight invoice_value - tax subtraction goes negative (damaged data).
 func sumNonTaxNonPartyLedgers(entries []LedgerEntry, party *LedgerEntry) float64 {
@@ -410,7 +486,7 @@ func sumNonTaxNonPartyLedgers(entries []LedgerEntry, party *LedgerEntry) float64
 		if party != nil && e == party {
 			continue
 		}
-		if classifyTaxLedger(e.GSTClass, e.LedgerName) != "" {
+		if classifyTaxLedger(e.GSTClass, e.LedgerName) != "" || isAdjustmentLedger(*e) {
 			continue
 		}
 		total += math.Abs(e.Amount)
