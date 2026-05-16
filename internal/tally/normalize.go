@@ -333,6 +333,9 @@ func classifyTaxLedger(gstClass, name string) string {
 		}
 	}
 	n := strings.ToUpper(name)
+	if looksLikeCommercialAccountLedger(n) {
+		return ""
+	}
 	switch {
 	case strings.Contains(n, "IGST"):
 		return "IGST"
@@ -344,6 +347,30 @@ func classifyTaxLedger(gstClass, name string) string {
 		return "CESS"
 	}
 	return ""
+}
+
+// looksLikeCommercialAccountLedger suppresses false tax classification for
+// purchase/sales account ledgers whose names embed the tax family, such as
+// "Purchase (IGST)@18%". Those are taxable-base ledgers, not the actual tax
+// ledgers, and treating them as tax collapses taxable value toward zero.
+func looksLikeCommercialAccountLedger(name string) bool {
+	name = strings.TrimSpace(strings.ToUpper(name))
+	if name == "" {
+		return false
+	}
+	switch {
+	case strings.HasPrefix(name, "PURCHASE"),
+		strings.HasPrefix(name, "PURCHASES"),
+		strings.HasPrefix(name, "SALE"),
+		strings.HasPrefix(name, "SALES"):
+		return strings.Contains(name, "IGST") ||
+			strings.Contains(name, "CGST") ||
+			strings.Contains(name, "SGST") ||
+			strings.Contains(name, "UTGST") ||
+			strings.Contains(name, "CESS")
+	default:
+		return false
+	}
 }
 
 // relevantBillRefs filters BillAllocations to New Ref and Agst Ref — the

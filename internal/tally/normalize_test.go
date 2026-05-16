@@ -417,6 +417,12 @@ func TestClassifyTaxLedger_PrefersGSTClassOverName(t *testing.T) {
 	if classifyTaxLedger("", "Purchase @ 18%") != "" {
 		t.Error("non-tax ledger classified as tax")
 	}
+	if classifyTaxLedger("", "Purchase (IGST)@18%") != "" {
+		t.Error("purchase account ledger with embedded tax marker classified as tax")
+	}
+	if classifyTaxLedger("", "Sales (CGST)@9%") != "" {
+		t.Error("sales account ledger with embedded tax marker classified as tax")
+	}
 }
 
 func TestNormalize_HSNFromFirstInventoryEntry(t *testing.T) {
@@ -469,6 +475,52 @@ func TestNormalize_HSNNilWhenNoInventoryEntries(t *testing.T) {
 	}
 	if rows[0].HSN != nil {
 		t.Errorf("HSN = %v, want nil for service-only purchase", *rows[0].HSN)
+	}
+}
+
+func TestNormalize_PurchaseLedgerNamedWithTaxFamilyDoesNotCollapseTaxableValue(t *testing.T) {
+	v := RawVoucher{
+		GUID:            "eyup-5-like",
+		IsInvoice:       true,
+		Date:            parseDate(t, "2026-04-14"),
+		VoucherType:     "Purchase",
+		VoucherNumber:   "EYUP-5",
+		Reference:       "EYUP-5",
+		PartyLedgerName: "RETAILEZ PRIVATE LIMITED (24)",
+		PartyGSTIN:      "24AALCR3173P1ZT",
+		LedgerEntries: []LedgerEntry{
+			{
+				LedgerName:    "RETAILEZ PRIVATE LIMITED (24)",
+				Amount:        2540,
+				IsPartyLedger: true,
+				BillAllocations: []BillRef{
+					{Name: "EYUP-5", Amount: 2540, BillType: "New Ref"},
+				},
+			},
+			{LedgerName: "Purchase (IGST)@18%", Amount: -2152.50},
+			{LedgerName: "IGST Input Credit", Amount: -387.45, GSTClass: "Not Applicable"},
+		},
+	}
+
+	rows, err := Normalize(v, NormalizeOptions{})
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	row := rows[0]
+	if row.InvoiceNumber != "EYUP-5" {
+		t.Errorf("InvoiceNumber = %q, want EYUP-5", row.InvoiceNumber)
+	}
+	if !nearly(row.InvoiceValue, 2540, 0.01) {
+		t.Errorf("InvoiceValue = %v, want 2540", row.InvoiceValue)
+	}
+	if !nearly(row.TaxableValue, 2152.55, 0.01) {
+		t.Errorf("TaxableValue = %v, want 2152.55", row.TaxableValue)
+	}
+	if !nearly(row.IGST, 387.45, 0.01) || row.CGST != 0 || row.SGST != 0 {
+		t.Errorf("tax buckets: igst=%v cgst=%v sgst=%v, want 387.45/0/0", row.IGST, row.CGST, row.SGST)
 	}
 }
 
