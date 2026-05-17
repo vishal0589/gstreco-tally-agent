@@ -56,8 +56,11 @@ type RawVoucher struct {
 	// maps it to the 2-digit state code used by recipient_gstin inference.
 	PlaceOfSupply string
 	// IsInvoice differentiates invoice-style vouchers (which carry taxable
-	// values and GST) from cash/journal vouchers. Only IsInvoice=true vouchers
-	// produce IngestVoucherRow entries.
+	// values and GST) from cash/journal vouchers. Most ingestable vouchers set
+	// IsInvoice=true, but some real Tally setups emit invoice-like purchase /
+	// note vouchers through Accounting Voucher View with IsInvoice=false. The
+	// normaliser therefore treats IsInvoice as a strong signal, not the sole
+	// gate.
 	IsInvoice bool
 	// IsCancelled means Tally has marked the voucher cancelled. Agent still
 	// forwards these so the server can amend prior batches (pain #9).

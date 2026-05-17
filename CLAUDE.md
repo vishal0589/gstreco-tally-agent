@@ -13,6 +13,10 @@ The Windows side of GST Reco's Tally sync. The server side lives at `~/GST_Reco`
 - Never self-merge. `gh pr create` then stop — user reviews and merges.
 - Update this file, the README, and the master plan's ship log **in the same PR** as the code change. Docs must not drift from code.
 
+## Recent field learning
+
+- Some real Tally exports emit purchase/debit-note vouchers through Accounting Voucher View with `ISINVOICE=No` even though voucher type + GST ledgers + supplier reference still describe a legal books document. When auditing missing-books gaps, do not assume `IsInvoice=false` means the voucher is safely out of scope; inspect the voucher type and reference shape first.
+
 ## Toolchain
 
 - Go 1.24+ (currently 1.26.2 via Homebrew on dev machine).

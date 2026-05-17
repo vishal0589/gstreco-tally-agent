@@ -6,6 +6,9 @@ See `~/GST_Reco/docs/plans/2026-04-tally-agent/master-plan.md` for the full arch
 
 ## Status
 
+**Unreleased fix (2026-05-17) — invoice-like vouchers with `ISINVOICE=No`.**
+Designwise annual XML audit surfaced purchase/debit-note vouchers where Tally exported `ISINVOICE=No` even though the voucher type, GST ledgers, and party reference still described a legal supplier document. The normaliser now treats `IsInvoice` as a strong signal rather than the sole gate for invoice-like purchase / credit-note / debit-note voucher types, and it preserves those rows as one legal document keyed by `Reference` first so settlement-history bill refs do not create false splits. Purchase orders and receipt notes remain out of scope.
+
 Phase A + Phase B + v0.1.2 shipped. Pilot install on PLLUM uncovered four pre-existing install-path bugs (TLS 1.2 not forced; `2>$null` not suppressing native errors under `ErrorActionPreference=Stop`; `$env:ProgramFiles` resolving to `(x86)` under 32-bit PowerShell; Windows Credential Manager scoped per-user so `LocalSystem`-running service couldn't read what `Administrator`-running pair wrote). v0.1.2 fixes all four:
 
 - New `internal/secretstore` package replaces the per-user OS keyring with a file-based AES-GCM store at `%ProgramData%\GST Reco\agent\secrets\`, key derived via HKDF-SHA256 from the machine ID. Cross-user accessible by design, so the service-as-LocalSystem reads what pair-as-Administrator wrote. ACL'd to SYSTEM + Administrators on first write via `icacls`.

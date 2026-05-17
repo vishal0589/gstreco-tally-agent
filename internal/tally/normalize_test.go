@@ -187,6 +187,140 @@ func TestNormalize_ConsolidatedThreeBillsSumToOriginal(t *testing.T) {
 	}
 }
 
+func TestNormalize_InvoiceLikePurchaseVoucherNormalizesWhenIsInvoiceFalse(t *testing.T) {
+	v := RawVoucher{
+		IsInvoice:       false,
+		Date:            parseDate(t, "2025-08-02"),
+		VoucherType:     "GST - Purchase Invoices (Registered)",
+		VoucherNumber:   "216",
+		Reference:       "216",
+		PartyLedgerName: "Ayush & Kajal Handicraft",
+		PartyGSTIN:      "07EXJPK2876L1ZS",
+		LedgerEntries: []LedgerEntry{
+			{
+				LedgerName:    "Ayush & Kajal Handicraft",
+				Amount:        -144550,
+				IsPartyLedger: true,
+				BillAllocations: []BillRef{
+					{Name: "647/25-26", Amount: 60025, BillType: "Agst Ref"},
+					{Name: "216", Amount: 83300, BillType: "New Ref"},
+				},
+			},
+			{LedgerName: "Purchase Raw Material Central GST - Registered", Amount: 122500},
+			{LedgerName: "IGST Input Credit Not Availed", Amount: 22050, GSTClass: "IGST@18"},
+		},
+	}
+
+	rows, err := Normalize(v, NormalizeOptions{})
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	row := rows[0]
+	if row.InvoiceNumber != "216" {
+		t.Errorf("InvoiceNumber = %q, want 216", row.InvoiceNumber)
+	}
+	if row.VendorGSTIN == nil || *row.VendorGSTIN != "07EXJPK2876L1ZS" {
+		t.Errorf("VendorGSTIN = %v, want 07EXJPK2876L1ZS", row.VendorGSTIN)
+	}
+}
+
+func TestNormalize_InvoiceLikePurchaseVoucherPrefersVoucherReferenceOverAgstRefWhenIsInvoiceFalse(t *testing.T) {
+	v := RawVoucher{
+		IsInvoice:       false,
+		Date:            parseDate(t, "2025-08-22"),
+		VoucherType:     "GST - Purchase Invoices (Registered)",
+		VoucherNumber:   "218",
+		Reference:       "218",
+		PartyLedgerName: "Ayush & Kajal Handicraft",
+		PartyGSTIN:      "07EXJPK2876L1ZS",
+		LedgerEntries: []LedgerEntry{
+			{
+				LedgerName:    "Ayush & Kajal Handicraft",
+				Amount:        -24544,
+				IsPartyLedger: true,
+				BillAllocations: []BillRef{
+					{Name: "965/25-26", Amount: 24336, BillType: "Agst Ref"},
+				},
+			},
+			{LedgerName: "Purchase Raw Material Central GST - Registered", Amount: 20800},
+			{LedgerName: "IGST Input Credit Not Availed", Amount: 3744, GSTClass: "IGST@18"},
+		},
+	}
+
+	rows, err := Normalize(v, NormalizeOptions{})
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if rows[0].InvoiceNumber != "218" {
+		t.Errorf("InvoiceNumber = %q, want 218", rows[0].InvoiceNumber)
+	}
+}
+
+func TestNormalize_InvoiceLikeDebitNoteNormalizesWhenIsInvoiceFalse(t *testing.T) {
+	v := RawVoucher{
+		IsInvoice:       false,
+		Date:            parseDate(t, "2025-08-02"),
+		VoucherType:     "Debit Note",
+		VoucherNumber:   "D.N./189/25-26",
+		Reference:       "196",
+		PartyLedgerName: "Megha Glass & Lights",
+		PartyGSTIN:      "08AALPU8633Q1ZK",
+		LedgerEntries: []LedgerEntry{
+			{
+				LedgerName:    "Megha Glass & Lights",
+				Amount:        7080,
+				IsPartyLedger: true,
+				BillAllocations: []BillRef{
+					{Name: "196", Amount: -7080, BillType: "Agst Ref"},
+				},
+			},
+			{LedgerName: "Freight & Courier Charges on Purchase", Amount: -6000},
+			{LedgerName: "IGST Input Credit", Amount: -1080, GSTClass: "IGST@18"},
+		},
+	}
+
+	rows, err := Normalize(v, NormalizeOptions{})
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if rows[0].InvoiceNumber != "196" {
+		t.Errorf("InvoiceNumber = %q, want supplier reference 196", rows[0].InvoiceNumber)
+	}
+}
+
+func TestNormalize_PurchaseOrderStillDropsWhenIsInvoiceFalse(t *testing.T) {
+	v := RawVoucher{
+		IsInvoice:       false,
+		Date:            parseDate(t, "2025-08-23"),
+		VoucherType:     "Purchase Order",
+		VoucherNumber:   "PO/0352A/25-26",
+		Reference:       "PO/0352A/25-26",
+		PartyLedgerName: "Spider Design",
+		PartyGSTIN:      "09AHFPB0365F1ZR",
+		LedgerEntries: []LedgerEntry{
+			{LedgerName: "Spider Design", Amount: -783283.2, IsPartyLedger: true},
+			{LedgerName: "IGST Input Credit", Amount: 83923.2, GSTClass: "IGST@12"},
+		},
+	}
+
+	rows, err := Normalize(v, NormalizeOptions{})
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("rows = %d, want 0 for non-invoice purchase order", len(rows))
+	}
+}
+
 func TestNormalize_RCMMarksReverseChargeAndKind(t *testing.T) {
 	parsed, err := ParseDayBookV3(mustFixture(t, "voucher-v3-purchase-rcm.xml"))
 	if err != nil {
