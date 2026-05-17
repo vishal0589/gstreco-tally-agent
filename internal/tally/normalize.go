@@ -38,7 +38,7 @@ func Normalize(v RawVoucher, opts NormalizeOptions) ([]IngestVoucherRow, error) 
 	if v.IsCancelled {
 		return nil, nil
 	}
-	if !v.IsInvoice {
+	if !shouldNormalizeVoucher(v) {
 		return nil, nil
 	}
 
@@ -64,6 +64,25 @@ func Normalize(v RawVoucher, opts NormalizeOptions) ([]IngestVoucherRow, error) 
 	}
 
 	base := baseRow(v, kind, side, invoiceValue, taxableValue, tax)
+
+	// Some real Tally setups emit purchase/debit-note vouchers through
+	// "Accounting Voucher View" with ISINVOICE=No even though the
+	// voucher type itself is still invoice-like and carries the legal
+	// supplier reference in VoucherNumber/Reference. For these rows the
+	// bill-allocation list often reflects settlement history (Agst Ref /
+	// New Ref mix) rather than true consolidated invoice splitting, so
+	// forcing the usual bill-ref split would create spurious books rows.
+	// Keep them as one legal document keyed by the voucher/reference
+	// identity instead.
+	if !v.IsInvoice && isInvoiceLikeVoucherType(v.VoucherType) {
+		base.InvoiceNumber = firstNonEmpty(
+			v.Reference,
+			v.VoucherNumber,
+			firstRelevantBillRefName(*party),
+			v.GUID,
+		)
+		return []IngestVoucherRow{base}, nil
+	}
 
 	bills := relevantBillRefs(*party)
 	if len(bills) <= 1 {
@@ -251,6 +270,29 @@ func inferSide(kind IngestKind, v RawVoucher) IngestSide {
 	return IngestSidePurchase
 }
 
+func shouldNormalizeVoucher(v RawVoucher) bool {
+	if v.IsInvoice {
+		return true
+	}
+	return isInvoiceLikeVoucherType(v.VoucherType)
+}
+
+func isInvoiceLikeVoucherType(voucherType string) bool {
+	n := strings.ToUpper(strings.TrimSpace(voucherType))
+	if n == "" {
+		return false
+	}
+	if strings.Contains(n, "DEBIT NOTE") || strings.Contains(n, "CREDIT NOTE") {
+		return true
+	}
+	if strings.Contains(n, "INVOICE") &&
+		!strings.Contains(n, "ORDER") &&
+		!strings.Contains(n, "RECEIPT NOTE") {
+		return true
+	}
+	return false
+}
+
 // taxTotals is the bucket sum across all tax ledgers in a voucher. All values
 // are stored absolute (sign-independent) because invoice_value already uses
 // abs(party.Amount); taxes are the positive portions that add up to invoice.
@@ -341,6 +383,15 @@ func onlyNewRefName(party LedgerEntry) string {
 		return ""
 	}
 	return party.BillAllocations[0].Name
+}
+
+func firstRelevantBillRefName(party LedgerEntry) string {
+	for _, b := range relevantBillRefs(party) {
+		if name := strings.TrimSpace(b.Name); name != "" {
+			return name
+		}
+	}
+	return ""
 }
 
 // sumNonTaxNonPartyLedgers is the fallback for taxable_value when the
