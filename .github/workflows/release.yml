@@ -22,7 +22,19 @@ jobs:
           cache: true
 
       - name: build release artifacts
-        run: make release
+        run: make release VERSION=${GITHUB_REF_NAME}
+
+      - name: stage raw assets
+        run: |
+          cp dist/windows-amd64/gstreco-tally-agentctl.exe dist/gstreco-tally-agentctl-windows-amd64.exe
+          cp dist/windows-amd64/gstreco-tally-agent.exe dist/gstreco-tally-agent-windows-amd64.exe
+          cp dist/windows-amd64/gstreco-tally-tray.exe dist/gstreco-tally-tray-windows-amd64.exe
+          cp dist/linux-amd64/gstreco-tally-agentctl dist/gstreco-tally-agentctl-linux-amd64
+          cp dist/linux-amd64/gstreco-tally-agent dist/gstreco-tally-agent-linux-amd64
+          cp dist/linux-amd64/gstreco-tally-tray dist/gstreco-tally-tray-linux-amd64
+          cp dist/darwin-arm64/gstreco-tally-agentctl dist/gstreco-tally-agentctl-darwin-arm64
+          cp dist/darwin-arm64/gstreco-tally-agent dist/gstreco-tally-agent-darwin-arm64
+          cp dist/darwin-arm64/gstreco-tally-tray dist/gstreco-tally-tray-darwin-arm64
 
       - name: package
         run: |
@@ -34,13 +46,20 @@ jobs:
       - name: compute checksums
         run: |
           cd dist
-          sha256sum gstreco-tally-agent-*.zip > SHA256SUMS
+          sha256sum \
+            gstreco-tally-agent-*.zip \
+            gstreco-tally-agentctl-* \
+            gstreco-tally-agent-* \
+            gstreco-tally-tray-* > SHA256SUMS
 
       - name: create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/gstreco-tally-agent-*.zip
+            dist/gstreco-tally-agentctl-*
+            dist/gstreco-tally-agent-*
+            dist/gstreco-tally-tray-*
             dist/SHA256SUMS
           draft: true
           generate_release_notes: true
