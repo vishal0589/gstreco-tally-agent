@@ -105,8 +105,8 @@ func TestParseKinds(t *testing.T) {
 			continue
 		}
 		for i, n := range c.wantNames {
-			if got[i].name != n {
-				t.Errorf("parseKinds(%q)[%d].name=%q, want %q", c.in, i, got[i].name, n)
+			if got[i].Name != n {
+				t.Errorf("parseKinds(%q)[%d].Name=%q, want %q", c.in, i, got[i].Name, n)
 			}
 		}
 	}

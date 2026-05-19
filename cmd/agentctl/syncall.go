@@ -77,7 +77,7 @@ func runSyncAll(stdout, stderr io.Writer, args []string, deps syncAllDeps) int {
 	period := fs.String("period", "", "month shorthand MMYYYY (e.g. 042026); mutually exclusive with --from/--to")
 	fromFlag := fs.String("from", "", "window start YYYY-MM-DD (use with --to instead of --period)")
 	toFlag := fs.String("to", "", "window end YYYY-MM-DD inclusive")
-	kindsFlag := fs.String("kinds", "purchase,sales,credit_note,debit_note,journal,payment,tax_ledger",
+	kindsFlag := fs.String("kinds", "purchase,sales,credit_note,debit_note",
 		"comma-separated sync kinds to fetch per mapping")
 	batchSize := fs.Int("batch-size", ingest.DefaultBatchSize, "max rows per ingest request")
 	dryRun := fs.Bool("dry-run", false, "fetch + parse only; do not POST ingest")
@@ -135,8 +135,6 @@ func runSyncAll(stdout, stderr io.Writer, args []string, deps syncAllDeps) int {
 	totalRows := 0
 	totalBatchesSent := 0
 	totalBatchesFailed := 0
-	totalServerSkipped := 0
-	totalServerErrors := 0
 	totalFatalErrors := 0
 	connectionsWithMappings := 0
 	hadFetchMappingsError := false
@@ -215,19 +213,15 @@ func runSyncAll(stdout, stderr io.Writer, args []string, deps syncAllDeps) int {
 					fmt.Fprintf(stderr, "  ✗ %s: %v\n", k.Name, fatalErr)
 					return
 				}
-				fmt.Fprintf(stdout, "    %s: rows=%d sent=%d failed=%d landed=%d skipped=%d server_errors=%d\n",
+				fmt.Fprintf(stdout, "    %s: rows=%d sent=%d failed=%d dropped_on_normalize=%d warnings=%d\n",
 					k.Name,
 					r.RowCount,
 					r.BatchesSent,
 					r.BatchesFailed,
-					r.ServerInserted+r.ServerAmended,
-					r.ServerSkipped,
-					r.ServerErrors)
+					r.DroppedOnNormalize,
+					len(r.ParseWarnings))
 				for _, w := range r.ParseWarnings {
 					fmt.Fprintf(stdout, "      ⚠ %s\n", w)
-				}
-				for _, f := range r.ServerFindings {
-					fmt.Fprintf(stdout, "      ⚠ %s\n", formatServerFinding(f))
 				}
 			},
 			PerRunProgress: func(_ ingest.ActiveMapping, k syncrun.KindPair) syncrun.Progress {
@@ -239,8 +233,6 @@ func runSyncAll(stdout, stderr io.Writer, args []string, deps syncAllDeps) int {
 		totalRows += res.TotalRows
 		totalBatchesSent += res.TotalBatchesSent
 		totalBatchesFailed += res.TotalBatchesFailed
-		totalServerSkipped += res.TotalServerSkipped
-		totalServerErrors += res.TotalServerErrors
 		totalFatalErrors += res.FatalErrors
 
 		if res.StoppedEarly {
@@ -249,13 +241,11 @@ func runSyncAll(stdout, stderr io.Writer, args []string, deps syncAllDeps) int {
 		}
 
 		fmt.Fprintf(stdout,
-			"  connection summary: mappings_ran=%d rows=%d batches_sent=%d failed=%d skipped=%d server_errors=%d fatal_errors=%d\n\n",
+			"  connection summary: mappings_ran=%d rows=%d batches_sent=%d failed=%d fatal_errors=%d\n\n",
 			res.MappingsRun,
 			res.TotalRows,
 			res.TotalBatchesSent,
 			res.TotalBatchesFailed,
-			res.TotalServerSkipped,
-			res.TotalServerErrors,
 			res.FatalErrors,
 		)
 	}
@@ -271,13 +261,13 @@ func runSyncAll(stdout, stderr io.Writer, args []string, deps syncAllDeps) int {
 	}
 
 	fmt.Fprintf(stdout,
-		"summary: connections_with_mappings=%d/%d · mappings_ran=%d/%d · rows=%d · batches sent=%d failed=%d · skipped=%d · server errors=%d · fatal errors=%d\n",
+		"summary: connections_with_mappings=%d/%d · mappings_ran=%d/%d · rows=%d · batches sent=%d failed=%d · fatal errors=%d\n",
 		connectionsWithMappings, len(selectedConnections),
 		totalMappingsRun, totalMappings, totalRows,
 		totalBatchesSent, totalBatchesFailed,
-		totalServerSkipped, totalServerErrors, totalFatalErrors)
+		totalFatalErrors)
 
-	if totalFatalErrors > 0 || totalBatchesFailed > 0 || totalServerErrors > 0 {
+	if totalFatalErrors > 0 || totalBatchesFailed > 0 {
 		return 1
 	}
 	if *dryRun {
@@ -309,10 +299,11 @@ func parseKinds(s string) ([]syncrun.KindPair, error) {
 		if k == "" {
 			continue
 		}
-		pair, err := mapKind(k)
+		tallyKind, ingestKind, err := mapKind(k)
 		if err != nil {
 			return nil, err
 		}
+		pair := syncrun.KindPair{Name: k, Tally: tallyKind, Ingest: ingestKind}
 		if _, dup := seen[pair.Name]; dup {
 			continue
 		}
@@ -320,7 +311,7 @@ func parseKinds(s string) ([]syncrun.KindPair, error) {
 		out = append(out, pair)
 	}
 	if len(out) == 0 {
-		return nil, errors.New("--kinds is empty after parsing (use a comma-separated list of: purchase, sales, credit_note, debit_note, journal, payment, tax_ledger)")
+		return nil, errors.New("--kinds is empty after parsing (use a comma-separated list of: purchase, sales, credit_note, debit_note)")
 	}
 	return out, nil
 }
