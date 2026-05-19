@@ -105,8 +105,8 @@ func TestParseKinds(t *testing.T) {
 			continue
 		}
 		for i, n := range c.wantNames {
-			if got[i].name != n {
-				t.Errorf("parseKinds(%q)[%d].name=%q, want %q", c.in, i, got[i].name, n)
+			if got[i].Name != n {
+				t.Errorf("parseKinds(%q)[%d].Name=%q, want %q", c.in, i, got[i].Name, n)
 			}
 		}
 	}
@@ -154,7 +154,7 @@ func TestRunSyncAll_HappyPath_WalksAllMappingsAndKinds(t *testing.T) {
 	if got := len(tly.got); got != 4 {
 		t.Errorf("tally fetches = %d, want 4", got)
 	}
-	if !strings.Contains(stdout.String(), "summary: 2/2 mapping(s) ran") {
+	if !strings.Contains(stdout.String(), "summary: connections_with_mappings=1/1 · mappings_ran=2/2") {
 		t.Errorf("stdout missing summary: %s", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "sync-all complete") {

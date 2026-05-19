@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -25,11 +26,11 @@ func TestCanonicalizePairCode(t *testing.T) {
 		{"ABC-D23", "ABCD23", false},
 		{"  ABC-D23  ", "ABCD23", false},
 		{"ABC D23", "ABCD23", false},
-		{"ABCDEO", "", true}, // O not in Crockford
-		{"ABCDEI", "", true}, // I not in Crockford
-		{"ABCDEL", "", true}, // L not in Crockford
-		{"ABCDEU", "", true}, // U not in Crockford
-		{"ABC", "", true},    // too short
+		{"ABCDEO", "", true},  // O not in Crockford
+		{"ABCDEI", "", true},  // I not in Crockford
+		{"ABCDEL", "", true},  // L not in Crockford
+		{"ABCDEU", "", true},  // U not in Crockford
+		{"ABC", "", true},     // too short
 		{"ABCDEFG", "", true}, // too long
 		{"", "", true},
 	}
@@ -123,6 +124,12 @@ func TestClaim_Success(t *testing.T) {
 	if cfg.Server != srv.URL {
 		t.Errorf("cfg.Server = %q, want %q", cfg.Server, srv.URL)
 	}
+	if len(cfg.PairedConnections()) != 1 {
+		t.Fatalf("len(PairedConnections) = %d, want 1", len(cfg.PairedConnections()))
+	}
+	if cfg.PairedConnections()[0].CompanyID != "company-456" {
+		t.Errorf("company_id = %q, want company-456", cfg.PairedConnections()[0].CompanyID)
+	}
 
 	// Keyring persisted both secrets.
 	hmacKey, bearerKey := keyring.ConnectionKeys("conn-123")
@@ -134,21 +141,119 @@ func TestClaim_Success(t *testing.T) {
 	}
 }
 
-func TestClaim_AlreadyPairedRefuses(t *testing.T) {
+func TestClaim_AppendsAdditionalConnectionToExistingConfig(t *testing.T) {
+	var claimCalls int
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
-	// Pre-existing paired config.
-	if err := config.Save(cfgPath, &config.Config{Server: "https://x", ConnectionID: "existing"}); err != nil {
+	if err := config.Save(cfgPath, &config.Config{
+		Server:       "https://x",
+		ConnectionID: "existing",
+		CompanyID:    "company-existing",
+		Connections: []config.PairedConnection{
+			{Server: "https://x", ConnectionID: "existing", CompanyID: "company-existing"},
+		},
+	}); err != nil {
 		t.Fatal(err)
 	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		claimCalls++
+		_ = json.NewEncoder(w).Encode(ClaimResponse{
+			ConnectionID: "conn-new",
+			CompanyID:    "company-new",
+			Token:        "token-new",
+			HmacSecret:   "c2VjcmV0LW5ldw==",
+		})
+	}))
+	defer srv.Close()
+
+	if _, err := Claim(context.Background(), Options{
+		Server:     srv.URL,
+		Code:       "ABCDEF",
+		ConfigPath: cfgPath,
+		Keyring:    keyring.NewMemoryStore(),
+	}); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if claimCalls != 1 {
+		t.Fatalf("claim server called %d times, want 1", claimCalls)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	got := cfg.PairedConnections()
+	if len(got) != 2 {
+		t.Fatalf("len(PairedConnections) = %d, want 2", len(got))
+	}
+	if got[0].ConnectionID != "existing" || got[1].ConnectionID != "conn-new" {
+		t.Fatalf("unexpected connections after append: %+v", got)
+	}
+}
+
+func TestClaim_ReplacesExistingConnectionByConnectionID(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := config.Save(cfgPath, &config.Config{
+		Server:       "https://x",
+		ConnectionID: "conn-123",
+		CompanyID:    "company-old",
+		Connections: []config.PairedConnection{
+			{Server: "https://x", ConnectionID: "conn-123", CompanyID: "company-old", DeviceName: "box-old"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(ClaimResponse{
+			ConnectionID: "conn-123",
+			CompanyID:    "company-new",
+			Token:        "token-new",
+			HmacSecret:   "c2VjcmV0LW5ldw==",
+		})
+	}))
+	defer srv.Close()
+
+	if _, err := Claim(context.Background(), Options{
+		Server:       srv.URL,
+		Code:         "ABCDEF",
+		ConfigPath:   cfgPath,
+		Keyring:      keyring.NewMemoryStore(),
+		DeviceName:   "box-new",
+		AgentVersion: "v0.1.21",
+	}); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	got := cfg.PairedConnections()
+	if len(got) != 1 {
+		t.Fatalf("len(PairedConnections) = %d, want 1", len(got))
+	}
+	if got[0].Server != srv.URL || got[0].CompanyID != "company-new" || got[0].DeviceName != "box-new" {
+		t.Fatalf("connection not replaced: %+v", got[0])
+	}
+}
+
+func TestClaim_LoadConfigErrorStillFails(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "bad.yaml")
+	if err := os.WriteFile(cfgPath, []byte("not: valid: yaml: : :"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	_, err := Claim(context.Background(), Options{
 		Server:     "https://irrelevant",
 		Code:       "ABCDEF",
 		ConfigPath: cfgPath,
 		Keyring:    keyring.NewMemoryStore(),
 	})
-	if !errors.Is(err, ErrAlreadyPaired) {
-		t.Errorf("err = %v, want wraps ErrAlreadyPaired", err)
+	if err == nil {
+		t.Fatal("expected config load error")
 	}
 }
 
