@@ -398,6 +398,104 @@ func TestClassifyTaxLedger_PrefersGSTClassOverName(t *testing.T) {
 	if classifyTaxLedger("", "Purchase @ 18%") != "" {
 		t.Error("non-tax ledger classified as tax")
 	}
+	if classifyTaxLedger("", "TDS Payable Under CGST @ 1%") != "" {
+		t.Error("TDS ledger containing CGST should not classify as GST tax")
+	}
+}
+
+func TestNormalize_TDSTaggedLedgersDoNotInflateGSTTax(t *testing.T) {
+	v := RawVoucher{
+		GUID:            "universal-84",
+		IsInvoice:       true,
+		Date:            parseDate(t, "2026-04-30"),
+		VoucherType:     "GST - Purchase Invoices (Registered)",
+		VoucherNumber:   "84/2026-27",
+		Reference:       "84/2026-27",
+		PartyLedgerName: "Universal Metalloys Pvt Ltd - MSME",
+		PartyGSTIN:      "06AABCU4457B2ZL",
+		LedgerEntries: []LedgerEntry{
+			{
+				LedgerName:    "Universal Metalloys Pvt Ltd - MSME",
+				Amount:        751303,
+				IsPartyLedger: true,
+				BillAllocations: []BillRef{
+					{Name: "84/2026-27", Amount: 751303, BillType: "New Ref"},
+				},
+			},
+			{LedgerName: "Purchase Raw Material Local - GST Registered", Amount: -236600},
+			{LedgerName: "Purchase Raw Material Local - GST Registered", Amount: -410465},
+			{LedgerName: "CGST Input Credit", Amount: -58289.85, GSTClass: "CGST@9"},
+			{LedgerName: "SGST Input Credit", Amount: -58289.85, GSTClass: "SGST@9"},
+			{LedgerName: "Freight & Courier Charges on Purchase", Amount: -600},
+			{LedgerName: "TDS Payable Under CGST @ 1%", Amount: 6471},
+			{LedgerName: "TDS Payable Under SGST @ 1%", Amount: 6471},
+			{LedgerName: "Round Off", Amount: -0.3},
+		},
+	}
+
+	rows, err := Normalize(v, NormalizeOptions{})
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	row := rows[0]
+	if row.InvoiceValue != 764245 {
+		t.Errorf("InvoiceValue = %v, want 764245", row.InvoiceValue)
+	}
+	if row.TaxableValue != 647665.3 {
+		t.Errorf("TaxableValue = %v, want 647665.3", row.TaxableValue)
+	}
+	if row.CGST != 58289.85 || row.SGST != 58289.85 {
+		t.Errorf("GST tax buckets = cgst:%v sgst:%v, want 58289.85 each", row.CGST, row.SGST)
+	}
+}
+
+func TestNormalize_TDSGrossesUpNetPayableInvoiceAmount(t *testing.T) {
+	v := RawVoucher{
+		GUID:            "raj-007",
+		IsInvoice:       true,
+		Date:            parseDate(t, "2026-04-22"),
+		VoucherType:     "GST - Purchase Invoices (Registered)",
+		VoucherNumber:   "RAJ/26-27/007",
+		Reference:       "RAJ/26-27/007",
+		PartyLedgerName: "Raj Industrial Corporation",
+		PartyGSTIN:      "06ATRPP2063N1Z2",
+		LedgerEntries: []LedgerEntry{
+			{
+				LedgerName:    "Raj Industrial Corporation",
+				Amount:        57505,
+				IsPartyLedger: true,
+				BillAllocations: []BillRef{
+					{Name: "RAJ/26-27/007", Amount: 57505, BillType: "New Ref"},
+				},
+			},
+			{LedgerName: "Purchase Raw Material Local - GST Registered", Amount: -46750},
+			{LedgerName: "Purchase Raw Material Local - GST Registered", Amount: -2400},
+			{LedgerName: "CGST Input Credit", Amount: -4423.5, GSTClass: "CGST@9"},
+			{LedgerName: "SGST Input Credit", Amount: -4423.5, GSTClass: "SGST@9"},
+			{LedgerName: "Tds Payable (94C) @ 1% (Non-Company)", Amount: 492},
+		},
+	}
+
+	rows, err := Normalize(v, NormalizeOptions{})
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	row := rows[0]
+	if row.InvoiceValue != 57997 {
+		t.Errorf("InvoiceValue = %v, want 57997", row.InvoiceValue)
+	}
+	if row.TaxableValue != 49150 {
+		t.Errorf("TaxableValue = %v, want 49150", row.TaxableValue)
+	}
+	if row.CGST != 4423.5 || row.SGST != 4423.5 {
+		t.Errorf("GST tax buckets = cgst:%v sgst:%v, want 4423.5 each", row.CGST, row.SGST)
+	}
 }
 
 func TestNormalize_HSNFromFirstInventoryEntry(t *testing.T) {
