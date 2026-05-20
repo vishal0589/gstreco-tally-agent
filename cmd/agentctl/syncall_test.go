@@ -43,9 +43,14 @@ type fakeSyncAllIngest struct {
 	sendErr     error
 }
 
-func (f *fakeSyncAllIngest) Send(_ context.Context, body tally.IngestRequestBody) error {
+func (f *fakeSyncAllIngest) Send(_ context.Context, body tally.IngestRequestBody) (ingest.AcceptedResponse, error) {
 	f.sent = append(f.sent, body)
-	return f.sendErr
+	if f.sendErr != nil {
+		return ingest.AcceptedResponse{}, f.sendErr
+	}
+	return ingest.AcceptedResponse{
+		Counters: ingest.AcceptedCounters{Inserted: len(body.Batch)},
+	}, nil
 }
 
 func (f *fakeSyncAllIngest) SendJournal(_ context.Context, body tally.JournalIngestRequestBody) (tally.AccountingAcceptedResponse, error) {
@@ -183,7 +188,7 @@ func TestRunSyncAll_HappyPath_WalksAllMappingsAndKinds(t *testing.T) {
 	if got := len(tly.got); got != 4 {
 		t.Errorf("tally fetches = %d, want 4", got)
 	}
-	if !strings.Contains(stdout.String(), "summary: connections_with_mappings=1/1 · mappings_ran=2/2") {
+	if !strings.Contains(stdout.String(), "summary: 2/2 mapping(s) ran · rows=4 · batches sent=4 failed=0") {
 		t.Errorf("stdout missing summary: %s", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "sync-all complete") {
