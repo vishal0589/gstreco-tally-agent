@@ -26,15 +26,26 @@ type TallyPoster interface {
 // IngestSender is the narrow surface RunOne uses to talk to GST Reco.
 // Real callers pass a *ingest.Client; tests pass fakes.
 type IngestSender interface {
-	Send(ctx context.Context, body tally.IngestRequestBody) error
+	Send(ctx context.Context, body tally.IngestRequestBody) (ingest.AcceptedResponse, error)
+	SendJournal(ctx context.Context, body tally.JournalIngestRequestBody) (tally.AccountingAcceptedResponse, error)
+	SendPayment(ctx context.Context, body tally.PaymentIngestRequestBody) (tally.AccountingAcceptedResponse, error)
+	SendTaxLedgers(ctx context.Context, body tally.TaxLedgerIngestRequestBody) (tally.AccountingAcceptedResponse, error)
 }
 
 // Request describes one fetch-and-ingest cycle: a single (Tally
 // company, voucher kind, date window) tuple.
 type Request struct {
+	// KindName is the user-facing kind label ("purchase", "journal",
+	// "tax_ledger"). RunOne dispatches on this so invoice, accounting-voucher,
+	// and ledger-control syncs can share one orchestration surface.
+	KindName string
 	// TallyCompany is the SVCURRENTCOMPANY value the envelope uses.
 	// Whitespace matters — pass exactly what Tally exports.
 	TallyCompany string
+	// TallyEndpoint is the exact local Tally HTTP URL this run used.
+	// The server can use it to disambiguate duplicate company names
+	// discovered on different ports.
+	TallyEndpoint string
 	// TallyKind picks the Tally envelope filter (purchase / sales /
 	// credit_note / debit_note).
 	TallyKind tally.VoucherKind
@@ -47,8 +58,7 @@ type Request struct {
 	From, To time.Time
 	// RunID identifies this run on the server. Reused as the
 	// request_id_prefix so the per-batch request_id has the form
-	// "<run_id>-<n>". Caller picks the format ("agentctl-sync-<unix>",
-	// "syncall-<unix>", "daemon-<cron-tick>").
+	// "<run_id>-<n>".
 	RunID string
 	// RunKind is "full" | "incremental" | "manual" — passed through
 	// to the IngestRequestBody.
@@ -85,6 +95,17 @@ type Result struct {
 	// (unparsable date, malformed amount, dropped voucher). Same
 	// purpose as DroppedOnNormalize at parser-level.
 	ParseWarnings []string
+	// ServerInserted / ServerAmended / ServerSkipped / ServerErrors are
+	// the counters returned by the app on 2xx ingest responses. They are
+	// authoritative for what the server says actually landed.
+	ServerInserted int
+	ServerAmended  int
+	ServerSkipped  int
+	ServerErrors   int
+	// ServerFindings are the flattened validation findings returned by
+	// the app on 2xx ingest responses (missing GSTIN, rejected purchase
+	// row, rejected sales row, etc).
+	ServerFindings []ingest.ValidationFinding
 }
 
 // BatchError carries detail for one failed ingest batch. Index is
@@ -136,6 +157,16 @@ func RunOne(
 	if req.RunID == "" {
 		return res, fmt.Errorf("syncrun: Request.RunID is required")
 	}
+	if req.KindName == "" {
+		switch {
+		case req.IngestKind != "":
+			req.KindName = string(req.IngestKind)
+		case req.TallyKind != "":
+			req.KindName = string(req.TallyKind)
+		default:
+			return res, fmt.Errorf("syncrun: Request.KindName is required")
+		}
+	}
 
 	emit := func(stage, msg string) {
 		if progress != nil {
@@ -154,96 +185,14 @@ func RunOne(
 		}
 	}
 
-	envelope, err := tally.BuildDayBookXML(tally.DayBookRequest{
-		Company: req.TallyCompany,
-		From:    req.From,
-		To:      req.To,
-		Kind:    req.TallyKind,
-	})
-	if err != nil {
-		return res, fmt.Errorf("build envelope: %w", err)
+	switch req.KindName {
+	case "journal":
+		return runJournalSync(ctx, tallyClient, sender, req, res, emit, emitBatch)
+	case "payment":
+		return runPaymentSync(ctx, tallyClient, sender, req, res, emit, emitBatch)
+	case "tax_ledger":
+		return runTaxLedgerSync(ctx, tallyClient, sender, req, res, emit, emitBatch)
+	default:
+		return runInvoiceSync(ctx, tallyClient, sender, req, res, emit, emitBatch)
 	}
-
-	emit("fetching", fmt.Sprintf("fetching %s vouchers for %q (%s..%s)",
-		req.TallyKind, req.TallyCompany,
-		req.From.Format("2006-01-02"), req.To.Format("2006-01-02")))
-
-	respXML, err := tallyClient.PostXML(ctx, envelope)
-	if err != nil {
-		return res, fmt.Errorf("tally fetch: %w", err)
-	}
-
-	parsed, err := tally.ParseDayBookV3(respXML)
-	if err != nil {
-		return res, fmt.Errorf("parse response: %w", err)
-	}
-	res.ParseStatus = parsed.Status
-	res.ParseWarnings = parsed.Warnings
-	emit("parsed", fmt.Sprintf("parsed %d vouchers (status=%d, warnings=%d)",
-		len(parsed.Vouchers), parsed.Status, len(parsed.Warnings)))
-
-	rows := make([]tally.IngestVoucherRow, 0, len(parsed.Vouchers))
-	for _, v := range parsed.Vouchers {
-		out, normErr := tally.Normalize(v, tally.NormalizeOptions{
-			Kind:    req.IngestKind,
-			RunKind: req.RunKind,
-		})
-		if normErr != nil {
-			res.DroppedOnNormalize++
-			continue
-		}
-		rows = append(rows, out...)
-	}
-	res.RowCount = len(rows)
-	emit("normalized", fmt.Sprintf("%d ingest rows (dropped %d on normalize)",
-		len(rows), res.DroppedOnNormalize))
-
-	if len(rows) == 0 {
-		emit("complete", "nothing to send")
-		return res, nil
-	}
-
-	chunks := ingest.SplitRows(rows, req.BatchSize)
-	batches := ingest.BuildBatches(req.RunID, req.RunID, req.IngestKind,
-		req.TallyCompany, req.RunKind, chunks)
-
-	for i, body := range batches {
-		// Honour ctx cancellation between batches. Without this, a
-		// user Ctrl+C mid-sync produces N "network error" entries in
-		// BatchErrors (each subsequent Send fails with ctx.Err()
-		// wrapped in ErrorKindNetwork). Checking here gives a clean
-		// abort: the loop exits, BatchesSent reflects what actually
-		// landed, and the caller sees no false "the server is down"
-		// noise.
-		if err := ctx.Err(); err != nil {
-			emit("complete", fmt.Sprintf("aborted: %v (sent=%d, remaining=%d)",
-				err, res.BatchesSent, len(batches)-i))
-			return res, err
-		}
-		emitBatch("batch_sending", i+1, len(batches),
-			fmt.Sprintf("batch %d/%d (%d rows, request_id=%s, is_final=%t)",
-				i+1, len(batches), len(body.Batch), body.RequestID, body.IsFinal),
-			nil)
-		if sendErr := sender.Send(ctx, body); sendErr != nil {
-			res.BatchesFailed++
-			res.BatchErrors = append(res.BatchErrors, BatchError{
-				Index:     i + 1,
-				Total:     len(batches),
-				RequestID: body.RequestID,
-				Err:       sendErr,
-			})
-			emitBatch("batch_failed", i+1, len(batches),
-				sendErr.Error(), sendErr)
-			// Continue past per-batch failures so the caller gets a
-			// complete picture in one run rather than one error at a
-			// time.
-			continue
-		}
-		res.BatchesSent++
-		emitBatch("batch_sent", i+1, len(batches), "accepted", nil)
-	}
-
-	emit("complete", fmt.Sprintf("sent=%d failed=%d rows=%d",
-		res.BatchesSent, res.BatchesFailed, res.RowCount))
-	return res, nil
 }

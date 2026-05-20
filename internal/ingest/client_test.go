@@ -55,7 +55,7 @@ func TestSend_SignsAndSendsHeaders(t *testing.T) {
 	}
 
 	body := fixedBody()
-	if err := c.Send(context.Background(), body); err != nil {
+	if _, err := c.Send(context.Background(), body); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -122,7 +122,7 @@ func TestSend_ClassifiesErrorsForRetryDecision(t *testing.T) {
 			defer srv.Close()
 
 			c, _ := NewClient(srv.URL, "c", "b", secretB64)
-			err := c.Send(context.Background(), fixedBody())
+			_, err := c.Send(context.Background(), fixedBody())
 			se := IsSendError(err)
 			if se == nil {
 				t.Fatalf("err = %v, not a SendError", err)
@@ -143,7 +143,7 @@ func TestSend_ClassifiesErrorsForRetryDecision(t *testing.T) {
 func TestSend_NetworkErrorIsRetryable(t *testing.T) {
 	secretB64, _ := makeSecret(t)
 	c, _ := NewClient("http://127.0.0.1:1", "c", "b", secretB64)
-	err := c.Send(context.Background(), fixedBody())
+	_, err := c.Send(context.Background(), fixedBody())
 	se := IsSendError(err)
 	if se == nil || se.Kind != ErrorKindNetwork {
 		t.Fatalf("err = %v, want SendError{Kind: network}", err)

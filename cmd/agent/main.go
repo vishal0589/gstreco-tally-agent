@@ -50,6 +50,7 @@ import (
 	"github.com/vishal0589/gstreco-tally-agent/internal/ingest"
 	"github.com/vishal0589/gstreco-tally-agent/internal/keyring"
 	"github.com/vishal0589/gstreco-tally-agent/internal/log"
+	"github.com/vishal0589/gstreco-tally-agent/internal/period"
 	"github.com/vishal0589/gstreco-tally-agent/internal/scheduler"
 	"github.com/vishal0589/gstreco-tally-agent/internal/secretstore"
 	"github.com/vishal0589/gstreco-tally-agent/internal/selfupdate"
@@ -327,10 +328,15 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 			makeSingleConnectionTickFunc(runtime, tally.NewClient, logger),
 			tickState,
 		)
+		periodSyncFnTracked := wrapPeriodSyncWithState(
+			makePeriodSyncFunc(runtime, tally.NewClient, logger),
+			tickState,
+		)
 		hbHandler := &daemonHeartbeatHandler{
 			runtime:         runtime,
 			logger:          logger,
 			runCurrentSync:  currentMonthSyncFnTracked,
+			runPeriodSync:   periodSyncFnTracked,
 			cancelIfLastOne: func() { cancelRunIfAllConnectionsDisabled(runtimes, cancelRun) },
 		}
 		poller, pollerErr := heartbeat.New(heartbeat.Options{
@@ -398,12 +404,23 @@ type daemonHeartbeatHandler struct {
 	runtime         *daemonConnectionRuntime
 	logger          zerolog.Logger
 	runCurrentSync  func(ctx context.Context) error
+	runPeriodSync   func(ctx context.Context, period string) error
 	cancelIfLastOne func()
 }
 
-func (h *daemonHeartbeatHandler) OnSyncNow(ctx context.Context) error {
+func (h *daemonHeartbeatHandler) OnSyncNow(ctx context.Context, syncPeriod string) error {
 	if h.runtime == nil || !h.runtime.Enabled() {
 		return fmt.Errorf("heartbeat sync_now: connection is disabled")
+	}
+	if strings.TrimSpace(syncPeriod) != "" {
+		h.logger.Info().
+			Str("connection_id", h.runtime.info.ConnectionID).
+			Str("period", syncPeriod).
+			Msg("heartbeat sync_now: firing explicit month sync for this connection")
+		if h.runPeriodSync == nil {
+			return fmt.Errorf("heartbeat sync_now: explicit month sync is unavailable")
+		}
+		return h.runPeriodSync(ctx, syncPeriod)
 	}
 	h.logger.Info().
 		Str("connection_id", h.runtime.info.ConnectionID).
@@ -491,6 +508,21 @@ func wrapTickWithState(fn scheduler.TickFunc, state *tickState) scheduler.TickFu
 	}
 }
 
+func wrapPeriodSyncWithState(
+	fn func(ctx context.Context, period string) error,
+	state *tickState,
+) func(ctx context.Context, period string) error {
+	return func(ctx context.Context, period string) error {
+		err := fn(ctx, period)
+		status := "ok"
+		if err != nil {
+			status = "error"
+		}
+		state.record(time.Now().UTC(), status)
+		return err
+	}
+}
+
 // makeTickFunc returns the closure the scheduler fires on each tick.
 // One factory call at startup, one closure forever — it walks every enabled
 // paired connection.
@@ -516,6 +548,23 @@ func makeSingleConnectionTickFunc(
 		}
 		from, to := currentMonthWindow(time.Now().In(time.Local))
 		return runWindowSync(ctx, runtime.client, newTallyClient, logger, from, to, "incremental")
+	}
+}
+
+func makePeriodSyncFunc(
+	runtime *daemonConnectionRuntime,
+	newTallyClient func(string, ...tally.ClientOption) *tally.Client,
+	logger zerolog.Logger,
+) func(ctx context.Context, periodCode string) error {
+	return func(ctx context.Context, periodCode string) error {
+		if runtime == nil || !runtime.Enabled() {
+			return fmt.Errorf("period sync: connection is disabled")
+		}
+		from, to, err := period.ParseMonthCode(periodCode)
+		if err != nil {
+			return fmt.Errorf("sync_now period %q: %w", periodCode, err)
+		}
+		return runWindowSync(ctx, runtime.client, newTallyClient, logger, from, to, "manual")
 	}
 }
 

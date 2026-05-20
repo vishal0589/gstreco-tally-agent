@@ -36,6 +36,64 @@ type Client struct {
 	now          func() time.Time // injectable for tests
 }
 
+// ValidationFinding mirrors the server's ingest finding shape on 2xx
+// responses. Scope is filled client-side when the finding is flattened
+// out of the response's purchase / sales / missing_gstin buckets.
+type ValidationFinding struct {
+	Scope       string
+	RowIndex    int    `json:"row_index"`
+	ErrorType   string `json:"error_type"`
+	ErrorDetail string `json:"error_detail"`
+	Severity    string `json:"severity"`
+}
+
+// AcceptedCounters mirrors the 2xx /api/tally/ingest counters payload.
+type AcceptedCounters struct {
+	Inserted int `json:"inserted"`
+	Amended  int `json:"amended"`
+	Skipped  int `json:"skipped"`
+	Errors   int `json:"errors"`
+}
+
+// AcceptedFindings mirrors the 2xx /api/tally/ingest findings payload.
+type AcceptedFindings struct {
+	MissingGSTIN []ValidationFinding `json:"missing_gstin"`
+	Purchase     []ValidationFinding `json:"purchase"`
+	Sales        []ValidationFinding `json:"sales"`
+}
+
+// AcceptedResponse is the server's 2xx response body for voucher ingest.
+// The agent uses it to surface server-side skips / validation findings
+// instead of treating every 2xx as an opaque "accepted".
+type AcceptedResponse struct {
+	OK       bool             `json:"ok"`
+	RunID    string           `json:"run_id"`
+	Counters AcceptedCounters `json:"counters"`
+	Findings AcceptedFindings `json:"findings"`
+}
+
+// AllFindings returns a flattened, scope-tagged slice for CLI/logging.
+func (r AcceptedResponse) AllFindings() []ValidationFinding {
+	total :=
+		len(r.Findings.MissingGSTIN) +
+		len(r.Findings.Purchase) +
+		len(r.Findings.Sales)
+	if total == 0 {
+		return nil
+	}
+	out := make([]ValidationFinding, 0, total)
+	appendScoped := func(scope string, in []ValidationFinding) {
+		for _, finding := range in {
+			finding.Scope = scope
+			out = append(out, finding)
+		}
+	}
+	appendScoped("missing_gstin", r.Findings.MissingGSTIN)
+	appendScoped("purchase", r.Findings.Purchase)
+	appendScoped("sales", r.Findings.Sales)
+	return out
+}
+
 // Option customises a Client at construction.
 type Option func(*Client)
 
@@ -91,8 +149,10 @@ func NewClient(baseURL, connectionID, bearer, secretB64 string, opts ...Option) 
 // PostJSONTo kept as the public surface so existing callers (the smoke
 // runbook, A4 outbox runner, A5-1 agentctl sync) don't have to learn
 // about path routing.
-func (c *Client) Send(ctx context.Context, body tally.IngestRequestBody) error {
-	return c.PostJSONTo(ctx, Path, body)
+func (c *Client) Send(ctx context.Context, body tally.IngestRequestBody) (AcceptedResponse, error) {
+	var out AcceptedResponse
+	err := c.PostJSONExpect(ctx, Path, body, &out)
+	return out, err
 }
 
 // PostJSONTo signs and POSTs an arbitrary JSON body to a server path.

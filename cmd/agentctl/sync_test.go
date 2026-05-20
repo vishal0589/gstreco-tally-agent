@@ -8,29 +8,33 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/vishal0589/gstreco-tally-agent/internal/config"
+	"github.com/vishal0589/gstreco-tally-agent/internal/ingest"
 	"github.com/vishal0589/gstreco-tally-agent/internal/keyring"
+	"github.com/vishal0589/gstreco-tally-agent/internal/syncrun"
 	"github.com/vishal0589/gstreco-tally-agent/internal/tally"
 )
 
 func TestMapKind(t *testing.T) {
 	cases := []struct {
-		in       string
-		wantTK   tally.VoucherKind
-		wantIK   tally.IngestKind
-		wantErr  bool
+		in      string
+		want    syncrun.KindPair
+		wantErr bool
 	}{
-		{"purchase", tally.VoucherPurchase, tally.IngestKindPurchase, false},
-		{"PURCHASE", tally.VoucherPurchase, tally.IngestKindPurchase, false},
-		{"sales", tally.VoucherSales, tally.IngestKindSales, false},
-		{"credit_note", tally.VoucherCreditNote, tally.IngestKindCreditNote, false},
-		{"credit-note", tally.VoucherCreditNote, tally.IngestKindCreditNote, false},
-		{"debit_note", tally.VoucherDebitNote, tally.IngestKindDebitNote, false},
-		{"journal", "", "", true},
-		{"", "", "", true},
+		{"purchase", syncrun.KindPair{Name: "purchase", Tally: tally.VoucherPurchase, Ingest: tally.IngestKindPurchase}, false},
+		{"PURCHASE", syncrun.KindPair{Name: "purchase", Tally: tally.VoucherPurchase, Ingest: tally.IngestKindPurchase}, false},
+		{"sales", syncrun.KindPair{Name: "sales", Tally: tally.VoucherSales, Ingest: tally.IngestKindSales}, false},
+		{"credit_note", syncrun.KindPair{Name: "credit_note", Tally: tally.VoucherCreditNote, Ingest: tally.IngestKindCreditNote}, false},
+		{"credit-note", syncrun.KindPair{Name: "credit_note", Tally: tally.VoucherCreditNote, Ingest: tally.IngestKindCreditNote}, false},
+		{"debit_note", syncrun.KindPair{Name: "debit_note", Tally: tally.VoucherDebitNote, Ingest: tally.IngestKindDebitNote}, false},
+		{"journal", syncrun.KindPair{Name: "journal", Tally: tally.VoucherJournal}, false},
+		{"payment", syncrun.KindPair{Name: "payment", Tally: tally.VoucherPayment}, false},
+		{"tax_ledger", syncrun.KindPair{Name: "tax_ledger"}, false},
+		{"", syncrun.KindPair{}, true},
 	}
 	for _, c := range cases {
-		gotTK, gotIK, err := mapKind(c.in)
+		got, err := mapKind(c.in)
 		if (err != nil) != c.wantErr {
 			t.Errorf("mapKind(%q) err=%v, wantErr=%v", c.in, err, c.wantErr)
 			continue
@@ -38,9 +42,8 @@ func TestMapKind(t *testing.T) {
 		if c.wantErr {
 			continue
 		}
-		if gotTK != c.wantTK || gotIK != c.wantIK {
-			t.Errorf("mapKind(%q) = (%v,%v), want (%v,%v)",
-				c.in, gotTK, gotIK, c.wantTK, c.wantIK)
+		if got != c.want {
+			t.Errorf("mapKind(%q) = %+v, want %+v", c.in, got, c.want)
 		}
 	}
 }
@@ -133,13 +136,48 @@ func (f *fakeTallyPoster) PostXML(_ context.Context, body []byte) ([]byte, error
 
 // fakeIngestSender records every batch the command sends.
 type fakeIngestSender struct {
-	sent []tally.IngestRequestBody
-	err  error
+	sent          []tally.IngestRequestBody
+	journalSent   []tally.JournalIngestRequestBody
+	paymentSent   []tally.PaymentIngestRequestBody
+	taxLedgerSent []tally.TaxLedgerIngestRequestBody
+	err           error
+	resp          ingest.AcceptedResponse
 }
 
-func (f *fakeIngestSender) Send(_ context.Context, body tally.IngestRequestBody) error {
+func (f *fakeIngestSender) Send(_ context.Context, body tally.IngestRequestBody) (ingest.AcceptedResponse, error) {
 	f.sent = append(f.sent, body)
-	return f.err
+	if f.err != nil {
+		return ingest.AcceptedResponse{}, f.err
+	}
+	resp := f.resp
+	if resp.Counters == (ingest.AcceptedCounters{}) {
+		resp.Counters.Inserted = len(body.Batch)
+	}
+	return resp, nil
+}
+
+func (f *fakeIngestSender) SendJournal(_ context.Context, body tally.JournalIngestRequestBody) (tally.AccountingAcceptedResponse, error) {
+	f.journalSent = append(f.journalSent, body)
+	if f.err != nil {
+		return tally.AccountingAcceptedResponse{}, f.err
+	}
+	return tally.AccountingAcceptedResponse{Processed: len(body.Batch)}, nil
+}
+
+func (f *fakeIngestSender) SendPayment(_ context.Context, body tally.PaymentIngestRequestBody) (tally.AccountingAcceptedResponse, error) {
+	f.paymentSent = append(f.paymentSent, body)
+	if f.err != nil {
+		return tally.AccountingAcceptedResponse{}, f.err
+	}
+	return tally.AccountingAcceptedResponse{Processed: len(body.Batch)}, nil
+}
+
+func (f *fakeIngestSender) SendTaxLedgers(_ context.Context, body tally.TaxLedgerIngestRequestBody) (tally.AccountingAcceptedResponse, error) {
+	f.taxLedgerSent = append(f.taxLedgerSent, body)
+	if f.err != nil {
+		return tally.AccountingAcceptedResponse{}, f.err
+	}
+	return tally.AccountingAcceptedResponse{Processed: len(body.Batch)}, nil
 }
 
 // stubResponse is a minimal valid Tally Prime 3.x day-book response with one
@@ -217,8 +255,14 @@ func TestRunSync_HappyPath(t *testing.T) {
 		t.Fatalf("want 1 batch sent, got %d", len(sender.sent))
 	}
 	body := sender.sent[0]
+	if _, err := uuid.Parse(body.RunID); err != nil {
+		t.Fatalf("RunID=%q is not a UUID: %v", body.RunID, err)
+	}
 	if body.TallyCompany != "PLLUM CASA" {
 		t.Errorf("TallyCompany=%q", body.TallyCompany)
+	}
+	if body.TallyEndpoint == nil || *body.TallyEndpoint != "http://localhost:9000" {
+		t.Errorf("TallyEndpoint=%v, want http://localhost:9000", body.TallyEndpoint)
 	}
 	if body.Kind != "purchase" {
 		t.Errorf("Kind=%q", body.Kind)
@@ -286,6 +330,65 @@ func TestRunSync_DryRunSkipsKeyringAndSend(t *testing.T) {
 	}
 }
 
+func TestRunSync_SurfacesServerFindings(t *testing.T) {
+	tally := &fakeTallyPoster{resp: []byte(stubResponse)}
+	sender := &fakeIngestSender{
+		resp: ingest.AcceptedResponse{
+			OK:    true,
+			RunID: "server-run",
+			Counters: ingest.AcceptedCounters{
+				Inserted: 0,
+				Skipped:  1,
+			},
+			Findings: ingest.AcceptedFindings{
+				MissingGSTIN: []ingest.ValidationFinding{
+					{
+						RowIndex:    0,
+						ErrorType:   "invalid_gstin",
+						ErrorDetail: "Vendor GSTIN is missing.",
+						Severity:    "error",
+					},
+				},
+			},
+		},
+	}
+	store := keyring.NewMemoryStore()
+	hk, bk := keyring.ConnectionKeys("conn-123")
+	_ = store.Set(keyring.ServiceName, hk, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+	_ = store.Set(keyring.ServiceName, bk, "bearer-token")
+
+	deps := syncDeps{
+		now:            time.Now,
+		newOSKeyring:   func() keyring.Store { return store },
+		newTallyClient: func(string) tallyPoster { return tally },
+		newIngestClient: func(_, _, _, _ string) (ingestSender, error) {
+			return sender, nil
+		},
+		loadConfig: func(string) (*config.Config, error) {
+			return &config.Config{
+				Server:       "https://example.test",
+				ConnectionID: "conn-123",
+			}, nil
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runSync(&stdout, &stderr, []string{
+		"--tally-company", "PLLUM CASA",
+		"--kind", "purchase",
+		"--period", "042026",
+	}, deps)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s, stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "accepted (inserted=0 amended=0 skipped=1 errors=0)") {
+		t.Errorf("stdout missing accepted counters: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "missing_gstin row_index=0 invalid_gstin: Vendor GSTIN is missing.") {
+		t.Errorf("stdout missing surfaced finding: %s", stdout.String())
+	}
+}
+
 func TestRunSync_NotPairedExits2(t *testing.T) {
 	deps := syncDeps{
 		now:             time.Now,
@@ -310,86 +413,6 @@ func TestRunSync_NotPairedExits2(t *testing.T) {
 	}
 }
 
-func TestRunSync_RequiresConnectionIDWhenConfigHasMultipleConnections(t *testing.T) {
-	deps := syncDeps{
-		now:             time.Now,
-		newOSKeyring:    func() keyring.Store { return keyring.NewMemoryStore() },
-		newTallyClient:  func(string) tallyPoster { return &fakeTallyPoster{} },
-		newIngestClient: func(_, _, _, _ string) (ingestSender, error) { return &fakeIngestSender{}, nil },
-		loadConfig: func(string) (*config.Config, error) {
-			return &config.Config{
-				Connections: []config.PairedConnection{
-					{Server: "https://one.example", ConnectionID: "conn-1", DeviceName: "WIN-1"},
-					{Server: "https://two.example", ConnectionID: "conn-2", DeviceName: "WIN-1"},
-				},
-			}, nil
-		},
-	}
-
-	var stdout, stderr bytes.Buffer
-	code := runSync(&stdout, &stderr, []string{
-		"--tally-company", "PLLUM CASA",
-		"--kind", "purchase",
-		"--period", "042026",
-	}, deps)
-	if code != 2 {
-		t.Fatalf("exit=%d, want 2 (stderr=%s)", code, stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "multiple connections configured") {
-		t.Errorf("stderr missing disambiguation hint: %s", stderr.String())
-	}
-}
-
-func TestRunSync_UsesRequestedConnectionIDFromMultiConfig(t *testing.T) {
-	tallyClient := &fakeTallyPoster{resp: []byte(stubResponse)}
-	sender := &fakeIngestSender{}
-	store := keyring.NewMemoryStore()
-	hk, bk := keyring.ConnectionKeys("conn-2")
-	_ = store.Set(keyring.ServiceName, hk, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-	_ = store.Set(keyring.ServiceName, bk, "bearer-token-2")
-
-	var gotConnectionID string
-	var gotServer string
-	deps := syncDeps{
-		now:            func() time.Time { return time.Unix(1700000000, 0) },
-		newOSKeyring:   func() keyring.Store { return store },
-		newTallyClient: func(string) tallyPoster { return tallyClient },
-		newIngestClient: func(server, connectionID, _, _ string) (ingestSender, error) {
-			gotServer = server
-			gotConnectionID = connectionID
-			return sender, nil
-		},
-		loadConfig: func(string) (*config.Config, error) {
-			return &config.Config{
-				Connections: []config.PairedConnection{
-					{Server: "https://one.example", ConnectionID: "conn-1", DeviceName: "WIN-1"},
-					{Server: "https://two.example", ConnectionID: "conn-2", DeviceName: "WIN-1"},
-				},
-			}, nil
-		},
-	}
-
-	var stdout, stderr bytes.Buffer
-	code := runSync(&stdout, &stderr, []string{
-		"--connection-id", "conn-2",
-		"--tally-company", "PLLUM CASA",
-		"--kind", "purchase",
-		"--period", "042026",
-	}, deps)
-	if code != 0 {
-		t.Fatalf("exit=%d, stderr=%s, stdout=%s", code, stderr.String(), stdout.String())
-	}
-	if gotConnectionID != "conn-2" {
-		t.Errorf("connectionID=%q, want conn-2", gotConnectionID)
-	}
-	if gotServer != "https://two.example" {
-		t.Errorf("server=%q, want https://two.example", gotServer)
-	}
-	if len(sender.sent) != 1 {
-		t.Fatalf("want 1 batch sent, got %d", len(sender.sent))
-	}
-}
-
 func TestRunSync_BadFlags(t *testing.T) {
 	deps := syncDeps{
 		now:             time.Now,
@@ -399,10 +422,10 @@ func TestRunSync_BadFlags(t *testing.T) {
 		loadConfig:      func(string) (*config.Config, error) { return &config.Config{Server: "x", ConnectionID: "y"}, nil },
 	}
 	cases := [][]string{
-		{},                                                     // missing required flags
-		{"--tally-company", "X"},                               // missing --kind
-		{"--tally-company", "X", "--kind", "journal", "--period", "042026"}, // bad kind
-		{"--tally-company", "X", "--kind", "purchase"},         // missing window
+		{},                       // missing required flags
+		{"--tally-company", "X"}, // missing --kind
+		{"--tally-company", "X", "--kind", "mystery_kind", "--period", "042026"},                                           // bad kind
+		{"--tally-company", "X", "--kind", "purchase"},                                                                     // missing window
 		{"--tally-company", "X", "--kind", "purchase", "--period", "042026", "--from", "2026-04-01", "--to", "2026-04-30"}, // both
 	}
 	for i, args := range cases {

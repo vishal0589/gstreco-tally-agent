@@ -73,11 +73,10 @@ func runSyncAll(stdout, stderr io.Writer, args []string, deps syncAllDeps) int {
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "", "override config file path")
 	serverFlag := fs.String("server", "", "override server URL (default: from config)")
-	connectionID := fs.String("connection-id", "", "paired connection id to use; omit to walk all stored connections")
 	period := fs.String("period", "", "month shorthand MMYYYY (e.g. 042026); mutually exclusive with --from/--to")
 	fromFlag := fs.String("from", "", "window start YYYY-MM-DD (use with --to instead of --period)")
 	toFlag := fs.String("to", "", "window end YYYY-MM-DD inclusive")
-	kindsFlag := fs.String("kinds", "purchase,sales,credit_note,debit_note",
+	kindsFlag := fs.String("kinds", "purchase,sales,credit_note,debit_note,journal,payment,tax_ledger",
 		"comma-separated sync kinds to fetch per mapping")
 	batchSize := fs.Int("batch-size", ingest.DefaultBatchSize, "max rows per ingest request")
 	dryRun := fs.Bool("dry-run", false, "fetch + parse only; do not POST ingest")
@@ -99,7 +98,10 @@ func runSyncAll(stdout, stderr io.Writer, args []string, deps syncAllDeps) int {
 		return 2
 	}
 
-	cfgPath := resolveConfigPath(*configPath)
+	cfgPath := *configPath
+	if cfgPath == "" {
+		cfgPath = config.DefaultPath()
+	}
 	cfg, err := deps.loadConfig(cfgPath)
 	if err != nil {
 		if errors.Is(err, config.ErrNotFound) {
@@ -114,160 +116,111 @@ func runSyncAll(stdout, stderr io.Writer, args []string, deps syncAllDeps) int {
 		return 2
 	}
 
-	allConnections, err := requireAllConnections(cfg)
-	if err != nil {
-		fmt.Fprintf(stderr, "agentctl sync-all: %v\n", err)
-		return 2
-	}
-	selectedConnections := allConnections
-	if strings.TrimSpace(*connectionID) != "" {
-		conn, connErr := requireOneConnection(cfg, *connectionID)
-		if connErr != nil {
-			fmt.Fprintf(stderr, "agentctl sync-all: %v\n", connErr)
-			return 2
-		}
-		selectedConnections = []config.PairedConnection{conn}
-	}
+	server := firstNonEmpty(*serverFlag, cfg.Server)
 
+	// Build the ingest client even in --dry-run because we still
+	// need FetchActiveMappings to know what to fetch from Tally. Only
+	// the per-batch Send is suppressed in dry-run mode.
 	ks := deps.newOSKeyring()
-	totalMappings := 0
-	totalMappingsRun := 0
-	totalRows := 0
-	totalBatchesSent := 0
-	totalBatchesFailed := 0
-	totalFatalErrors := 0
-	connectionsWithMappings := 0
-	hadFetchMappingsError := false
-
-	for idx, conn := range selectedConnections {
-		server := firstNonEmpty(*serverFlag, conn.Server)
-		hmacKey, bearerKey := keyring.ConnectionKeys(conn.ConnectionID)
-		secret, secErr := ks.Get(keyring.ServiceName, hmacKey)
-		if secErr != nil {
-			fmt.Fprintf(stderr, "agentctl sync-all: read hmac secret for %s: %v\n", conn.ConnectionID, secErr)
-			return 1
-		}
-		bearer, bearerErr := ks.Get(keyring.ServiceName, bearerKey)
-		if bearerErr != nil {
-			fmt.Fprintf(stderr, "agentctl sync-all: read bearer token for %s: %v\n", conn.ConnectionID, bearerErr)
-			return 1
-		}
-
-		client, clientErr := deps.newIngestClient(server, conn.ConnectionID, bearer, secret)
-		if clientErr != nil {
-			fmt.Fprintf(stderr, "agentctl sync-all: build ingest client for %s: %v\n", conn.ConnectionID, clientErr)
-			return 1
-		}
-
-		fetchCtx, cancelFetch := context.WithTimeout(context.Background(), 30*time.Second)
-		mappings, fetchErr := client.FetchActiveMappings(fetchCtx)
-		cancelFetch()
-		if fetchErr != nil {
-			fmt.Fprintf(stderr, "agentctl sync-all: fetch mappings for %s: %v\n", conn.ConnectionID, fetchErr)
-			hadFetchMappingsError = true
-			totalFatalErrors++
-			if !*continueOnError {
-				return 1
-			}
-			continue
-		}
-		if len(mappings.Mappings) == 0 {
-			fmt.Fprintf(stdout, "→ connection %s has no active mappings (server=%s)\n", conn.ConnectionID, server)
-			continue
-		}
-
-		connectionsWithMappings++
-		totalMappings += len(mappings.Mappings)
-		fmt.Fprintf(stdout, "→ connection %d/%d: %s (%d active mapping(s), fetched %s)\n",
-			idx+1, len(selectedConnections), mappings.ConnectionID, len(mappings.Mappings), mappings.FetchedAt)
-		fmt.Fprintf(stdout, "  window: %s..%s · kinds: %s · dry-run: %t\n",
-			from.Format("2006-01-02"), to.Format("2006-01-02"),
-			strings.Join(kindNamesFromResolved(kinds), ","), *dryRun)
-
-		var sender syncrun.IngestSender = client
-		if *dryRun {
-			sender = noopSender{}
-		}
-
-		runIDPrefix := fmt.Sprintf("syncall-%d", deps.now().Unix())
-		res := syncrun.WalkAll(context.Background(), syncrun.WalkOptions{
-			Mappings:        mappings.Mappings,
-			Kinds:           kinds,
-			From:            from,
-			To:              to,
-			BatchSize:       *batchSize,
-			RunIDPrefix:     runIDPrefix,
-			RunKind:         "manual",
-			PerRunTimeout:   10 * time.Minute,
-			ContinueOnError: *continueOnError,
-			NewTallyClient: func(endpoint string) syncrun.TallyPoster {
-				return deps.newTallyClient(endpoint)
-			},
-			Sender: sender,
-			PerMappingHook: func(mappingIdx, total int, m ingest.ActiveMapping) {
-				fmt.Fprintf(stdout, "[%d/%d] %s @ %s\n",
-					mappingIdx+1, total, m.TallyCompanyName, m.TallyEndpoint)
-			},
-			PerKindResultHook: func(m ingest.ActiveMapping, k syncrun.KindPair, r syncrun.Result, fatalErr error) {
-				if fatalErr != nil {
-					fmt.Fprintf(stderr, "  ✗ %s: %v\n", k.Name, fatalErr)
-					return
-				}
-				fmt.Fprintf(stdout, "    %s: rows=%d sent=%d failed=%d dropped_on_normalize=%d warnings=%d\n",
-					k.Name,
-					r.RowCount,
-					r.BatchesSent,
-					r.BatchesFailed,
-					r.DroppedOnNormalize,
-					len(r.ParseWarnings))
-				for _, w := range r.ParseWarnings {
-					fmt.Fprintf(stdout, "      ⚠ %s\n", w)
-				}
-			},
-			PerRunProgress: func(_ ingest.ActiveMapping, k syncrun.KindPair) syncrun.Progress {
-				return makeSyncAllProgress(stdout, stderr, k.Name)
-			},
-		})
-
-		totalMappingsRun += res.MappingsRun
-		totalRows += res.TotalRows
-		totalBatchesSent += res.TotalBatchesSent
-		totalBatchesFailed += res.TotalBatchesFailed
-		totalFatalErrors += res.FatalErrors
-
-		if res.StoppedEarly {
-			fmt.Fprintln(stderr, "stopping (--continue-on-error=false)")
-			return 1
-		}
-
-		fmt.Fprintf(stdout,
-			"  connection summary: mappings_ran=%d rows=%d batches_sent=%d failed=%d fatal_errors=%d\n\n",
-			res.MappingsRun,
-			res.TotalRows,
-			res.TotalBatchesSent,
-			res.TotalBatchesFailed,
-			res.FatalErrors,
-		)
+	hmacKey, bearerKey := keyring.ConnectionKeys(cfg.ConnectionID)
+	secret, err := ks.Get(keyring.ServiceName, hmacKey)
+	if err != nil {
+		fmt.Fprintf(stderr, "agentctl sync-all: read hmac secret from keyring: %v\n", err)
+		return 1
+	}
+	bearer, err := ks.Get(keyring.ServiceName, bearerKey)
+	if err != nil {
+		fmt.Fprintf(stderr, "agentctl sync-all: read bearer token from keyring: %v\n", err)
+		return 1
 	}
 
-	if connectionsWithMappings == 0 {
-		if hadFetchMappingsError {
-			fmt.Fprintln(stderr, "agentctl sync-all: could not fetch mappings for any selected connection.")
-			return 1
-		}
+	client, err := deps.newIngestClient(server, cfg.ConnectionID, bearer, secret)
+	if err != nil {
+		fmt.Fprintf(stderr, "agentctl sync-all: build ingest client: %v\n", err)
+		return 1
+	}
+
+	fetchCtx, cancelFetch := context.WithTimeout(context.Background(), 30*time.Second)
+	mappings, err := client.FetchActiveMappings(fetchCtx)
+	cancelFetch()
+	if err != nil {
+		fmt.Fprintf(stderr, "agentctl sync-all: fetch mappings: %v\n", err)
+		return 1
+	}
+	if len(mappings.Mappings) == 0 {
 		fmt.Fprintln(stderr, "agentctl sync-all: no active mappings.")
-		fmt.Fprintln(stderr, "Run `agentctl discover` to enumerate Tally instances, then map each company to a GSTIN at the tenant's Settings → Tally page before running sync-all.")
+		fmt.Fprintln(stderr, "Run `agentctl discover` to enumerate Tally instances, then map each company to a GSTIN at")
+		fmt.Fprintf(stderr, "%s/settings/tally before running sync-all.\n", server)
 		return 2
+	}
+
+	fmt.Fprintf(stdout, "→ %d active mapping(s) for connection %s (fetched %s)\n",
+		len(mappings.Mappings), mappings.ConnectionID, mappings.FetchedAt)
+	fmt.Fprintf(stdout, "  window: %s..%s · kinds: %s · dry-run: %t\n\n",
+		from.Format("2006-01-02"), to.Format("2006-01-02"),
+		strings.Join(kindNamesFromResolved(kinds), ","), *dryRun)
+
+	var sender syncrun.IngestSender = client
+	if *dryRun {
+		sender = noopSender{}
+	}
+
+	runIDPrefix := fmt.Sprintf("syncall-%d", deps.now().Unix())
+	res := syncrun.WalkAll(context.Background(), syncrun.WalkOptions{
+		Mappings:        mappings.Mappings,
+		Kinds:           kinds,
+		From:            from,
+		To:              to,
+		BatchSize:       *batchSize,
+		RunIDPrefix:     runIDPrefix,
+		RunKind:         "manual",
+		PerRunTimeout:   10 * time.Minute,
+		ContinueOnError: *continueOnError,
+		NewTallyClient: func(endpoint string) syncrun.TallyPoster {
+			return deps.newTallyClient(endpoint)
+		},
+		Sender: sender,
+		PerMappingHook: func(idx, total int, m ingest.ActiveMapping) {
+			fmt.Fprintf(stdout, "[%d/%d] %s @ %s\n",
+				idx+1, total, m.TallyCompanyName, m.TallyEndpoint)
+		},
+		PerKindResultHook: func(m ingest.ActiveMapping, k syncrun.KindPair, r syncrun.Result, fatalErr error) {
+			if fatalErr != nil {
+				fmt.Fprintf(stderr, "  ✗ %s: %v\n", k.Name, fatalErr)
+				return
+			}
+			fmt.Fprintf(stdout, "    %s: rows=%d sent=%d failed=%d landed=%d skipped=%d server_errors=%d\n",
+				k.Name,
+				r.RowCount,
+				r.BatchesSent,
+				r.BatchesFailed,
+				r.ServerInserted+r.ServerAmended,
+				r.ServerSkipped,
+				r.ServerErrors)
+			for _, w := range r.ParseWarnings {
+				fmt.Fprintf(stdout, "      ⚠ %s\n", w)
+			}
+			for _, f := range r.ServerFindings {
+				fmt.Fprintf(stdout, "      ⚠ %s\n", formatServerFinding(f))
+			}
+		},
+		PerRunProgress: func(_ ingest.ActiveMapping, k syncrun.KindPair) syncrun.Progress {
+			return makeSyncAllProgress(stdout, stderr, k.Name)
+		},
+	})
+
+	if res.StoppedEarly {
+		fmt.Fprintln(stderr, "stopping (--continue-on-error=false)")
+		return 1
 	}
 
 	fmt.Fprintf(stdout,
-		"summary: connections_with_mappings=%d/%d · mappings_ran=%d/%d · rows=%d · batches sent=%d failed=%d · fatal errors=%d\n",
-		connectionsWithMappings, len(selectedConnections),
-		totalMappingsRun, totalMappings, totalRows,
-		totalBatchesSent, totalBatchesFailed,
-		totalFatalErrors)
+		"\nsummary: %d/%d mapping(s) ran · rows=%d · batches sent=%d failed=%d · skipped=%d · server errors=%d · fatal errors=%d\n",
+		res.MappingsRun, len(mappings.Mappings), res.TotalRows,
+		res.TotalBatchesSent, res.TotalBatchesFailed,
+		res.TotalServerSkipped, res.TotalServerErrors, res.FatalErrors)
 
-	if totalFatalErrors > 0 || totalBatchesFailed > 0 {
+	if res.FatalErrors > 0 || res.TotalBatchesFailed > 0 || res.TotalServerErrors > 0 {
 		return 1
 	}
 	if *dryRun {
@@ -299,11 +252,10 @@ func parseKinds(s string) ([]syncrun.KindPair, error) {
 		if k == "" {
 			continue
 		}
-		tallyKind, ingestKind, err := mapKind(k)
+		pair, err := mapKind(k)
 		if err != nil {
 			return nil, err
 		}
-		pair := syncrun.KindPair{Name: k, Tally: tallyKind, Ingest: ingestKind}
 		if _, dup := seen[pair.Name]; dup {
 			continue
 		}
@@ -311,7 +263,7 @@ func parseKinds(s string) ([]syncrun.KindPair, error) {
 		out = append(out, pair)
 	}
 	if len(out) == 0 {
-		return nil, errors.New("--kinds is empty after parsing (use a comma-separated list of: purchase, sales, credit_note, debit_note)")
+		return nil, errors.New("--kinds is empty after parsing (use a comma-separated list of: purchase, sales, credit_note, debit_note, journal, payment, tax_ledger)")
 	}
 	return out, nil
 }

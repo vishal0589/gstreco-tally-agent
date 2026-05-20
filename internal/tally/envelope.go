@@ -18,9 +18,9 @@ type DayBookRequest struct {
 	// empty range returns an empty collection (valid, not an error).
 	From time.Time
 	To   time.Time
-	// Kind is "purchase" or "sales". The envelope filter uses Tally's
-	// built-in $$IsPurchase / $$IsSales collection function so custom
-	// voucher types that inherit from Purchase/Sales are picked up too.
+	// Kind is purchase/sales/credit_note/debit_note/journal/payment. The
+	// envelope filter uses Tally's built-in voucher-family functions so custom
+	// voucher types that inherit from the underlying family are picked up too.
 	Kind VoucherKind
 }
 
@@ -119,7 +119,7 @@ func BuildDayBookXML(r DayBookRequest) ([]byte, error) {
 
 // filterForKind returns the TDL filter name and its expression for a given
 // VoucherKind. Keeping the name and expression paired here means adding
-// credit/debit notes in A2c is a one-line addition.
+// new voucher families is a one-line addition.
 func filterForKind(k VoucherKind) (name, expr string, err error) {
 	switch k {
 	case VoucherPurchase:
@@ -134,6 +134,10 @@ func filterForKind(k VoucherKind) (name, expr string, err error) {
 		return "IsGstrecoCreditNote", "$$IsCreditNote:$VoucherTypeName", nil
 	case VoucherDebitNote:
 		return "IsGstrecoDebitNote", "$$IsDebitNote:$VoucherTypeName", nil
+	case VoucherJournal:
+		return "IsGstrecoJournal", "$$IsJournal:$VoucherTypeName", nil
+	case VoucherPayment:
+		return "IsGstrecoPayment", "$$IsPayment:$VoucherTypeName", nil
 	default:
 		return "", "", fmt.Errorf("tally: unsupported voucher kind %q", k)
 	}

@@ -157,8 +157,8 @@ func ParseDayBookV3(raw []byte) (ParseResult, error) {
 			}
 			raw, warnings := v.toRaw()
 			result.Warnings = append(result.Warnings, warnings...)
-			if raw.GUID == "" && raw.VoucherNumber == "" {
-				result.Warnings = append(result.Warnings, "voucher dropped: missing both GUID and VoucherNumber")
+			if raw.GUID == "" && raw.VoucherNumber == "" && raw.Reference == "" {
+				result.Warnings = append(result.Warnings, "voucher dropped: missing GUID, VoucherNumber, and Reference")
 				continue
 			}
 			result.Vouchers = append(result.Vouchers, raw)
