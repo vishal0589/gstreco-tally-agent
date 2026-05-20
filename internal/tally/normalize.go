@@ -53,7 +53,7 @@ func Normalize(v RawVoucher, opts NormalizeOptions) ([]IngestVoucherRow, error) 
 		return nil, fmt.Errorf("voucher %s: no party ledger (expected LedgerName=%q)", voucherID(v), v.PartyLedgerName)
 	}
 
-	invoiceValue := math.Abs(party.Amount)
+	invoiceValue := math.Abs(party.Amount) + sumWithholdingLedgers(v.LedgerEntries, party)
 	taxTotal := tax.IGST + tax.CGST + tax.SGST + tax.CESS
 	taxableValue := invoiceValue - taxTotal
 	if taxableValue < 0 {
@@ -333,6 +333,9 @@ func classifyLedgers(entries []LedgerEntry) (party *LedgerEntry, tax taxTotals) 
 // UTGST (Union Territory GST) is folded into SGST — the GSTR-2B schema has
 // no separate bucket and the combined tax rate matches SGST everywhere.
 func classifyTaxLedger(gstClass, name string) string {
+	if isWithholdingLedgerName(name) {
+		return ""
+	}
 	if c := strings.ToUpper(strings.TrimSpace(gstClass)); c != "" {
 		switch {
 		case strings.HasPrefix(c, "IGST"):
@@ -357,6 +360,11 @@ func classifyTaxLedger(gstClass, name string) string {
 		return "CESS"
 	}
 	return ""
+}
+
+func isWithholdingLedgerName(name string) bool {
+	n := strings.ToUpper(strings.TrimSpace(name))
+	return strings.Contains(n, "TDS") || strings.Contains(n, "WITHHOLDING")
 }
 
 // relevantBillRefs filters BillAllocations to New Ref and Agst Ref — the
@@ -404,6 +412,24 @@ func sumNonTaxNonPartyLedgers(entries []LedgerEntry, party *LedgerEntry) float64
 			continue
 		}
 		if classifyTaxLedger(e.GSTClass, e.LedgerName) != "" {
+			continue
+		}
+		if isWithholdingLedgerName(e.LedgerName) {
+			continue
+		}
+		total += math.Abs(e.Amount)
+	}
+	return total
+}
+
+func sumWithholdingLedgers(entries []LedgerEntry, party *LedgerEntry) float64 {
+	total := 0.0
+	for i := range entries {
+		e := &entries[i]
+		if party != nil && e == party {
+			continue
+		}
+		if !isWithholdingLedgerName(e.LedgerName) {
 			continue
 		}
 		total += math.Abs(e.Amount)
