@@ -335,6 +335,15 @@ func TestRunOne_JournalPathPostsOneBatch(t *testing.T) {
 	if got := snd.journalSent[0].Batch[0].AgainstInvoiceRefs[0].Reference; got != "PI-5501" {
 		t.Errorf("AgainstInvoiceRefs[0]=%q, want PI-5501", got)
 	}
+	if !snd.journalSent[0].IsFinal {
+		t.Error("journal single-batch run should mark IsFinal=true")
+	}
+	if snd.journalSent[0].PeriodFrom == nil || *snd.journalSent[0].PeriodFrom != "2026-04-01" {
+		t.Errorf("journal PeriodFrom=%v, want 2026-04-01", snd.journalSent[0].PeriodFrom)
+	}
+	if snd.journalSent[0].PeriodTo == nil || *snd.journalSent[0].PeriodTo != "2026-04-30" {
+		t.Errorf("journal PeriodTo=%v, want 2026-04-30", snd.journalSent[0].PeriodTo)
+	}
 	if res.RowCount != 1 {
 		t.Errorf("RowCount=%d, want 1", res.RowCount)
 	}
@@ -394,6 +403,15 @@ func TestRunOne_PaymentPathPostsOneBatch(t *testing.T) {
 	if row.InstrumentType == nil || *row.InstrumentType != "bank" {
 		t.Errorf("InstrumentType=%v, want bank", row.InstrumentType)
 	}
+	if !snd.paymentSent[0].IsFinal {
+		t.Error("payment single-batch run should mark IsFinal=true")
+	}
+	if snd.paymentSent[0].PeriodFrom == nil || *snd.paymentSent[0].PeriodFrom != "2026-04-01" {
+		t.Errorf("payment PeriodFrom=%v, want 2026-04-01", snd.paymentSent[0].PeriodFrom)
+	}
+	if snd.paymentSent[0].PeriodTo == nil || *snd.paymentSent[0].PeriodTo != "2026-04-30" {
+		t.Errorf("payment PeriodTo=%v, want 2026-04-30", snd.paymentSent[0].PeriodTo)
+	}
 	if res.RowCount != 1 {
 		t.Errorf("RowCount=%d, want 1", res.RowCount)
 	}
@@ -440,6 +458,15 @@ func TestRunOne_TaxLedgerPathPostsOneBatch(t *testing.T) {
 	}
 	if row.DebitAmount != 1200 {
 		t.Errorf("DebitAmount=%v, want 1200", row.DebitAmount)
+	}
+	if !snd.taxLedgerSent[0].IsFinal {
+		t.Error("tax-ledger single-batch run should mark IsFinal=true")
+	}
+	if snd.taxLedgerSent[0].PeriodFrom == nil || *snd.taxLedgerSent[0].PeriodFrom != "2026-04-01" {
+		t.Errorf("tax-ledger PeriodFrom=%v, want 2026-04-01", snd.taxLedgerSent[0].PeriodFrom)
+	}
+	if snd.taxLedgerSent[0].PeriodTo == nil || *snd.taxLedgerSent[0].PeriodTo != "2026-04-30" {
+		t.Errorf("tax-ledger PeriodTo=%v, want 2026-04-30", snd.taxLedgerSent[0].PeriodTo)
 	}
 }
 

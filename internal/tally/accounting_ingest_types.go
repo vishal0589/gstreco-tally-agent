@@ -75,6 +75,9 @@ type AccountingIngestRequestBase struct {
 	RunID         string  `json:"run_id,omitempty"`
 	TallyCompany  string  `json:"tally_company"`
 	TallyEndpoint *string `json:"tally_endpoint,omitempty"`
+	IsFinal       bool    `json:"is_final,omitempty"`
+	PeriodFrom    *string `json:"period_from,omitempty"`
+	PeriodTo      *string `json:"period_to,omitempty"`
 	RequestID     string  `json:"request_id,omitempty"`
 }
 
@@ -83,6 +86,9 @@ type JournalIngestRequestBody struct {
 	Kind          AccountingBatchKind `json:"kind"`
 	TallyCompany  string              `json:"tally_company"`
 	TallyEndpoint *string             `json:"tally_endpoint,omitempty"`
+	IsFinal       bool                `json:"is_final,omitempty"`
+	PeriodFrom    *string             `json:"period_from,omitempty"`
+	PeriodTo      *string             `json:"period_to,omitempty"`
 	RequestID     string              `json:"request_id,omitempty"`
 	Batch         []JournalVoucherRow `json:"batch"`
 }
@@ -92,6 +98,9 @@ type PaymentIngestRequestBody struct {
 	Kind          AccountingBatchKind `json:"kind"`
 	TallyCompany  string              `json:"tally_company"`
 	TallyEndpoint *string             `json:"tally_endpoint,omitempty"`
+	IsFinal       bool                `json:"is_final,omitempty"`
+	PeriodFrom    *string             `json:"period_from,omitempty"`
+	PeriodTo      *string             `json:"period_to,omitempty"`
 	RequestID     string              `json:"request_id,omitempty"`
 	Batch         []PaymentVoucherRow `json:"batch"`
 }
@@ -101,6 +110,9 @@ type TaxLedgerIngestRequestBody struct {
 	Kind          AccountingBatchKind   `json:"kind"`
 	TallyCompany  string                `json:"tally_company"`
 	TallyEndpoint *string               `json:"tally_endpoint,omitempty"`
+	IsFinal       bool                  `json:"is_final,omitempty"`
+	PeriodFrom    *string               `json:"period_from,omitempty"`
+	PeriodTo      *string               `json:"period_to,omitempty"`
 	RequestID     string                `json:"request_id,omitempty"`
 	Batch         []TaxLedgerMonthlyRow `json:"batch"`
 }

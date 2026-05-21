@@ -184,7 +184,18 @@ func runJournalSync(
 	if req.TallyEndpoint != "" {
 		tallyEndpoint = &req.TallyEndpoint
 	}
-	batches := buildJournalBatches(req.RunID, req.RunID, req.TallyCompany, tallyEndpoint, rows, req.BatchSize)
+	periodFrom := req.From.Format("2006-01-02")
+	periodTo := req.To.Format("2006-01-02")
+	batches := buildJournalBatches(
+		req.RunID,
+		req.RunID,
+		req.TallyCompany,
+		tallyEndpoint,
+		&periodFrom,
+		&periodTo,
+		rows,
+		req.BatchSize,
+	)
 	for i, body := range batches {
 		if err := ctx.Err(); err != nil {
 			emit("complete", fmt.Sprintf("aborted: %v (sent=%d, remaining=%d)",
@@ -279,7 +290,18 @@ func runPaymentSync(
 	if req.TallyEndpoint != "" {
 		tallyEndpoint = &req.TallyEndpoint
 	}
-	batches := buildPaymentBatches(req.RunID, req.RunID, req.TallyCompany, tallyEndpoint, rows, req.BatchSize)
+	periodFrom := req.From.Format("2006-01-02")
+	periodTo := req.To.Format("2006-01-02")
+	batches := buildPaymentBatches(
+		req.RunID,
+		req.RunID,
+		req.TallyCompany,
+		tallyEndpoint,
+		&periodFrom,
+		&periodTo,
+		rows,
+		req.BatchSize,
+	)
 	for i, body := range batches {
 		if err := ctx.Err(); err != nil {
 			emit("complete", fmt.Sprintf("aborted: %v (sent=%d, remaining=%d)",
@@ -362,7 +384,18 @@ func runTaxLedgerSync(
 	if req.TallyEndpoint != "" {
 		tallyEndpoint = &req.TallyEndpoint
 	}
-	batches := buildTaxLedgerBatches(req.RunID, req.RunID, req.TallyCompany, tallyEndpoint, rows, req.BatchSize)
+	periodFrom := req.From.Format("2006-01-02")
+	periodTo := req.To.Format("2006-01-02")
+	batches := buildTaxLedgerBatches(
+		req.RunID,
+		req.RunID,
+		req.TallyCompany,
+		tallyEndpoint,
+		&periodFrom,
+		&periodTo,
+		rows,
+		req.BatchSize,
+	)
 	for i, body := range batches {
 		if err := ctx.Err(); err != nil {
 			emit("complete", fmt.Sprintf("aborted: %v (sent=%d, remaining=%d)",
@@ -399,6 +432,7 @@ func runTaxLedgerSync(
 func buildJournalBatches(
 	runID, requestIDPrefix, tallyCompany string,
 	tallyEndpoint *string,
+	periodFrom, periodTo *string,
 	rows []tally.JournalVoucherRow,
 	size int,
 ) []tally.JournalIngestRequestBody {
@@ -410,6 +444,9 @@ func buildJournalBatches(
 			Kind:          tally.AccountingBatchJournal,
 			TallyCompany:  tallyCompany,
 			TallyEndpoint: tallyEndpoint,
+			IsFinal:       i == len(chunks)-1,
+			PeriodFrom:    periodFrom,
+			PeriodTo:      periodTo,
 			RequestID:     requestIDPrefix + "-" + intToStr(i+1),
 			Batch:         chunk,
 		})
@@ -420,6 +457,7 @@ func buildJournalBatches(
 func buildPaymentBatches(
 	runID, requestIDPrefix, tallyCompany string,
 	tallyEndpoint *string,
+	periodFrom, periodTo *string,
 	rows []tally.PaymentVoucherRow,
 	size int,
 ) []tally.PaymentIngestRequestBody {
@@ -431,6 +469,9 @@ func buildPaymentBatches(
 			Kind:          tally.AccountingBatchPayment,
 			TallyCompany:  tallyCompany,
 			TallyEndpoint: tallyEndpoint,
+			IsFinal:       i == len(chunks)-1,
+			PeriodFrom:    periodFrom,
+			PeriodTo:      periodTo,
 			RequestID:     requestIDPrefix + "-" + intToStr(i+1),
 			Batch:         chunk,
 		})
@@ -441,6 +482,7 @@ func buildPaymentBatches(
 func buildTaxLedgerBatches(
 	runID, requestIDPrefix, tallyCompany string,
 	tallyEndpoint *string,
+	periodFrom, periodTo *string,
 	rows []tally.TaxLedgerMonthlyRow,
 	size int,
 ) []tally.TaxLedgerIngestRequestBody {
@@ -452,6 +494,9 @@ func buildTaxLedgerBatches(
 			Kind:          tally.AccountingBatchTaxLedger,
 			TallyCompany:  tallyCompany,
 			TallyEndpoint: tallyEndpoint,
+			IsFinal:       i == len(chunks)-1,
+			PeriodFrom:    periodFrom,
+			PeriodTo:      periodTo,
 			RequestID:     requestIDPrefix + "-" + intToStr(i+1),
 			Batch:         chunk,
 		})
