@@ -77,7 +77,10 @@ func ParseTaxLedgerV3(raw []byte) (TaxLedgerResult, error) {
 
 type xmlTaxLedger struct {
 	Name                 string `xml:"NAME"`
+	NameAttr             string `xml:"NAME,attr"`
+	LedgerName           string `xml:"LEDGERNAME"`
 	Parent               string `xml:"PARENT"`
+	ParentAttr           string `xml:"PARENT,attr"`
 	PeriodOpeningBalance string `xml:"PERIODOPENINGBALANCE"`
 	PeriodDebitTotals    string `xml:"PERIODDEBITTOTALS"`
 	PeriodCreditTotals   string `xml:"PERIODCREDITTOTALS"`
@@ -86,8 +89,15 @@ type xmlTaxLedger struct {
 
 func (x xmlTaxLedger) toRaw() (RawTaxLedger, []string) {
 	row := RawTaxLedger{
-		Name:   strings.TrimSpace(x.Name),
-		Parent: strings.TrimSpace(x.Parent),
+		Name: strings.TrimSpace(firstNonEmpty(
+			x.Name,
+			x.NameAttr,
+			x.LedgerName,
+		)),
+		Parent: strings.TrimSpace(firstNonEmpty(
+			x.Parent,
+			x.ParentAttr,
+		)),
 	}
 	var warnings []string
 
