@@ -44,6 +44,16 @@ const stubResponse = `<ENVELOPE>
   </COLLECTION></DATA></BODY>
 </ENVELOPE>`
 
+const emptyDayBookResponse = `<ENVELOPE>
+  <HEADER><STATUS>1</STATUS></HEADER>
+  <BODY><DATA><COLLECTION></COLLECTION></DATA></BODY>
+</ENVELOPE>`
+
+const emptyTaxLedgerResponse = `<ENVELOPE>
+  <HEADER><STATUS>1</STATUS></HEADER>
+  <BODY><DATA><COLLECTION></COLLECTION></DATA></BODY>
+</ENVELOPE>`
+
 type fakeTally struct {
 	resp    []byte
 	err     error
@@ -168,6 +178,29 @@ func TestRunOne_HappyPath_PostsOneBatch(t *testing.T) {
 	}
 }
 
+func TestRunOne_InvoicePathPostsEmptyFinalBatchWhenNoRows(t *testing.T) {
+	tly := &fakeTally{resp: []byte(emptyDayBookResponse)}
+	snd := &fakeSender{}
+
+	req := makeReq()
+	res, err := RunOne(context.Background(), tly, snd, req, nil)
+	if err != nil {
+		t.Fatalf("RunOne empty invoice sync: %v", err)
+	}
+	if len(snd.sent) != 1 || res.BatchesSent != 1 {
+		t.Fatalf("invoice sends=%d batchesSent=%d, want 1", len(snd.sent), res.BatchesSent)
+	}
+	if len(snd.sent[0].Batch) != 0 {
+		t.Fatalf("invoice empty final batch rows=%d, want 0", len(snd.sent[0].Batch))
+	}
+	if !snd.sent[0].IsFinal {
+		t.Fatal("invoice empty final batch should mark IsFinal=true")
+	}
+	if res.RowCount != 0 {
+		t.Errorf("RowCount=%d, want 0", res.RowCount)
+	}
+}
+
 func TestRunOne_ReferenceOnlyVoucherStillPostsBatch(t *testing.T) {
 	const referenceOnlyVoucher = `<ENVELOPE>
   <HEADER><STATUS>1</STATUS></HEADER>
@@ -256,8 +289,14 @@ func TestRunOne_NormalizeFailureCountsButContinues(t *testing.T) {
 	if res.DroppedOnNormalize != 1 {
 		t.Errorf("DroppedOnNormalize=%d, want 1", res.DroppedOnNormalize)
 	}
-	if res.RowCount != 0 || len(snd.sent) != 0 {
-		t.Errorf("expected nothing sent; rows=%d sent=%d", res.RowCount, len(snd.sent))
+	if res.RowCount != 0 {
+		t.Errorf("RowCount=%d, want 0", res.RowCount)
+	}
+	if len(snd.sent) != 1 {
+		t.Fatalf("empty normalized invoice run should still send one final marker, sent=%d", len(snd.sent))
+	}
+	if len(snd.sent[0].Batch) != 0 || !snd.sent[0].IsFinal {
+		t.Errorf("empty final marker batch=%d is_final=%v, want batch=0 is_final=true", len(snd.sent[0].Batch), snd.sent[0].IsFinal)
 	}
 }
 
@@ -349,6 +388,29 @@ func TestRunOne_JournalPathPostsOneBatch(t *testing.T) {
 	}
 }
 
+func TestRunOne_JournalPathPostsEmptyFinalBatchWhenNoRows(t *testing.T) {
+	tly := &fakeTally{resp: []byte(emptyDayBookResponse)}
+	snd := &fakeSender{}
+	req := makeReq()
+	req.KindName = "journal"
+	req.TallyKind = tally.VoucherJournal
+	req.IngestKind = ""
+
+	res, err := RunOne(context.Background(), tly, snd, req, nil)
+	if err != nil {
+		t.Fatalf("RunOne empty journal sync: %v", err)
+	}
+	if len(snd.journalSent) != 1 || res.BatchesSent != 1 {
+		t.Fatalf("journal sends=%d batchesSent=%d, want 1", len(snd.journalSent), res.BatchesSent)
+	}
+	if len(snd.journalSent[0].Batch) != 0 {
+		t.Fatalf("journal empty final batch rows=%d, want 0", len(snd.journalSent[0].Batch))
+	}
+	if !snd.journalSent[0].IsFinal {
+		t.Fatal("journal empty final batch should mark IsFinal=true")
+	}
+}
+
 func TestRunOne_PaymentPathPostsOneBatch(t *testing.T) {
 	const paymentResponse = `<ENVELOPE>
   <HEADER><STATUS>1</STATUS></HEADER>
@@ -417,6 +479,29 @@ func TestRunOne_PaymentPathPostsOneBatch(t *testing.T) {
 	}
 }
 
+func TestRunOne_PaymentPathPostsEmptyFinalBatchWhenNoRows(t *testing.T) {
+	tly := &fakeTally{resp: []byte(emptyDayBookResponse)}
+	snd := &fakeSender{}
+	req := makeReq()
+	req.KindName = "payment"
+	req.TallyKind = tally.VoucherPayment
+	req.IngestKind = ""
+
+	res, err := RunOne(context.Background(), tly, snd, req, nil)
+	if err != nil {
+		t.Fatalf("RunOne empty payment sync: %v", err)
+	}
+	if len(snd.paymentSent) != 1 || res.BatchesSent != 1 {
+		t.Fatalf("payment sends=%d batchesSent=%d, want 1", len(snd.paymentSent), res.BatchesSent)
+	}
+	if len(snd.paymentSent[0].Batch) != 0 {
+		t.Fatalf("payment empty final batch rows=%d, want 0", len(snd.paymentSent[0].Batch))
+	}
+	if !snd.paymentSent[0].IsFinal {
+		t.Fatal("payment empty final batch should mark IsFinal=true")
+	}
+}
+
 func TestRunOne_TaxLedgerPathPostsOneBatch(t *testing.T) {
 	const taxLedgerResponse = `<ENVELOPE>
   <HEADER><STATUS>1</STATUS></HEADER>
@@ -467,6 +552,29 @@ func TestRunOne_TaxLedgerPathPostsOneBatch(t *testing.T) {
 	}
 	if snd.taxLedgerSent[0].PeriodTo == nil || *snd.taxLedgerSent[0].PeriodTo != "2026-04-30" {
 		t.Errorf("tax-ledger PeriodTo=%v, want 2026-04-30", snd.taxLedgerSent[0].PeriodTo)
+	}
+}
+
+func TestRunOne_TaxLedgerPathPostsEmptyFinalBatchWhenNoRows(t *testing.T) {
+	tly := &fakeTally{resp: []byte(emptyTaxLedgerResponse)}
+	snd := &fakeSender{}
+	req := makeReq()
+	req.KindName = "tax_ledger"
+	req.TallyKind = ""
+	req.IngestKind = ""
+
+	res, err := RunOne(context.Background(), tly, snd, req, nil)
+	if err != nil {
+		t.Fatalf("RunOne empty tax-ledger sync: %v", err)
+	}
+	if len(snd.taxLedgerSent) != 1 || res.BatchesSent != 1 {
+		t.Fatalf("tax-ledger sends=%d batchesSent=%d, want 1", len(snd.taxLedgerSent), res.BatchesSent)
+	}
+	if len(snd.taxLedgerSent[0].Batch) != 0 {
+		t.Fatalf("tax-ledger empty final batch rows=%d, want 0", len(snd.taxLedgerSent[0].Batch))
+	}
+	if !snd.taxLedgerSent[0].IsFinal {
+		t.Fatal("tax-ledger empty final batch should mark IsFinal=true")
 	}
 }
 

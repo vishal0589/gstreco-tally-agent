@@ -64,11 +64,6 @@ func runInvoiceSync(
 	emit("normalized", fmt.Sprintf("%d ingest rows (dropped %d on normalize)",
 		len(rows), res.DroppedOnNormalize))
 
-	if len(rows) == 0 {
-		emit("complete", "nothing to send")
-		return res, nil
-	}
-
 	chunks := ingest.SplitRows(rows, req.BatchSize)
 	var tallyEndpoint *string
 	if req.TallyEndpoint != "" {
@@ -76,6 +71,9 @@ func runInvoiceSync(
 	}
 	periodFrom := req.From.Format("2006-01-02")
 	periodTo := req.To.Format("2006-01-02")
+	if len(chunks) == 0 {
+		chunks = [][]tally.IngestVoucherRow{{}}
+	}
 	batches := ingest.BuildBatches(req.RunID, req.RunID, req.IngestKind,
 		req.TallyCompany, tallyEndpoint, req.RunKind, &periodFrom, &periodTo, chunks)
 
@@ -175,10 +173,6 @@ func runJournalSync(
 	res.RowCount = len(rows)
 	emit("normalized", fmt.Sprintf("%d %s rows (dropped %d on normalize)",
 		len(rows), req.KindName, res.DroppedOnNormalize))
-	if len(rows) == 0 {
-		emit("complete", "nothing to send")
-		return res, nil
-	}
 
 	var tallyEndpoint *string
 	if req.TallyEndpoint != "" {
@@ -281,10 +275,6 @@ func runPaymentSync(
 	res.RowCount = len(rows)
 	emit("normalized", fmt.Sprintf("%d %s rows (dropped %d on normalize)",
 		len(rows), req.KindName, res.DroppedOnNormalize))
-	if len(rows) == 0 {
-		emit("complete", "nothing to send")
-		return res, nil
-	}
 
 	var tallyEndpoint *string
 	if req.TallyEndpoint != "" {
@@ -375,10 +365,6 @@ func runTaxLedgerSync(
 	rows := tally.NormalizeTaxLedgerRows(parsed.Ledgers, period)
 	res.RowCount = len(rows)
 	emit("normalized", fmt.Sprintf("%d tax-ledger rows prepared", len(rows)))
-	if len(rows) == 0 {
-		emit("complete", "nothing to send")
-		return res, nil
-	}
 
 	var tallyEndpoint *string
 	if req.TallyEndpoint != "" {
@@ -437,6 +423,9 @@ func buildJournalBatches(
 	size int,
 ) []tally.JournalIngestRequestBody {
 	chunks := splitGenericRows(rows, size)
+	if len(chunks) == 0 {
+		chunks = [][]tally.JournalVoucherRow{{}}
+	}
 	out := make([]tally.JournalIngestRequestBody, 0, len(chunks))
 	for i, chunk := range chunks {
 		out = append(out, tally.JournalIngestRequestBody{
@@ -462,6 +451,9 @@ func buildPaymentBatches(
 	size int,
 ) []tally.PaymentIngestRequestBody {
 	chunks := splitGenericRows(rows, size)
+	if len(chunks) == 0 {
+		chunks = [][]tally.PaymentVoucherRow{{}}
+	}
 	out := make([]tally.PaymentIngestRequestBody, 0, len(chunks))
 	for i, chunk := range chunks {
 		out = append(out, tally.PaymentIngestRequestBody{
@@ -487,6 +479,9 @@ func buildTaxLedgerBatches(
 	size int,
 ) []tally.TaxLedgerIngestRequestBody {
 	chunks := splitGenericRows(rows, size)
+	if len(chunks) == 0 {
+		chunks = [][]tally.TaxLedgerMonthlyRow{{}}
+	}
 	out := make([]tally.TaxLedgerIngestRequestBody, 0, len(chunks))
 	for i, chunk := range chunks {
 		out = append(out, tally.TaxLedgerIngestRequestBody{
