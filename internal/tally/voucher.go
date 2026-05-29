@@ -27,8 +27,18 @@ const (
 // "absent" and the ingest layer decides which gaps are fatal. Field names and
 // XML tags mirror Tally Prime 3.x's collection output.
 type RawVoucher struct {
-	// GUID uniquely identifies a voucher across edits. Stable across amendments.
+	// RawXML preserves the sanitized voucher XML subtree that produced this
+	// voucher. It is intentionally separate from parsed fields so audit/debug
+	// paths can inspect original Tally shape without flattening tag names.
+	RawXML string
+	// GUID is Tally's preferred stable voucher identifier when the export
+	// includes it. Some real-world invoice vouchers omit GUID entirely, so
+	// downstream logic must tolerate it being blank.
 	GUID string
+	// MasterID is Tally's internal transaction master identifier. Unlike
+	// AlterID, it does not change on every edit, so it is the safest fallback
+	// identity when invoice-facing fields are absent.
+	MasterID string
 	// AlterID increases every time the voucher is touched. Used as the
 	// incremental sync cursor ($AlterID watermark, pain #13).
 	AlterID int64
@@ -40,7 +50,9 @@ type RawVoucher struct {
 	// Tally's built-in classification ($$IsSales / $$IsPurchase / …).
 	VoucherType string
 	// VoucherNumber is the human-readable number ("PI/001/26-27"). Not unique
-	// across companies or fiscal years; dedup must use GUID.
+	// across companies or fiscal years; when GUID is missing the server still
+	// dedups on GSTIN + normalized invoice number + invoice date, so this is
+	// one fallback identity signal, not a universal primary key.
 	VoucherNumber string
 	// Reference is the customer/supplier invoice number as entered in Tally
 	// ("Reference / Ref. No." field). Often the number the counterparty sees.
@@ -82,6 +94,10 @@ type RawVoucher struct {
 	// service-only purchases have none. Used for tax-rate reconciliation and
 	// line-item drill-down in the reco inspector.
 	InventoryEntries []InventoryEntry
+	// UnknownChildren preserves direct voucher child nodes not modelled above,
+	// including UDF nodes. Tally customisations are common; keeping the raw
+	// child XML prevents parser upgrades from becoming lossy.
+	UnknownChildren []UnknownXMLNode
 }
 
 // LedgerEntry is one debit/credit row inside a voucher. Tally uses sign to
@@ -107,8 +123,20 @@ type LedgerEntry struct {
 	IsPartyLedger bool
 	// BillAllocations is how Tally splits a single ledger line across multiple
 	// bills ("consolidated voucher", pain #8). One ledger entry + N bill
-	// allocations = N IngestVoucherRow rows, each with parent_ref=<Voucher.GUID>.
+	// allocations = N IngestVoucherRow rows, each with parent_ref carrying the
+	// best voucher-level identity the agent has available.
 	BillAllocations []BillRef
+	// BankAllocations are payment/banking child rows under this exact ledger
+	// entry. AMOUNT/DATE/NAME inside this list have bank-allocation meaning,
+	// not voucher or bill meaning.
+	BankAllocations []BankAllocation
+	// RateDetails are GST rate child rows under this exact ledger entry.
+	RateDetails []RateDetail
+	// IsDeemedPositive preserves Tally's debit/credit sign hint beside Amount.
+	IsDeemedPositive bool
+	// IsDeemedPositiveSet distinguishes an omitted tag from an explicit No.
+	IsDeemedPositiveSet bool
+	UnknownChildren     []UnknownXMLNode
 }
 
 // BillRef is one bill allocation under a ledger entry. When multiple bills are
@@ -130,12 +158,91 @@ type BillRef struct {
 // InventoryEntry is one stock-item row inside an inventory voucher. Optional
 // fields left zero when Tally omits them (service-only purchases).
 type InventoryEntry struct {
-	StockItem string
-	Quantity  float64
-	Unit      string
-	Rate      float64
-	Amount    float64
+	StockItem  string
+	Quantity   float64
+	Unit       string
+	BilledQty  float64
+	BilledUnit string
+	Rate       float64
+	Amount     float64
 	// HSN from the stock-item master. Used as a fallback when the voucher
 	// doesn't carry a line-level HSN.
-	HSN string
+	HSN                   string
+	IsDeemedPositive      bool
+	IsDeemedPositiveSet   bool
+	BatchAllocations      []BatchAllocation
+	AccountingAllocations []AccountingAllocation
+	RateDetails           []RateDetail
+	UnknownChildren       []UnknownXMLNode
+}
+
+// BankAllocation is one BANKALLOCATIONS.LIST row under a ledger entry. It is
+// deliberately not merged with BillRef: DATE, NAME and AMOUNT here describe
+// bank/payment metadata, not invoice references.
+type BankAllocation struct {
+	Name                  string
+	Date                  time.Time
+	InstrumentDate        time.Time
+	TransactionType       string
+	PaymentMode           string
+	BankName              string
+	BankPartyName         string
+	PaymentFavouring      string
+	InstrumentNumber      string
+	UniqueReferenceNumber string
+	Status                string
+	Amount                float64
+	UnknownChildren       []UnknownXMLNode
+}
+
+// BatchAllocation is one BATCHALLOCATIONS.LIST row under an inventory entry.
+// AMOUNT/ACTUALQTY/BILLEDQTY here are batch-scoped, not voucher totals.
+type BatchAllocation struct {
+	BatchName             string
+	GodownName            string
+	DestinationGodownName string
+	TrackingNumber        string
+	OrderNumber           string
+	ActualQty             float64
+	ActualUnit            string
+	BilledQty             float64
+	BilledUnit            string
+	Amount                float64
+	UnknownChildren       []UnknownXMLNode
+}
+
+// AccountingAllocation is one ACCOUNTINGALLOCATIONS.LIST row under an
+// inventory line. LEDGERNAME/AMOUNT here belong to the stock item allocation,
+// not the voucher's top-level ledger rows.
+type AccountingAllocation struct {
+	LedgerName          string
+	Amount              float64
+	GSTClass            string
+	IsDeemedPositive    bool
+	IsDeemedPositiveSet bool
+	BillAllocations     []BillRef
+	BankAllocations     []BankAllocation
+	RateDetails         []RateDetail
+	UnknownChildren     []UnknownXMLNode
+}
+
+// RateDetail is one RATEDETAILS.LIST row under a ledger, inventory, or
+// accounting allocation parent. Its parent path is what gives RATE meaning.
+type RateDetail struct {
+	DutyHead        string
+	ValuationType   string
+	Rate            float64
+	RatePerUnit     float64
+	UnknownChildren []UnknownXMLNode
+}
+
+// UnknownXMLNode preserves unmodelled direct child nodes with their parent
+// path and sibling index so future parser work can recover meaning without
+// going back to Tally.
+type UnknownXMLNode struct {
+	Path         string
+	Name         string
+	SiblingIndex int
+	InnerXML     string
+	Text         string
 }

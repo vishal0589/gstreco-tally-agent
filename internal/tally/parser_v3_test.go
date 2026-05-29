@@ -36,6 +36,9 @@ func TestParseDayBookV3_PurchaseSingle(t *testing.T) {
 	if v.GUID != "fixture-purchase-single-0001" {
 		t.Errorf("GUID = %q", v.GUID)
 	}
+	if v.MasterID != "700001" {
+		t.Errorf("MasterID = %q, want 700001", v.MasterID)
+	}
 	if v.AlterID != 12345 {
 		t.Errorf("AlterID = %d, want 12345", v.AlterID)
 	}
@@ -179,6 +182,9 @@ func TestParseDayBookV3_EmptyCollection(t *testing.T) {
 	if got.Status != 1 {
 		t.Errorf("Status = %d, want 1", got.Status)
 	}
+	if len(got.Warnings) != 0 {
+		t.Errorf("Warnings = %v, want none for empty collection", got.Warnings)
+	}
 }
 
 func TestParseDayBookV3_WrappedInTallyMessage(t *testing.T) {
@@ -214,8 +220,9 @@ func TestParseDayBookV3_MalformedXMLReturnsError(t *testing.T) {
 }
 
 func TestParseDayBookV3_DropsVoucherWithoutIdentifiers(t *testing.T) {
-	// A voucher with no GUID and no VOUCHERNUMBER is untrackable — parser
-	// drops it with a warning rather than shipping a ghost row to the server.
+	// A voucher with no GUID, voucher number, reference, or usable bill ref is
+	// untrackable — parser drops it with a warning rather than shipping a ghost
+	// row to the server.
 	minimal := []byte(`<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE><HEADER><STATUS>1</STATUS></HEADER><BODY><DATA><COLLECTION>
   <VOUCHER><DATE>20260401</DATE><VOUCHERTYPENAME>X</VOUCHERTYPENAME></VOUCHER>
@@ -230,6 +237,272 @@ func TestParseDayBookV3_DropsVoucherWithoutIdentifiers(t *testing.T) {
 	}
 	if len(got.Warnings) == 0 || !strings.Contains(got.Warnings[0], "dropped") {
 		t.Errorf("expected a 'dropped' warning, got %v", got.Warnings)
+	}
+}
+
+func TestParseDayBookV3_KeepsVoucherWithoutGUIDOrVoucherNumberWhenFallbackIdentityExists(t *testing.T) {
+	xml := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE><HEADER><STATUS>1</STATUS></HEADER><BODY><DATA><COLLECTION>
+  <VOUCHER>
+    <DATE>20260401</DATE>
+    <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+    <REFERENCE>SUPP-INV-5501</REFERENCE>
+  </VOUCHER>
+  <VOUCHER>
+    <DATE>20260402</DATE>
+    <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+    <PARTYLEDGERNAME>ABC Vendors Ltd</PARTYLEDGERNAME>
+    <ALLLEDGERENTRIES.LIST>
+      <LEDGERNAME>ABC Vendors Ltd</LEDGERNAME>
+      <AMOUNT>-118000.00</AMOUNT>
+      <BILLALLOCATIONS.LIST>
+        <NAME>PQR/APR/101</NAME>
+        <BILLTYPE>New Ref</BILLTYPE>
+        <AMOUNT>-118000.00</AMOUNT>
+      </BILLALLOCATIONS.LIST>
+    </ALLLEDGERENTRIES.LIST>
+  </VOUCHER>
+</COLLECTION></DATA></BODY></ENVELOPE>`)
+
+	got, err := ParseDayBookV3(xml)
+	if err != nil {
+		t.Fatalf("ParseDayBookV3: %v", err)
+	}
+	if len(got.Vouchers) != 2 {
+		t.Fatalf("Vouchers = %d, want 2", len(got.Vouchers))
+	}
+	if got.Vouchers[0].Reference != "SUPP-INV-5501" {
+		t.Errorf("Reference = %q", got.Vouchers[0].Reference)
+	}
+	if len(got.Vouchers[1].LedgerEntries) != 1 {
+		t.Fatalf("LedgerEntries = %d, want 1", len(got.Vouchers[1].LedgerEntries))
+	}
+	if len(got.Vouchers[1].LedgerEntries[0].BillAllocations) != 1 {
+		t.Fatalf("BillAllocations = %d, want 1", len(got.Vouchers[1].LedgerEntries[0].BillAllocations))
+	}
+	if got.Vouchers[1].LedgerEntries[0].BillAllocations[0].Name != "PQR/APR/101" {
+		t.Errorf("BillAllocations[0].Name = %q", got.Vouchers[1].LedgerEntries[0].BillAllocations[0].Name)
+	}
+	if len(got.Warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", got.Warnings)
+	}
+}
+
+func TestParseDayBookV3_KeepsVoucherWithOnlyMasterID(t *testing.T) {
+	xml := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE><HEADER><STATUS>1</STATUS></HEADER><BODY><DATA><COLLECTION>
+  <VOUCHER>
+    <DATE>20260401</DATE>
+    <MASTERID>900012</MASTERID>
+    <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+    <ISINVOICE>Yes</ISINVOICE>
+    <PARTYLEDGERNAME>Fallback Vendor</PARTYLEDGERNAME>
+    <ALLLEDGERENTRIES.LIST>
+      <LEDGERNAME>Fallback Vendor</LEDGERNAME>
+      <AMOUNT>-11800.00</AMOUNT>
+    </ALLLEDGERENTRIES.LIST>
+    <ALLLEDGERENTRIES.LIST>
+      <LEDGERNAME>Purchases A/c</LEDGERNAME>
+      <AMOUNT>10000.00</AMOUNT>
+    </ALLLEDGERENTRIES.LIST>
+    <ALLLEDGERENTRIES.LIST>
+      <LEDGERNAME>IGST @ 18%</LEDGERNAME>
+      <GSTCLASS>IGST@18</GSTCLASS>
+      <AMOUNT>1800.00</AMOUNT>
+    </ALLLEDGERENTRIES.LIST>
+  </VOUCHER>
+</COLLECTION></DATA></BODY></ENVELOPE>`)
+
+	got, err := ParseDayBookV3(xml)
+	if err != nil {
+		t.Fatalf("ParseDayBookV3: %v", err)
+	}
+	if len(got.Vouchers) != 1 {
+		t.Fatalf("Vouchers = %d, want 1", len(got.Vouchers))
+	}
+	if got.Vouchers[0].MasterID != "900012" {
+		t.Errorf("MasterID = %q, want 900012", got.Vouchers[0].MasterID)
+	}
+	if len(got.Warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", got.Warnings)
+	}
+}
+
+func TestParseDayBookV3_KeepsVoucherWithNarrationInvoiceHint(t *testing.T) {
+	xml := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE><HEADER><STATUS>1</STATUS></HEADER><BODY><DATA><COLLECTION>
+  <VOUCHER>
+    <DATE>20260401</DATE>
+    <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+    <ISINVOICE>Yes</ISINVOICE>
+    <NARRATION>Purchase against supplier invoice SUPP-INV-5501</NARRATION>
+    <PARTYLEDGERNAME>Fallback Vendor</PARTYLEDGERNAME>
+    <ALLLEDGERENTRIES.LIST>
+      <LEDGERNAME>Fallback Vendor</LEDGERNAME>
+      <AMOUNT>-11800.00</AMOUNT>
+    </ALLLEDGERENTRIES.LIST>
+    <ALLLEDGERENTRIES.LIST>
+      <LEDGERNAME>Purchases A/c</LEDGERNAME>
+      <AMOUNT>10000.00</AMOUNT>
+    </ALLLEDGERENTRIES.LIST>
+    <ALLLEDGERENTRIES.LIST>
+      <LEDGERNAME>IGST @ 18%</LEDGERNAME>
+      <GSTCLASS>IGST@18</GSTCLASS>
+      <AMOUNT>1800.00</AMOUNT>
+    </ALLLEDGERENTRIES.LIST>
+  </VOUCHER>
+</COLLECTION></DATA></BODY></ENVELOPE>`)
+
+	got, err := ParseDayBookV3(xml)
+	if err != nil {
+		t.Fatalf("ParseDayBookV3: %v", err)
+	}
+	if len(got.Vouchers) != 1 {
+		t.Fatalf("Vouchers = %d, want 1", len(got.Vouchers))
+	}
+	if hint := invoiceNumberHintFromNarration(got.Vouchers[0].Narration); hint != "SUPP-INV-5501" {
+		t.Errorf("invoice hint = %q, want SUPP-INV-5501", hint)
+	}
+}
+
+func TestParseDayBookV3_PathAwareListsAllocationsAndUnknownNodes(t *testing.T) {
+	xml := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><STATUS>1</STATUS></HEADER>
+  <BODY><DATA><COLLECTION>
+    <VOUCHER xmlns:UDF="TallyUDF">
+      <DATE>20260403</DATE>
+      <GUID>path-aware-0001</GUID>
+      <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+      <VOUCHERNUMBER>PV/003</VOUCHERNUMBER>
+      <PARTYLEDGERNAME>IPAF Vendor</PARTYLEDGERNAME>
+      <ISINVOICE>Yes</ISINVOICE>
+      <LEDGERENTRIES.LIST>
+        <LEDGERNAME>IPAF Vendor</LEDGERNAME>
+        <ISPARTYLEDGER>Yes</ISPARTYLEDGER>
+        <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+        <AMOUNT>-1180.00</AMOUNT>
+        <BILLALLOCATIONS.LIST>
+          <NAME>IPAF-INV-3</NAME>
+          <BILLTYPE>New Ref</BILLTYPE>
+          <AMOUNT>-1180.00</AMOUNT>
+        </BILLALLOCATIONS.LIST>
+        <BANKALLOCATIONS.LIST>
+          <DATE>20260403</DATE>
+          <INSTRUMENTDATE>20260404</INSTRUMENTDATE>
+          <NAME>NEFT-3</NAME>
+          <TRANSACTIONTYPE>Inter Bank Transfer</TRANSACTIONTYPE>
+          <BANKNAME>HDFC Bank</BANKNAME>
+          <AMOUNT>-1180.00</AMOUNT>
+        </BANKALLOCATIONS.LIST>
+        <RATEDETAILS.LIST>
+          <GSTRATEDUTYHEAD>Integrated Tax</GSTRATEDUTYHEAD>
+          <GSTRATEVALUATIONTYPE>Based on Value</GSTRATEVALUATIONTYPE>
+          <GSTRATE>18</GSTRATE>
+        </RATEDETAILS.LIST>
+      </LEDGERENTRIES.LIST>
+      <LEDGERENTRIES.LIST>
+        <LEDGERNAME>Purchase A/c</LEDGERNAME>
+        <AMOUNT>1000.00</AMOUNT>
+      </LEDGERENTRIES.LIST>
+      <ALLINVENTORYENTRIES.LIST>
+        <STOCKITEMNAME>Archive Camera</STOCKITEMNAME>
+        <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+        <ACTUALQTY>2 PCS</ACTUALQTY>
+        <BILLEDQTY>2 PCS</BILLEDQTY>
+        <RATE>500.00/PCS</RATE>
+        <AMOUNT>1000.00</AMOUNT>
+        <GSTHSNNAME>9006</GSTHSNNAME>
+        <BATCHALLOCATIONS.LIST>
+          <GODOWNNAME>Main Store</GODOWNNAME>
+          <BATCHNAME>B-001</BATCHNAME>
+          <ACTUALQTY>1 PCS</ACTUALQTY>
+          <BILLEDQTY>1 PCS</BILLEDQTY>
+          <AMOUNT>500.00</AMOUNT>
+          <UDF:BATCHNOTE>keep batch udf</UDF:BATCHNOTE>
+        </BATCHALLOCATIONS.LIST>
+        <ACCOUNTINGALLOCATIONS.LIST>
+          <LEDGERNAME>Purchase A/c</LEDGERNAME>
+          <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+          <AMOUNT>1000.00</AMOUNT>
+          <RATEDETAILS.LIST>
+            <GSTRATEDUTYHEAD>Integrated Tax</GSTRATEDUTYHEAD>
+            <GSTRATE>18</GSTRATE>
+          </RATEDETAILS.LIST>
+        </ACCOUNTINGALLOCATIONS.LIST>
+        <RATEDETAILS.LIST>
+          <GSTRATEDUTYHEAD>Integrated Tax</GSTRATEDUTYHEAD>
+          <GSTRATE>18</GSTRATE>
+        </RATEDETAILS.LIST>
+      </ALLINVENTORYENTRIES.LIST>
+      <INVENTORYENTRIESIN.LIST>
+        <STOCKITEMNAME>Inbound Sample</STOCKITEMNAME>
+        <ACTUALQTY>1 PCS</ACTUALQTY>
+        <AMOUNT>100.00</AMOUNT>
+      </INVENTORYENTRIESIN.LIST>
+      <INVENTORYENTRIESOUT.LIST>
+        <STOCKITEMNAME>Outbound Sample</STOCKITEMNAME>
+        <ACTUALQTY>-1 PCS</ACTUALQTY>
+        <AMOUNT>-100.00</AMOUNT>
+      </INVENTORYENTRIESOUT.LIST>
+      <UDF:IPAFNOTE.LIST>
+        <UDF:IPAFNOTE>preserve me</UDF:IPAFNOTE>
+      </UDF:IPAFNOTE.LIST>
+    </VOUCHER>
+  </COLLECTION></DATA></BODY>
+</ENVELOPE>`)
+
+	got, err := ParseDayBookV3(xml)
+	if err != nil {
+		t.Fatalf("ParseDayBookV3: %v", err)
+	}
+	if len(got.Vouchers) != 1 {
+		t.Fatalf("Vouchers = %d, want 1", len(got.Vouchers))
+	}
+	v := got.Vouchers[0]
+	if !strings.Contains(v.RawXML, "<VOUCHER") || !strings.Contains(v.RawXML, "UDF:IPAFNOTE") {
+		t.Fatalf("RawXML did not preserve voucher subtree: %q", v.RawXML)
+	}
+	if len(v.LedgerEntries) != 2 {
+		t.Fatalf("LedgerEntries = %d, want 2 from LEDGERENTRIES.LIST", len(v.LedgerEntries))
+	}
+	party := v.LedgerEntries[0]
+	if !party.IsPartyLedger || !party.IsDeemedPositiveSet || !party.IsDeemedPositive {
+		t.Errorf("party flags = party:%v deemedSet:%v deemed:%v", party.IsPartyLedger, party.IsDeemedPositiveSet, party.IsDeemedPositive)
+	}
+	if len(party.BillAllocations) != 1 || party.BillAllocations[0].Name != "IPAF-INV-3" {
+		t.Fatalf("BillAllocations = %+v", party.BillAllocations)
+	}
+	if len(party.BankAllocations) != 1 {
+		t.Fatalf("BankAllocations = %d, want 1", len(party.BankAllocations))
+	}
+	if party.BankAllocations[0].Name != "NEFT-3" || party.BankAllocations[0].Amount != -1180 {
+		t.Errorf("BankAllocation = %+v", party.BankAllocations[0])
+	}
+	if len(party.RateDetails) != 1 || party.RateDetails[0].DutyHead != "Integrated Tax" || party.RateDetails[0].Rate != 18 {
+		t.Errorf("ledger RateDetails = %+v", party.RateDetails)
+	}
+	if len(v.InventoryEntries) != 3 {
+		t.Fatalf("InventoryEntries = %d, want ALL + IN + OUT variants", len(v.InventoryEntries))
+	}
+	inv := v.InventoryEntries[0]
+	if inv.StockItem != "Archive Camera" || inv.Quantity != 2 || inv.BilledQty != 2 || inv.Rate != 500 || inv.HSN != "9006" {
+		t.Errorf("InventoryEntry = %+v", inv)
+	}
+	if len(inv.BatchAllocations) != 1 || inv.BatchAllocations[0].BatchName != "B-001" || inv.BatchAllocations[0].ActualQty != 1 {
+		t.Fatalf("BatchAllocations = %+v", inv.BatchAllocations)
+	}
+	if len(inv.BatchAllocations[0].UnknownChildren) != 1 || inv.BatchAllocations[0].UnknownChildren[0].Name != "UDF:BATCHNOTE" {
+		t.Errorf("batch unknown children = %+v", inv.BatchAllocations[0].UnknownChildren)
+	}
+	if len(inv.AccountingAllocations) != 1 || inv.AccountingAllocations[0].LedgerName != "Purchase A/c" || inv.AccountingAllocations[0].Amount != 1000 {
+		t.Fatalf("AccountingAllocations = %+v", inv.AccountingAllocations)
+	}
+	if len(inv.AccountingAllocations[0].RateDetails) != 1 || inv.AccountingAllocations[0].RateDetails[0].Rate != 18 {
+		t.Errorf("accounting allocation RateDetails = %+v", inv.AccountingAllocations[0].RateDetails)
+	}
+	if len(v.UnknownChildren) != 1 || v.UnknownChildren[0].Name != "UDF:IPAFNOTE.LIST" || v.UnknownChildren[0].SiblingIndex != 0 {
+		t.Errorf("voucher unknown children = %+v", v.UnknownChildren)
 	}
 }
 
@@ -380,10 +653,10 @@ func TestStripIllegalCharRefs_DropsControlChars(t *testing.T) {
 		{`<X>&#4; Not Applicable</X>`, `<X> Not Applicable</X>`},
 		{`<X>&#x04;hi</X>`, `<X>hi</X>`},
 		{`<X>&#0;&#1;&#2;hello</X>`, `<X>hello</X>`},
-		{`<X>&#9;tab</X>`, `<X>&#9;tab</X>`},      // tab is valid, keep
-		{`<X>&#65;</X>`, `<X>&#65;</X>`},          // 'A' is valid, keep
-		{`<X>&#xff;hi</X>`, `<X>&#xff;hi</X>`},    // 0xFF (255) is valid, keep
-		{`<X>&amp;</X>`, `<X>&amp;</X>`},          // entity ref, not numeric — leave alone
+		{`<X>&#9;tab</X>`, `<X>&#9;tab</X>`},       // tab is valid, keep
+		{`<X>&#65;</X>`, `<X>&#65;</X>`},           // 'A' is valid, keep
+		{`<X>&#xff;hi</X>`, `<X>&#xff;hi</X>`},     // 0xFF (255) is valid, keep
+		{`<X>&amp;</X>`, `<X>&amp;</X>`},           // entity ref, not numeric — leave alone
 		{`<X>plain text</X>`, `<X>plain text</X>`}, // no refs at all
 	}
 	for _, c := range cases {

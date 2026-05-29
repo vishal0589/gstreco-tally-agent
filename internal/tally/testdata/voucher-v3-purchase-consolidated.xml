@@ -10,6 +10,7 @@
         <VOUCHER VCHTYPE="GST Purchase" ACTION="Create">
           <DATE>20260418</DATE>
           <GUID>fixture-purchase-consolidated-0001</GUID>
+          <MASTERID>700019</MASTERID>
           <ALTERID>12500</ALTERID>
           <VOUCHERTYPENAME>GST Purchase</VOUCHERTYPENAME>
           <VOUCHERNUMBER>PI/019/26-27</VOUCHERNUMBER>

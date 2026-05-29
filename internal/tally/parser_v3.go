@@ -32,8 +32,10 @@ var illegalCharRefRE = regexp.MustCompile(`&#[xX]?[0-9a-fA-F]+;`)
 //
 // Each dump filename is "parse-fail-<unix>-<stage>.bin" so multiple
 // failures in one tick land in distinct files. Caller passes:
-//   rawOriginal: bytes as received from Tally HTTP response
-//   raw:         bytes after decodeTallyResponse + sanitizeXMLBytes
+//
+//	rawOriginal: bytes as received from Tally HTTP response
+//	raw:         bytes after decodeTallyResponse + sanitizeXMLBytes
+//
 // Comparing the two reveals whether the pipeline introduced the
 // illegal char or it was in Tally's response from the start.
 func dumpDebugResponse(rawOriginal, raw []byte, parseErr error) {
@@ -150,18 +152,28 @@ func ParseDayBookV3(raw []byte) (ParseResult, error) {
 				}
 			}
 		case "VOUCHER":
+			rawStart := findElementStartOffset(raw, start.Name.Local, dec.InputOffset())
 			var v xmlVoucher
 			if err := dec.DecodeElement(&v, &start); err != nil {
 				result.Warnings = append(result.Warnings, fmt.Sprintf("voucher decode: %v", err))
 				continue
 			}
-			raw, warnings := v.toRaw()
+			voucher, warnings := v.toRaw()
+			if rawStart >= 0 {
+				rawEnd := int(dec.InputOffset())
+				if rawEnd <= len(raw) && rawStart < rawEnd {
+					voucher.RawXML = string(raw[rawStart:rawEnd])
+				}
+			}
 			result.Warnings = append(result.Warnings, warnings...)
-			if raw.GUID == "" && raw.VoucherNumber == "" && raw.Reference == "" {
-				result.Warnings = append(result.Warnings, "voucher dropped: missing GUID, VoucherNumber, and Reference")
+			if isEmptyVoucherShell(voucher) {
 				continue
 			}
-			result.Vouchers = append(result.Vouchers, raw)
+			if !hasUsableVoucherIdentity(voucher) {
+				result.Warnings = append(result.Warnings, "voucher dropped: missing invoice-facing identity and stable internal fallback")
+				continue
+			}
+			result.Vouchers = append(result.Vouchers, voucher)
 		}
 	}
 	return result, nil
@@ -172,42 +184,113 @@ func ParseDayBookV3(raw []byte) (ParseResult, error) {
 // happens in toRaw() so the error path is inside the agent, not in
 // encoding/xml's unhelpful "cannot unmarshal into int" messages.
 type xmlVoucher struct {
-	Date             string              `xml:"DATE"`
-	GUID             string              `xml:"GUID"`
-	AlterID          string              `xml:"ALTERID"`
-	VoucherType      string              `xml:"VOUCHERTYPENAME"`
-	VoucherNumber    string              `xml:"VOUCHERNUMBER"`
-	Reference        string              `xml:"REFERENCE"`
-	PartyLedgerName  string              `xml:"PARTYLEDGERNAME"`
-	PartyGSTIN       string              `xml:"PARTYGSTIN"`
-	PlaceOfSupply    string              `xml:"PLACEOFSUPPLY"`
-	IsInvoice        string              `xml:"ISINVOICE"`
-	IsCancelled      string              `xml:"ISCANCELLED"`
-	IsRcmApplicable  string              `xml:"ISRCMAPPLICABLE"`
-	Narration        string              `xml:"NARRATION"`
-	LedgerEntries    []xmlLedgerEntry    `xml:"ALLLEDGERENTRIES.LIST"`
-	InventoryEntries []xmlInventoryEntry `xml:"INVENTORYENTRIES.LIST"`
+	Date                string              `xml:"DATE"`
+	GUID                string              `xml:"GUID"`
+	MasterID            string              `xml:"MASTERID"`
+	AlterID             string              `xml:"ALTERID"`
+	VoucherType         string              `xml:"VOUCHERTYPENAME"`
+	VoucherNumber       string              `xml:"VOUCHERNUMBER"`
+	Reference           string              `xml:"REFERENCE"`
+	PartyLedgerName     string              `xml:"PARTYLEDGERNAME"`
+	PartyGSTIN          string              `xml:"PARTYGSTIN"`
+	PlaceOfSupply       string              `xml:"PLACEOFSUPPLY"`
+	IsInvoice           string              `xml:"ISINVOICE"`
+	IsCancelled         string              `xml:"ISCANCELLED"`
+	IsRcmApplicable     string              `xml:"ISRCMAPPLICABLE"`
+	Narration           string              `xml:"NARRATION"`
+	AllLedgerEntries    []xmlLedgerEntry    `xml:"ALLLEDGERENTRIES.LIST"`
+	LedgerEntries       []xmlLedgerEntry    `xml:"LEDGERENTRIES.LIST"`
+	AllInventoryEntries []xmlInventoryEntry `xml:"ALLINVENTORYENTRIES.LIST"`
+	InventoryEntries    []xmlInventoryEntry `xml:"INVENTORYENTRIES.LIST"`
+	InventoryEntriesIn  []xmlInventoryEntry `xml:"INVENTORYENTRIESIN.LIST"`
+	InventoryEntriesOut []xmlInventoryEntry `xml:"INVENTORYENTRIESOUT.LIST"`
+	UnknownChildren     []xmlUnknownNode    `xml:",any"`
 }
 
 type xmlLedgerEntry struct {
-	LedgerName      string       `xml:"LEDGERNAME"`
-	Amount          string       `xml:"AMOUNT"`
-	GSTClass        string       `xml:"GSTCLASS"`
-	BillAllocations []xmlBillRef `xml:"BILLALLOCATIONS.LIST"`
+	LedgerName       string              `xml:"LEDGERNAME"`
+	Amount           string              `xml:"AMOUNT"`
+	GSTClass         string              `xml:"GSTCLASS"`
+	IsDeemedPositive string              `xml:"ISDEEMEDPOSITIVE"`
+	IsPartyLedger    string              `xml:"ISPARTYLEDGER"`
+	BillAllocations  []xmlBillRef        `xml:"BILLALLOCATIONS.LIST"`
+	BankAllocations  []xmlBankAllocation `xml:"BANKALLOCATIONS.LIST"`
+	RateDetails      []xmlRateDetail     `xml:"RATEDETAILS.LIST"`
+	UnknownChildren  []xmlUnknownNode    `xml:",any"`
 }
 
 type xmlBillRef struct {
-	Name     string `xml:"NAME"`
-	Amount   string `xml:"AMOUNT"`
-	BillType string `xml:"BILLTYPE"`
+	Name            string           `xml:"NAME"`
+	Amount          string           `xml:"AMOUNT"`
+	BillType        string           `xml:"BILLTYPE"`
+	UnknownChildren []xmlUnknownNode `xml:",any"`
 }
 
 type xmlInventoryEntry struct {
-	StockItem string `xml:"STOCKITEMNAME"`
-	ActualQty string `xml:"ACTUALQTY"`
-	Rate      string `xml:"RATE"`
-	Amount    string `xml:"AMOUNT"`
-	GSTHSN    string `xml:"GSTHSNNAME"`
+	StockItem             string                    `xml:"STOCKITEMNAME"`
+	ActualQty             string                    `xml:"ACTUALQTY"`
+	BilledQty             string                    `xml:"BILLEDQTY"`
+	Rate                  string                    `xml:"RATE"`
+	Amount                string                    `xml:"AMOUNT"`
+	GSTHSN                string                    `xml:"GSTHSNNAME"`
+	IsDeemedPositive      string                    `xml:"ISDEEMEDPOSITIVE"`
+	BatchAllocations      []xmlBatchAllocation      `xml:"BATCHALLOCATIONS.LIST"`
+	AccountingAllocations []xmlAccountingAllocation `xml:"ACCOUNTINGALLOCATIONS.LIST"`
+	RateDetails           []xmlRateDetail           `xml:"RATEDETAILS.LIST"`
+	UnknownChildren       []xmlUnknownNode          `xml:",any"`
+}
+
+type xmlBankAllocation struct {
+	Name                  string           `xml:"NAME"`
+	Date                  string           `xml:"DATE"`
+	InstrumentDate        string           `xml:"INSTRUMENTDATE"`
+	TransactionType       string           `xml:"TRANSACTIONTYPE"`
+	PaymentMode           string           `xml:"PAYMENTMODE"`
+	BankName              string           `xml:"BANKNAME"`
+	BankPartyName         string           `xml:"BANKPARTYNAME"`
+	PaymentFavouring      string           `xml:"PAYMENTFAVOURING"`
+	InstrumentNumber      string           `xml:"INSTRUMENTNUMBER"`
+	UniqueReferenceNumber string           `xml:"UNIQUEREFERENCENUMBER"`
+	Status                string           `xml:"STATUS"`
+	Amount                string           `xml:"AMOUNT"`
+	UnknownChildren       []xmlUnknownNode `xml:",any"`
+}
+
+type xmlBatchAllocation struct {
+	BatchName             string           `xml:"BATCHNAME"`
+	GodownName            string           `xml:"GODOWNNAME"`
+	DestinationGodownName string           `xml:"DESTINATIONGODOWNNAME"`
+	TrackingNumber        string           `xml:"TRACKINGNUMBER"`
+	OrderNumber           string           `xml:"ORDERNO"`
+	ActualQty             string           `xml:"ACTUALQTY"`
+	BilledQty             string           `xml:"BILLEDQTY"`
+	Amount                string           `xml:"AMOUNT"`
+	UnknownChildren       []xmlUnknownNode `xml:",any"`
+}
+
+type xmlAccountingAllocation struct {
+	LedgerName       string              `xml:"LEDGERNAME"`
+	Amount           string              `xml:"AMOUNT"`
+	GSTClass         string              `xml:"GSTCLASS"`
+	IsDeemedPositive string              `xml:"ISDEEMEDPOSITIVE"`
+	BillAllocations  []xmlBillRef        `xml:"BILLALLOCATIONS.LIST"`
+	BankAllocations  []xmlBankAllocation `xml:"BANKALLOCATIONS.LIST"`
+	RateDetails      []xmlRateDetail     `xml:"RATEDETAILS.LIST"`
+	UnknownChildren  []xmlUnknownNode    `xml:",any"`
+}
+
+type xmlRateDetail struct {
+	DutyHead        string           `xml:"GSTRATEDUTYHEAD"`
+	ValuationType   string           `xml:"GSTRATEVALUATIONTYPE"`
+	Rate            string           `xml:"GSTRATE"`
+	RatePerUnit     string           `xml:"GSTRATEPERUNIT"`
+	UnknownChildren []xmlUnknownNode `xml:",any"`
+}
+
+type xmlUnknownNode struct {
+	XMLName  xml.Name
+	InnerXML string `xml:",innerxml"`
+	Text     string `xml:",chardata"`
 }
 
 // toRaw converts the parsed XML shape to the agent-native RawVoucher. It
@@ -218,6 +301,7 @@ func (x xmlVoucher) toRaw() (RawVoucher, []string) {
 
 	r := RawVoucher{
 		GUID:            strings.TrimSpace(x.GUID),
+		MasterID:        strings.TrimSpace(x.MasterID),
 		VoucherType:     strings.TrimSpace(x.VoucherType),
 		VoucherNumber:   strings.TrimSpace(x.VoucherNumber),
 		Reference:       strings.TrimSpace(x.Reference),
@@ -246,12 +330,16 @@ func (x xmlVoucher) toRaw() (RawVoucher, []string) {
 		}
 	}
 
-	for _, le := range x.LedgerEntries {
+	for _, le := range x.allLedgerEntries() {
 		entry := LedgerEntry{
 			LedgerName: strings.TrimSpace(le.LedgerName),
 			GSTClass:   strings.TrimSpace(le.GSTClass),
 		}
-		entry.IsPartyLedger = entry.LedgerName != "" && entry.LedgerName == r.PartyLedgerName
+		if strings.TrimSpace(le.IsDeemedPositive) != "" {
+			entry.IsDeemedPositive = parseTallyBool(le.IsDeemedPositive)
+			entry.IsDeemedPositiveSet = true
+		}
+		entry.IsPartyLedger = parseTallyBool(le.IsPartyLedger) || (entry.LedgerName != "" && entry.LedgerName == r.PartyLedgerName)
 
 		if amt, err := parseTallyAmount(le.Amount); err == nil {
 			entry.Amount = amt
@@ -271,36 +359,246 @@ func (x xmlVoucher) toRaw() (RawVoucher, []string) {
 			}
 			entry.BillAllocations = append(entry.BillAllocations, ref)
 		}
+		for _, ba := range le.BankAllocations {
+			alloc := BankAllocation{
+				Name:                  strings.TrimSpace(ba.Name),
+				TransactionType:       strings.TrimSpace(ba.TransactionType),
+				PaymentMode:           strings.TrimSpace(ba.PaymentMode),
+				BankName:              strings.TrimSpace(ba.BankName),
+				BankPartyName:         strings.TrimSpace(ba.BankPartyName),
+				PaymentFavouring:      strings.TrimSpace(ba.PaymentFavouring),
+				InstrumentNumber:      strings.TrimSpace(ba.InstrumentNumber),
+				UniqueReferenceNumber: strings.TrimSpace(ba.UniqueReferenceNumber),
+				Status:                strings.TrimSpace(ba.Status),
+				UnknownChildren:       unknownNodes("VOUCHER/LEDGERENTRY/BANKALLOCATIONS.LIST", ba.UnknownChildren),
+			}
+			if ba.Date != "" {
+				if t, err := ParseTallyDate(ba.Date); err == nil {
+					alloc.Date = t
+				} else {
+					warnings = append(warnings, fmt.Sprintf("voucher %s bank allocation %q DATE: %v", voucherID(r), alloc.Name, err))
+				}
+			}
+			if ba.InstrumentDate != "" {
+				if t, err := ParseTallyDate(ba.InstrumentDate); err == nil {
+					alloc.InstrumentDate = t
+				} else {
+					warnings = append(warnings, fmt.Sprintf("voucher %s bank allocation %q INSTRUMENTDATE: %v", voucherID(r), alloc.Name, err))
+				}
+			}
+			if amt, err := parseTallyAmount(ba.Amount); err == nil {
+				alloc.Amount = amt
+			} else if ba.Amount != "" {
+				warnings = append(warnings, fmt.Sprintf("voucher %s bank allocation %q: %v", voucherID(r), alloc.Name, err))
+			}
+			entry.BankAllocations = append(entry.BankAllocations, alloc)
+		}
+		entry.RateDetails = convertRateDetails(le.RateDetails)
+		entry.UnknownChildren = unknownNodes("VOUCHER/LEDGERENTRY", le.UnknownChildren)
 		r.LedgerEntries = append(r.LedgerEntries, entry)
 	}
 
-	for _, ie := range x.InventoryEntries {
+	for _, ie := range x.allInventoryEntries() {
 		entry := InventoryEntry{
 			StockItem: strings.TrimSpace(ie.StockItem),
 			HSN:       strings.TrimSpace(ie.GSTHSN),
 		}
 		entry.Quantity, entry.Unit = parseTallyQuantity(ie.ActualQty)
+		entry.BilledQty, entry.BilledUnit = parseTallyQuantity(ie.BilledQty)
 		entry.Rate, _ = parseTallyRate(ie.Rate)
+		if strings.TrimSpace(ie.IsDeemedPositive) != "" {
+			entry.IsDeemedPositive = parseTallyBool(ie.IsDeemedPositive)
+			entry.IsDeemedPositiveSet = true
+		}
 		if amt, err := parseTallyAmount(ie.Amount); err == nil {
 			entry.Amount = amt
 		}
+		for _, ba := range ie.BatchAllocations {
+			entry.BatchAllocations = append(entry.BatchAllocations, convertBatchAllocation(ba, "VOUCHER/INVENTORYENTRY/BATCHALLOCATIONS.LIST", &warnings, r))
+		}
+		for _, aa := range ie.AccountingAllocations {
+			entry.AccountingAllocations = append(entry.AccountingAllocations, convertAccountingAllocation(aa, &warnings, r))
+		}
+		entry.RateDetails = convertRateDetails(ie.RateDetails)
+		entry.UnknownChildren = unknownNodes("VOUCHER/INVENTORYENTRY", ie.UnknownChildren)
 		r.InventoryEntries = append(r.InventoryEntries, entry)
 	}
 
+	r.UnknownChildren = unknownNodes("VOUCHER", x.UnknownChildren)
 	return r, warnings
 }
 
-// voucherID returns a human-readable id for logging. Prefers GUID but falls
-// back to VoucherNumber so warnings point somewhere useful even when Tally
-// sent an incomplete voucher.
-func voucherID(r RawVoucher) string {
-	if r.GUID != "" {
-		return r.GUID
+func (x xmlVoucher) allLedgerEntries() []xmlLedgerEntry {
+	out := make([]xmlLedgerEntry, 0, len(x.AllLedgerEntries)+len(x.LedgerEntries))
+	out = append(out, x.AllLedgerEntries...)
+	out = append(out, x.LedgerEntries...)
+	return out
+}
+
+func (x xmlVoucher) allInventoryEntries() []xmlInventoryEntry {
+	out := make([]xmlInventoryEntry, 0, len(x.AllInventoryEntries)+len(x.InventoryEntries)+len(x.InventoryEntriesIn)+len(x.InventoryEntriesOut))
+	out = append(out, x.AllInventoryEntries...)
+	out = append(out, x.InventoryEntries...)
+	out = append(out, x.InventoryEntriesIn...)
+	out = append(out, x.InventoryEntriesOut...)
+	return out
+}
+
+func convertBatchAllocation(x xmlBatchAllocation, path string, warnings *[]string, voucher RawVoucher) BatchAllocation {
+	actualQty, actualUnit := parseTallyQuantity(x.ActualQty)
+	billedQty, billedUnit := parseTallyQuantity(x.BilledQty)
+	out := BatchAllocation{
+		BatchName:             strings.TrimSpace(x.BatchName),
+		GodownName:            strings.TrimSpace(x.GodownName),
+		DestinationGodownName: strings.TrimSpace(x.DestinationGodownName),
+		TrackingNumber:        strings.TrimSpace(x.TrackingNumber),
+		OrderNumber:           strings.TrimSpace(x.OrderNumber),
+		ActualQty:             actualQty,
+		ActualUnit:            actualUnit,
+		BilledQty:             billedQty,
+		BilledUnit:            billedUnit,
+		UnknownChildren:       unknownNodes(path, x.UnknownChildren),
 	}
-	if r.VoucherNumber != "" {
-		return r.VoucherNumber
+	if amt, err := parseTallyAmount(x.Amount); err == nil {
+		out.Amount = amt
+	} else if x.Amount != "" {
+		*warnings = append(*warnings, fmt.Sprintf("voucher %s batch allocation %q: %v", voucherID(voucher), out.BatchName, err))
 	}
-	return "(unknown)"
+	return out
+}
+
+func convertAccountingAllocation(x xmlAccountingAllocation, warnings *[]string, voucher RawVoucher) AccountingAllocation {
+	out := AccountingAllocation{
+		LedgerName:      strings.TrimSpace(x.LedgerName),
+		GSTClass:        strings.TrimSpace(x.GSTClass),
+		RateDetails:     convertRateDetails(x.RateDetails),
+		UnknownChildren: unknownNodes("VOUCHER/INVENTORYENTRY/ACCOUNTINGALLOCATIONS.LIST", x.UnknownChildren),
+	}
+	if strings.TrimSpace(x.IsDeemedPositive) != "" {
+		out.IsDeemedPositive = parseTallyBool(x.IsDeemedPositive)
+		out.IsDeemedPositiveSet = true
+	}
+	if amt, err := parseTallyAmount(x.Amount); err == nil {
+		out.Amount = amt
+	} else if x.Amount != "" {
+		*warnings = append(*warnings, fmt.Sprintf("voucher %s accounting allocation %q: %v", voucherID(voucher), out.LedgerName, err))
+	}
+	for _, ba := range x.BillAllocations {
+		ref := BillRef{
+			Name:     strings.TrimSpace(ba.Name),
+			BillType: strings.TrimSpace(ba.BillType),
+		}
+		if amt, err := parseTallyAmount(ba.Amount); err == nil {
+			ref.Amount = amt
+		} else if ba.Amount != "" {
+			*warnings = append(*warnings, fmt.Sprintf("voucher %s accounting allocation bill %q: %v", voucherID(voucher), ref.Name, err))
+		}
+		out.BillAllocations = append(out.BillAllocations, ref)
+	}
+	for _, ba := range x.BankAllocations {
+		alloc := BankAllocation{
+			Name:                  strings.TrimSpace(ba.Name),
+			TransactionType:       strings.TrimSpace(ba.TransactionType),
+			PaymentMode:           strings.TrimSpace(ba.PaymentMode),
+			BankName:              strings.TrimSpace(ba.BankName),
+			BankPartyName:         strings.TrimSpace(ba.BankPartyName),
+			PaymentFavouring:      strings.TrimSpace(ba.PaymentFavouring),
+			InstrumentNumber:      strings.TrimSpace(ba.InstrumentNumber),
+			UniqueReferenceNumber: strings.TrimSpace(ba.UniqueReferenceNumber),
+			Status:                strings.TrimSpace(ba.Status),
+			UnknownChildren:       unknownNodes("VOUCHER/INVENTORYENTRY/ACCOUNTINGALLOCATIONS.LIST/BANKALLOCATIONS.LIST", ba.UnknownChildren),
+		}
+		if amt, err := parseTallyAmount(ba.Amount); err == nil {
+			alloc.Amount = amt
+		} else if ba.Amount != "" {
+			*warnings = append(*warnings, fmt.Sprintf("voucher %s accounting allocation bank %q: %v", voucherID(voucher), alloc.Name, err))
+		}
+		out.BankAllocations = append(out.BankAllocations, alloc)
+	}
+	return out
+}
+
+func convertRateDetails(in []xmlRateDetail) []RateDetail {
+	out := make([]RateDetail, 0, len(in))
+	for _, x := range in {
+		item := RateDetail{
+			DutyHead:        strings.TrimSpace(x.DutyHead),
+			ValuationType:   strings.TrimSpace(x.ValuationType),
+			UnknownChildren: unknownNodes("RATEDETAILS.LIST", x.UnknownChildren),
+		}
+		item.Rate, _ = parseTallyAmount(x.Rate)
+		item.RatePerUnit, _ = parseTallyAmount(x.RatePerUnit)
+		out = append(out, item)
+	}
+	return out
+}
+
+func unknownNodes(parentPath string, in []xmlUnknownNode) []UnknownXMLNode {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]int)
+	out := make([]UnknownXMLNode, 0, len(in))
+	for _, node := range in {
+		name := xmlDisplayName(node.XMLName)
+		seen[name]++
+		out = append(out, UnknownXMLNode{
+			Path:         parentPath + "/" + name,
+			Name:         name,
+			SiblingIndex: seen[name] - 1,
+			InnerXML:     strings.TrimSpace(node.InnerXML),
+			Text:         strings.TrimSpace(node.Text),
+		})
+	}
+	return out
+}
+
+func xmlDisplayName(name xml.Name) string {
+	if strings.EqualFold(name.Space, "TallyUDF") {
+		return "UDF:" + name.Local
+	}
+	if name.Space != "" {
+		return name.Space + ":" + name.Local
+	}
+	return name.Local
+}
+
+func findElementStartOffset(raw []byte, local string, inputOffset int64) int {
+	end := int(inputOffset)
+	if end > len(raw) {
+		end = len(raw)
+	}
+	if end <= 0 {
+		return -1
+	}
+	marker := []byte("<" + local)
+	if idx := bytes.LastIndex(raw[:end], marker); idx >= 0 {
+		return idx
+	}
+	return -1
+}
+
+// isEmptyVoucherShell filters out bookkeeping counters like
+// <CMPINFO><VOUCHER>0</VOUCHER></CMPINFO> that appear in successful empty
+// exports. They decode into an all-zero xmlVoucher but are not real vouchers
+// and should not produce misleading "dropped voucher" warnings.
+func isEmptyVoucherShell(r RawVoucher) bool {
+	return r.GUID == "" &&
+		r.MasterID == "" &&
+		r.AlterID == 0 &&
+		r.Date.IsZero() &&
+		r.VoucherType == "" &&
+		r.VoucherNumber == "" &&
+		r.Reference == "" &&
+		r.PartyLedgerName == "" &&
+		r.PartyGSTIN == "" &&
+		r.PlaceOfSupply == "" &&
+		!r.IsInvoice &&
+		!r.IsCancelled &&
+		!r.ReverseCharge &&
+		r.Narration == "" &&
+		len(r.LedgerEntries) == 0 &&
+		len(r.InventoryEntries) == 0
 }
 
 // parseTallyBool normalises Tally's "Yes"/"No"/"" (and occasional 1/0) into a
@@ -377,12 +675,12 @@ func parseTallyRate(s string) (rate float64, unit string) {
 //
 // Detection order (matches the production Manual2AI Python adapter
 // at PlummLegano/scripts/tally-sync/tally_client.py:351-378):
-//   1. BOM: \xff\xfe → UTF-16LE; \xfe\xff → UTF-16BE; \xef\xbb\xbf →
-//      UTF-8 (BOM stripped, body returned as-is).
-//   2. Null-byte heuristic on the head (first 8 bytes): a `<` in
-//      position 0 followed by 0x00 in position 1 → UTF-16LE; 0x00
-//      then `<` → UTF-16BE.
-//   3. Default: UTF-8 (body returned unchanged).
+//  1. BOM: \xff\xfe → UTF-16LE; \xfe\xff → UTF-16BE; \xef\xbb\xbf →
+//     UTF-8 (BOM stripped, body returned as-is).
+//  2. Null-byte heuristic on the head (first 8 bytes): a `<` in
+//     position 0 followed by 0x00 in position 1 → UTF-16LE; 0x00
+//     then `<` → UTF-16BE.
+//  3. Default: UTF-8 (body returned unchanged).
 //
 // On decode error (truncated UTF-16, invalid sequences) the function
 // returns the original bytes — the caller's xml decoder will surface
@@ -437,21 +735,21 @@ func decodeUTF16(raw []byte, order unicode.Endianness) []byte {
 // parse without rejecting valid Tally edge cases:
 //
 //  1. decodeTallyResponse:   UTF-16LE/BE → UTF-8 if the response is
-//                            UTF-16 (Tally echoes request encoding
-//                            for IMPORT acks; for non-ASCII voucher
-//                            content sometimes responds UTF-16LE).
+//     UTF-16 (Tally echoes request encoding
+//     for IMPORT acks; for non-ASCII voucher
+//     content sometimes responds UTF-16LE).
 //  2. sanitizeXMLBytes:      drop literal XML-1.0-illegal control
-//                            bytes (0x00-0x1F minus 0x09/0x0A/0x0D)
-//                            that Tally emits in narration / address
-//                            fields when source was Alt-numpad typed.
+//     bytes (0x00-0x1F minus 0x09/0x0A/0x0D)
+//     that Tally emits in narration / address
+//     fields when source was Alt-numpad typed.
 //  3. stripIllegalCharRefs:  drop XML numeric character references
-//                            (`&#4;`, `&#x04;`) that resolve to chars
-//                            outside the XML 1.0 set. Tally uses these
-//                            in GSTCLASS / VATCLASSIFICATION fields as
-//                            legacy "no value" markers.
+//     (`&#4;`, `&#x04;`) that resolve to chars
+//     outside the XML 1.0 set. Tally uses these
+//     in GSTCLASS / VATCLASSIFICATION fields as
+//     legacy "no value" markers.
 //  4. sanitizeInvalidUTF8:   drop bare invalid-UTF-8 bytes (Windows-
-//                            1252 / ISO-8859-1 chars like 0x92 right
-//                            single quote) embedded in narration.
+//     1252 / ISO-8859-1 chars like 0x92 right
+//     single quote) embedded in narration.
 //
 // Used by ParseDayBookV3 and the master parsers — both consume
 // Tally responses with the same Tally-side quirks.
