@@ -438,55 +438,49 @@ func runInstaller(ctx context.Context, ui installerUI, opts installerOptions, de
 	}
 
 	var activeSession *sessionRef
+	isUpdate := false
+	alreadyPaired := pairState.State == "paired"
 
-	// One-click "setup bundle" path: the pair code rides in the installer's
-	// own filename (gstreco-tally-setup-<CODE>.exe) or --code, so the person at
-	// the Tally PC never logs in — they confirm the port and the agent claims
-	// the code. With no code we fall back to browser approval (the "install on
-	// the machine you're at now" path).
-	if code := resolveSetupBundleCode(opts, ui); code != "" {
+	// Paths, in order: (1) a pair code (in the filename or --code) → claim it,
+	// no login; (2) already paired with no new code → silent update that keeps
+	// every existing company; (3) otherwise → browser-approval onboarding.
+	if code := resolveSetupBundleCode(opts, ui, alreadyPaired); code != "" {
 		if exitCode, claimErr := runSetupBundleClaim(ctx, ui, &opts, deps, serverURL, deviceName, pairState, code); claimErr != nil {
 			ui.Errorf("%v", claimErr)
 			return exitCode
 		}
+	} else if alreadyPaired && !opts.addTenant {
+		// No new code and already paired: this is an update. Refresh the agent
+		// binaries + service silently and keep every existing company — no
+		// prompts. (To add a company, use --add-tenant or a fresh setup link.)
+		isUpdate = true
+		ui.Infof("This machine is already connected to GST Reco — updating the agent and keeping your existing companies.")
 	} else {
-		shouldStartApproval := pairState.State != "paired"
-		if pairState.State == "paired" && !shouldStartApproval {
-			if opts.addTenant {
-				shouldStartApproval = true
-			} else if ui.Confirm("This machine is already paired. Start a fresh browser approval to add another GST Reco tenant?", false) {
-				shouldStartApproval = true
-			}
+		session, claim, exitCode, err := runApprovalFlow(ctx, ui, opts, deps, api, deviceName)
+		if err != nil {
+			ui.Errorf("%v", err)
+			return exitCode
 		}
-		if shouldStartApproval {
-			session, claim, exitCode, err := runApprovalFlow(ctx, ui, opts, deps, api, deviceName)
-			if err != nil {
-				ui.Errorf("%v", err)
-				return exitCode
-			}
-			if err := deps.persistPair(pair.PersistOptions{
-				ConfigPath:   opts.configPath,
-				Keyring:      secretstore.NewFileStore(secretstore.DefaultDir(filepath.Dir(opts.configPath)), secretstore.ReadMachineID),
-				Server:       serverURL,
-				DeviceName:   deviceName,
-				ConnectionID: claim.ConnectionID,
-				CompanyID:    claim.CompanyID,
-				Token:        claim.Token,
-				HmacSecret:   claim.HmacSecret,
-				PairedAt:     time.Now().UTC(),
-			}); err != nil {
-				_ = api.Update(ctx, session.ID, session.Token, "failed", "persist_failed", err.Error())
-				ui.Errorf("Could not persist claimed credentials: %v", err)
-				return 1
-			}
-			activeSession = session
-			pairState, err = deps.loadLocalPair(opts.configPath)
-			if err != nil {
-				ui.Errorf("Could not reload local pairing state after claim: %v", err)
-				return 1
-			}
-		} else if pairState.State == "paired" {
-			ui.Infof("Reusing the existing local pairing on this machine.")
+		if err := deps.persistPair(pair.PersistOptions{
+			ConfigPath:   opts.configPath,
+			Keyring:      secretstore.NewFileStore(secretstore.DefaultDir(filepath.Dir(opts.configPath)), secretstore.ReadMachineID),
+			Server:       serverURL,
+			DeviceName:   deviceName,
+			ConnectionID: claim.ConnectionID,
+			CompanyID:    claim.CompanyID,
+			Token:        claim.Token,
+			HmacSecret:   claim.HmacSecret,
+			PairedAt:     time.Now().UTC(),
+		}); err != nil {
+			_ = api.Update(ctx, session.ID, session.Token, "failed", "persist_failed", err.Error())
+			ui.Errorf("Could not persist claimed credentials: %v", err)
+			return 1
+		}
+		activeSession = session
+		pairState, err = deps.loadLocalPair(opts.configPath)
+		if err != nil {
+			ui.Errorf("Could not reload local pairing state after claim: %v", err)
+			return 1
 		}
 	}
 
@@ -538,19 +532,27 @@ func runInstaller(ctx context.Context, ui installerUI, opts installerOptions, de
 		return 1
 	}
 
-	if activeSession != nil {
-		_ = api.Update(ctx, activeSession.ID, activeSession.Token, "discovering_tally", "", "")
-	}
-	if err := runDiscoveryFlow(ctx, ui, opts, deps.runCommand, agentctlPath, opts.configPath, serverURL); err != nil {
-		failSession(ctx, api, activeSession, "discover_failed", err.Error())
-		ui.Errorf("Tally discovery failed: %v", err)
-		return 1
+	// A silent update keeps the existing companies/endpoints from config, so it
+	// skips discovery entirely — nothing to re-find, and no port prompt.
+	if !isUpdate {
+		if activeSession != nil {
+			_ = api.Update(ctx, activeSession.ID, activeSession.Token, "discovering_tally", "", "")
+		}
+		if err := runDiscoveryFlow(ctx, ui, opts, deps.runCommand, agentctlPath, opts.configPath, serverURL); err != nil {
+			failSession(ctx, api, activeSession, "discover_failed", err.Error())
+			ui.Errorf("Tally discovery failed: %v", err)
+			return 1
+		}
 	}
 
 	if activeSession != nil {
 		_ = api.Update(ctx, activeSession.ID, activeSession.Token, "ready", "", "")
 	}
-	ui.Infof("GST Reco is paired and ready on this machine.")
+	if isUpdate {
+		ui.Infof("Updated. The GST Reco agent is current and your existing companies are unchanged.")
+	} else {
+		ui.Infof("GST Reco is paired and ready on this machine.")
+	}
 	return 0
 }
 
