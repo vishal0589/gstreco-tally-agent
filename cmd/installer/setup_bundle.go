@@ -35,15 +35,20 @@ func setupBundleCodeFromName(execPath string) string {
 }
 
 // resolveSetupBundleCode decides the pair code for this run: an explicit
-// --code wins, then the code baked into the filename. If neither is present
-// (renamed file or the generic installer) we offer the manual setup key but
-// let the operator fall back to browser sign-in by pressing Enter.
-func resolveSetupBundleCode(opts installerOptions, ui installerUI) string {
+// --code wins, then the code baked into the filename. If neither is present,
+// an already-paired machine returns "" so runInstaller can update silently
+// (no prompt), while an unpaired machine offers the manual setup key with a
+// press-Enter fallback to browser sign-in.
+func resolveSetupBundleCode(opts installerOptions, ui installerUI, alreadyPaired bool) string {
 	if c := strings.TrimSpace(opts.code); c != "" {
 		return strings.ToUpper(c)
 	}
 	if c := setupBundleCodeFromName(os.Args[0]); c != "" {
 		return c
+	}
+	if alreadyPaired {
+		// Update on an already-paired machine — don't ask for a setup key.
+		return ""
 	}
 	entered := ui.ReadLine("Enter your GST Reco setup key (from your accountant), or press Enter to sign in with a browser: ")
 	return strings.ToUpper(strings.TrimSpace(entered))

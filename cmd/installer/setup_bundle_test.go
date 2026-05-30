@@ -121,3 +121,69 @@ func TestRunInstaller_SetupBundleClaimsPairCodeWithoutBrowser(t *testing.T) {
 		t.Fatalf("expected discovery to check the confirmed port 9000: %v", commands)
 	}
 }
+
+func TestRunInstaller_AlreadyPairedUpdatesSilently(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "config.yaml")
+
+	var claimCalls int
+	var commands [][]string
+	deps := defaultInstallerDeps()
+	deps.isAdmin = func() (bool, error) { return true, nil }
+	deps.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.Path, "/api/tally/agent/version") {
+				return jsonResponse(200, versionMetadataResponse{
+					Latest:    "0.1.33",
+					Platforms: map[string]installerAsset{"windows-amd64": {URL: "https://example.com/agentctl.exe"}},
+					Daemon:    map[string]installerAsset{"windows-amd64": {URL: "https://example.com/agent.exe"}},
+				}), nil
+			}
+			return binaryResponse(200, []byte("binary")), nil
+		}),
+	}
+	deps.claimPair = func(_ context.Context, _ pair.Options) (*pair.ClaimResponse, error) {
+		claimCalls++
+		return &pair.ClaimResponse{}, nil
+	}
+	deps.loadLocalPair = func(string) (localPairState, error) {
+		return localPairState{State: "paired", ConfigPath: cfgPath}, nil
+	}
+	deps.runCommand = func(_ context.Context, name string, args ...string) (commandResult, error) {
+		commands = append(commands, append([]string{name}, args...))
+		if len(args) >= 2 && args[0] == "service" && args[1] == "status" {
+			return commandResult{Output: "service status: running", ExitCode: 0}, nil
+		}
+		return commandResult{Output: "ok", ExitCode: 0}, nil
+	}
+
+	// No code, already paired, no --add-tenant: a prompt-less update. fakeUI has
+	// no queued lines/confirms, so any prompt would surface as wrong behavior.
+	ui := &fakeUI{}
+	exitCode := runInstaller(context.Background(), ui, installerOptions{
+		server:     "https://example.com",
+		configPath: cfgPath,
+		installDir: tmp,
+	}, deps)
+
+	if exitCode != 0 {
+		t.Fatalf("exitCode=%d", exitCode)
+	}
+	if claimCalls != 0 {
+		t.Fatalf("an update must not claim a pair code: claimCalls=%d", claimCalls)
+	}
+	var lines []string
+	for _, c := range commands {
+		lines = append(lines, strings.Join(c, " "))
+	}
+	joined := strings.Join(lines, " | ")
+	if strings.Contains(joined, "discover") {
+		t.Fatalf("a silent update must skip discovery: %v", commands)
+	}
+	if strings.Contains(joined, "sessions/start") {
+		t.Fatal("an update must not start a browser approval session")
+	}
+	if !strings.Contains(joined, "service") {
+		t.Fatalf("expected the service to be repaired/restarted: %v", commands)
+	}
+}
