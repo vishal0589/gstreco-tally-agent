@@ -33,6 +33,7 @@ type installerDeps struct {
 	openBrowser     func(url string) error
 	runCommand      func(ctx context.Context, name string, args ...string) (commandResult, error)
 	persistPair     func(opts pair.PersistOptions) error
+	claimPair       func(ctx context.Context, opts pair.Options) (*pair.ClaimResponse, error)
 	loadLocalPair   func(configPath string) (localPairState, error)
 }
 
@@ -64,6 +65,7 @@ func defaultInstallerDeps() installerDeps {
 			}, err
 		},
 		persistPair: pair.PersistCredentials,
+		claimPair:   pair.Claim,
 		loadLocalPair: func(configPath string) (localPairState, error) {
 			return detectLocalPairState(configPath)
 		},
@@ -436,43 +438,56 @@ func runInstaller(ctx context.Context, ui installerUI, opts installerOptions, de
 	}
 
 	var activeSession *sessionRef
-	shouldStartApproval := pairState.State != "paired"
-	if pairState.State == "paired" && !shouldStartApproval {
-		if opts.addTenant {
-			shouldStartApproval = true
-		} else if ui.Confirm("This machine is already paired. Start a fresh browser approval to add another GST Reco tenant?", false) {
-			shouldStartApproval = true
-		}
-	}
-	if shouldStartApproval {
-		session, claim, exitCode, err := runApprovalFlow(ctx, ui, opts, deps, api, deviceName)
-		if err != nil {
-			ui.Errorf("%v", err)
+
+	// One-click "setup bundle" path: the pair code rides in the installer's
+	// own filename (gstreco-tally-setup-<CODE>.exe) or --code, so the person at
+	// the Tally PC never logs in — they confirm the port and the agent claims
+	// the code. With no code we fall back to browser approval (the "install on
+	// the machine you're at now" path).
+	if code := resolveSetupBundleCode(opts, ui); code != "" {
+		if exitCode, claimErr := runSetupBundleClaim(ctx, ui, &opts, deps, serverURL, deviceName, pairState, code); claimErr != nil {
+			ui.Errorf("%v", claimErr)
 			return exitCode
 		}
-		if err := deps.persistPair(pair.PersistOptions{
-			ConfigPath:   opts.configPath,
-			Keyring:      secretstore.NewFileStore(secretstore.DefaultDir(filepath.Dir(opts.configPath)), secretstore.ReadMachineID),
-			Server:       serverURL,
-			DeviceName:   deviceName,
-			ConnectionID: claim.ConnectionID,
-			CompanyID:    claim.CompanyID,
-			Token:        claim.Token,
-			HmacSecret:   claim.HmacSecret,
-			PairedAt:     time.Now().UTC(),
-		}); err != nil {
-			_ = api.Update(ctx, session.ID, session.Token, "failed", "persist_failed", err.Error())
-			ui.Errorf("Could not persist claimed credentials: %v", err)
-			return 1
+	} else {
+		shouldStartApproval := pairState.State != "paired"
+		if pairState.State == "paired" && !shouldStartApproval {
+			if opts.addTenant {
+				shouldStartApproval = true
+			} else if ui.Confirm("This machine is already paired. Start a fresh browser approval to add another GST Reco tenant?", false) {
+				shouldStartApproval = true
+			}
 		}
-		activeSession = session
-		pairState, err = deps.loadLocalPair(opts.configPath)
-		if err != nil {
-			ui.Errorf("Could not reload local pairing state after claim: %v", err)
-			return 1
+		if shouldStartApproval {
+			session, claim, exitCode, err := runApprovalFlow(ctx, ui, opts, deps, api, deviceName)
+			if err != nil {
+				ui.Errorf("%v", err)
+				return exitCode
+			}
+			if err := deps.persistPair(pair.PersistOptions{
+				ConfigPath:   opts.configPath,
+				Keyring:      secretstore.NewFileStore(secretstore.DefaultDir(filepath.Dir(opts.configPath)), secretstore.ReadMachineID),
+				Server:       serverURL,
+				DeviceName:   deviceName,
+				ConnectionID: claim.ConnectionID,
+				CompanyID:    claim.CompanyID,
+				Token:        claim.Token,
+				HmacSecret:   claim.HmacSecret,
+				PairedAt:     time.Now().UTC(),
+			}); err != nil {
+				_ = api.Update(ctx, session.ID, session.Token, "failed", "persist_failed", err.Error())
+				ui.Errorf("Could not persist claimed credentials: %v", err)
+				return 1
+			}
+			activeSession = session
+			pairState, err = deps.loadLocalPair(opts.configPath)
+			if err != nil {
+				ui.Errorf("Could not reload local pairing state after claim: %v", err)
+				return 1
+			}
+		} else if pairState.State == "paired" {
+			ui.Infof("Reusing the existing local pairing on this machine.")
 		}
-	} else if pairState.State == "paired" {
-		ui.Infof("Reusing the existing local pairing on this machine.")
 	}
 
 	versionMeta, err := api.FetchVersion(ctx)
@@ -705,6 +720,18 @@ func runDiscoveryFlow(
 	configPath string,
 	serverURL string,
 ) error {
+	// If the operator confirmed their Tally port up front (setup-bundle flow),
+	// check it before scanning the common ports.
+	if confirmed := strings.TrimSpace(opts.customPorts); confirmed != "" {
+		if endpoints, perr := discoverEndpointsForPorts(confirmed); perr == nil {
+			ui.Infof("Checking your Tally port(s): %s", confirmed)
+			if derr := runDiscoverCommand(ctx, runCommand, agentctlPath, configPath, serverURL, endpoints); derr == nil {
+				return nil
+			}
+			ui.Warnf("Could not reach Tally on %s yet — trying the common ports…", confirmed)
+		}
+	}
+
 	ui.Infof("Trying the common local Tally ports first…")
 	err := runDiscoverCommand(ctx, runCommand, agentctlPath, configPath, serverURL, nil)
 	if err == nil {
@@ -784,17 +811,26 @@ func discoverEndpointsForPorts(raw string) ([]string, error) {
 		if part == "" {
 			continue
 		}
-		for _, ch := range part {
-			if ch < '0' || ch > '9' {
-				return nil, fmt.Errorf("custom port %q is not numeric", part)
+		var endpoint string
+		switch {
+		case strings.Contains(part, "://"):
+			endpoint = part
+		case strings.Contains(part, ":"):
+			// host:port for a Tally running on another machine.
+			endpoint = "http://" + part
+		default:
+			for _, ch := range part {
+				if ch < '0' || ch > '9' {
+					return nil, fmt.Errorf("custom port %q is not numeric", part)
+				}
 			}
+			endpoint = "http://127.0.0.1:" + part
 		}
-		port := "http://127.0.0.1:" + part
-		if _, ok := seen[port]; ok {
+		if _, ok := seen[endpoint]; ok {
 			continue
 		}
-		seen[port] = struct{}{}
-		endpoints = append(endpoints, port)
+		seen[endpoint] = struct{}{}
+		endpoints = append(endpoints, endpoint)
 	}
 	if len(endpoints) == 0 {
 		return nil, fmt.Errorf("no custom ports were provided")
