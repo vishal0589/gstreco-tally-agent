@@ -46,6 +46,8 @@ type installerOptions struct {
 	customPorts string
 	addTenant   bool
 	noBrowser   bool
+	code        string
+	port        string
 }
 
 type installerAction string
@@ -67,6 +69,8 @@ func parseInstallerArgs(stdout, stderr *os.File, args []string) (installerOption
 	fs.StringVar(&opts.customPorts, "custom-ports", "", "comma-separated custom Tally ports to try after default discovery fails")
 	fs.BoolVar(&opts.addTenant, "add-tenant", false, "start a fresh browser approval to add another GST Reco tenant on this machine")
 	fs.BoolVar(&opts.noBrowser, "no-browser", false, "print the approval URL instead of opening it automatically")
+	fs.StringVar(&opts.code, "code", "", "pair/setup code (default: read from the installer filename gstreco-tally-setup-<CODE>.exe)")
+	fs.StringVar(&opts.port, "port", "", "Tally port to confirm at the prompt (default 9000; comma-separate several; host:port for a remote Tally)")
 
 	versionFlag := fs.Bool("version", false, "print version and exit")
 	helpFlag := fs.Bool("help", false, "show help")
@@ -88,17 +92,20 @@ func printInstallerUsage(stdout *os.File) {
 	fmt.Fprintln(stdout, `gstreco-tally-installer — Windows-first onboarding for GST Reco
 
 Usage:
-  gstreco-tally-installer [--server <URL>] [--config <PATH>] [--install-dir <PATH>]
+  gstreco-tally-setup-<CODE>.exe                  (one-click: run it, confirm the Tally port)
+  gstreco-tally-installer [--code <CODE>] [--port 9000] [--server <URL>]
+                          [--config <PATH>] [--install-dir <PATH>]
                           [--custom-ports 2026,9000] [--add-tenant] [--no-browser]
 
 Behavior:
-  - Starts a browser-authorized installer session
-  - Opens GST Reco for approval
-  - Claims credentials after approval
-  - Downloads or refreshes the agent binaries
-  - Installs or repairs the Windows service
-  - Runs discovery-first and only falls back to custom ports if needed
-  - On an already paired machine, rerun with --add-tenant to pair another GST Reco tenant
+  - Setup-bundle (default for clients): reads the pair code from the installer's
+    own filename (or --code), asks for the Tally port, claims the code, and
+    installs the Windows service. No login, no browser.
+  - With no code (the generic installer): starts a browser-authorized approval
+    session for whoever is signed in on this machine.
+  - Downloads or refreshes the agent binaries and installs/repairs the service.
+  - Checks the confirmed Tally port first, then the common ports.
+  - On an already paired machine, rerun with --add-tenant to add another tenant.
 
 Fallbacks:
   - agentctl pair --code <CODE> stays available for support scenarios
