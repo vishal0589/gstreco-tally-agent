@@ -36,7 +36,16 @@ func runInstallerMain(stdout, stderr, stdin *os.File, args []string, deps instal
 	defer cancel()
 
 	ui := newConsoleUI(stdout, stderr, stdin)
-	return runInstaller(ctx, ui, opts, deps)
+	defer ui.Close()
+
+	ui.Infof("GST Reco installer %s", deps.version())
+	if ui.LogPath() != "" {
+		ui.Infof("Installer log: %s", ui.LogPath())
+	}
+
+	exitCode = runInstaller(ctx, ui, opts, deps)
+	ui.PresentCloseout(exitCode)
+	return exitCode
 }
 
 type installerOptions struct {

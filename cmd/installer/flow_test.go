@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -24,12 +27,23 @@ type fakeUI struct {
 	confirms []bool
 	lines    []string
 	logs     []string
+	prompts  []string
 }
 
-func (ui *fakeUI) Infof(format string, args ...any)  { ui.logs = append(ui.logs, "info") }
-func (ui *fakeUI) Warnf(format string, args ...any)  { ui.logs = append(ui.logs, "warn") }
-func (ui *fakeUI) Errorf(format string, args ...any) { ui.logs = append(ui.logs, "error") }
-func (ui *fakeUI) Confirm(_ string, _ bool) bool {
+func (ui *fakeUI) Infof(format string, args ...any) {
+	ui.logs = append(ui.logs, "INFO: "+fmt.Sprintf(format, args...))
+}
+
+func (ui *fakeUI) Warnf(format string, args ...any) {
+	ui.logs = append(ui.logs, "WARN: "+fmt.Sprintf(format, args...))
+}
+
+func (ui *fakeUI) Errorf(format string, args ...any) {
+	ui.logs = append(ui.logs, "ERROR: "+fmt.Sprintf(format, args...))
+}
+
+func (ui *fakeUI) Confirm(prompt string, _ bool) bool {
+	ui.prompts = append(ui.prompts, prompt)
 	if len(ui.confirms) == 0 {
 		return false
 	}
@@ -37,13 +51,24 @@ func (ui *fakeUI) Confirm(_ string, _ bool) bool {
 	ui.confirms = ui.confirms[1:]
 	return next
 }
-func (ui *fakeUI) ReadLine(_ string) string {
+
+func (ui *fakeUI) ReadLine(prompt string) string {
+	ui.prompts = append(ui.prompts, prompt)
 	if len(ui.lines) == 0 {
 		return ""
 	}
 	next := ui.lines[0]
 	ui.lines = ui.lines[1:]
 	return next
+}
+
+func (ui *fakeUI) sawLog(substr string) bool {
+	for _, line := range ui.logs {
+		if strings.Contains(line, substr) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestDiscoverEndpointsForPorts(t *testing.T) {
@@ -320,6 +345,138 @@ func TestRunInstaller_AddTenantStartsFreshApprovalOnPairedMachine(t *testing.T) 
 	}
 	if len(commands) == 0 {
 		t.Fatal("expected service/discover commands")
+	}
+}
+
+func TestRunInstaller_ServiceRepairFailureIncludesCommandOutput(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "config.yaml")
+	ui := &fakeUI{}
+	deps := defaultInstallerDeps()
+	deps.isAdmin = func() (bool, error) { return true, nil }
+	deps.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.Path, "/api/tally/agent/version") {
+				return jsonResponse(200, versionMetadataResponse{
+					Latest:    "0.1.33",
+					Platforms: map[string]installerAsset{"windows-amd64": {URL: "https://example.com/agentctl.exe"}},
+					Daemon:    map[string]installerAsset{"windows-amd64": {URL: "https://example.com/agent.exe"}},
+				}), nil
+			}
+			return binaryResponse(200, []byte("binary")), nil
+		}),
+	}
+	deps.claimPair = func(_ context.Context, opts pair.Options) (*pair.ClaimResponse, error) {
+		return &pair.ClaimResponse{ConnectionID: "conn-9", CompanyID: "co-9", Token: "tok", HmacSecret: "hmac"}, nil
+	}
+	deps.loadLocalPair = func(string) (localPairState, error) {
+		return localPairState{State: "unpaired", ConfigPath: cfgPath}, nil
+	}
+	deps.runCommand = func(_ context.Context, name string, args ...string) (commandResult, error) {
+		switch {
+		case len(args) >= 2 && args[0] == "service" && args[1] == "status":
+			return commandResult{Output: "service not installed", ExitCode: 1}, errors.New("exit 1")
+		case len(args) >= 2 && args[0] == "service" && args[1] == "install":
+			return commandResult{Output: "Access is denied.", ExitCode: 1}, errors.New("exit 1")
+		default:
+			return commandResult{Output: "", ExitCode: 0}, nil
+		}
+	}
+
+	exitCode := runInstaller(context.Background(), ui, installerOptions{
+		server:     "https://example.com",
+		configPath: cfgPath,
+		installDir: tmp,
+		code:       "ABC234",
+	}, deps)
+	if exitCode != 1 {
+		t.Fatalf("exitCode=%d want 1", exitCode)
+	}
+	if !ui.sawLog("Access is denied.") {
+		t.Fatalf("expected service failure output in logs: %v", ui.logs)
+	}
+	if !ui.sawLog("Could not install or repair the Windows service") {
+		t.Fatalf("expected installer error log, got %v", ui.logs)
+	}
+}
+
+func TestConsoleUI_PresentCloseoutKeepsInteractiveWindowOpen(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "installer.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		t.Fatalf("create log: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	ui := &consoleUI{
+		stdout:      &stdout,
+		stderr:      &stderr,
+		reader:      bufio.NewReader(strings.NewReader("\n")),
+		interactive: true,
+		logFile:     logFile,
+		logPath:     logPath,
+	}
+
+	ui.PresentCloseout(1)
+	ui.Close()
+
+	if !strings.Contains(stdout.String(), "Press Enter to close this window...") {
+		t.Fatalf("stdout missing closeout prompt: %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Installer did not finish successfully") {
+		t.Fatalf("stdout missing failure summary: %q", stdout.String())
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "Installer did not finish successfully") {
+		t.Fatalf("log missing failure summary: %q", text)
+	}
+	if !strings.Contains(text, "Press Enter to close this window...") {
+		t.Fatalf("log missing closeout prompt: %q", text)
+	}
+}
+
+func TestConsoleUI_MirrorsInstallerMessagesToRunLog(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "installer.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		t.Fatalf("create log: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	ui := &consoleUI{
+		stdout:  &stdout,
+		stderr:  &stderr,
+		reader:  bufio.NewReader(strings.NewReader("")),
+		logFile: logFile,
+		logPath: logPath,
+	}
+
+	ui.Infof("hello %s", "world")
+	ui.Errorf("bad %d", 7)
+	ui.Close()
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "hello world") {
+		t.Fatalf("log missing info line: %q", text)
+	}
+	if !strings.Contains(text, "bad 7") {
+		t.Fatalf("log missing error line: %q", text)
+	}
+	if !strings.Contains(text, "installer session finished") {
+		t.Fatalf("log missing session footer: %q", text)
 	}
 }
 

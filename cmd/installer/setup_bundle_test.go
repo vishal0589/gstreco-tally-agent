@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -36,6 +37,26 @@ func TestPromptTallyPorts(t *testing.T) {
 	}
 	if got := promptTallyPorts(&fakeUI{lines: []string{"9001, 9002"}}, "9000"); got != "9001, 9002" {
 		t.Errorf("explicit entry wins: got %q want '9001, 9002'", got)
+	}
+}
+
+func TestResolveSetupBundleCode_ExplainsGenericInstallerPath(t *testing.T) {
+	origArgs := os.Args
+	t.Cleanup(func() {
+		os.Args = origArgs
+	})
+	os.Args = []string{"gstreco-tally-installer-windows-amd64.exe"}
+
+	ui := &fakeUI{lines: []string{""}}
+	got := resolveSetupBundleCode(installerOptions{}, ui, false)
+	if got != "" {
+		t.Fatalf("got %q want empty code to trigger browser flow", got)
+	}
+	if !ui.sawLog("generic GST Reco installer without a setup key") {
+		t.Fatalf("expected generic-installer guidance in logs: %v", ui.logs)
+	}
+	if !ui.sawLog("gstreco-tally-setup-<CODE>.exe") {
+		t.Fatalf("expected setup-file guidance in logs: %v", ui.logs)
 	}
 }
 

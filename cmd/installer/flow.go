@@ -85,6 +85,8 @@ type consoleUI struct {
 	stderr      io.Writer
 	reader      *bufio.Reader
 	interactive bool
+	logFile     *os.File
+	logPath     string
 }
 
 func newConsoleUI(stdout, stderr io.Writer, stdin *os.File) *consoleUI {
@@ -94,24 +96,32 @@ func newConsoleUI(stdout, stderr io.Writer, stdin *os.File) *consoleUI {
 			interactive = (info.Mode() & os.ModeCharDevice) != 0
 		}
 	}
-	return &consoleUI{
+	ui := &consoleUI{
 		stdout:      stdout,
 		stderr:      stderr,
 		reader:      bufio.NewReader(stdin),
 		interactive: interactive,
 	}
+	if logPath, logFile, err := openInstallerRunLog(); err == nil {
+		ui.logPath = logPath
+		ui.logFile = logFile
+		ui.writeLog("INFO", fmt.Sprintf("installer session started version=%s pid=%d", version.String(), os.Getpid()))
+	} else {
+		fmt.Fprintf(stderr, "installer: could not create installer log: %v\n", err)
+	}
+	return ui
 }
 
 func (ui *consoleUI) Infof(format string, args ...any) {
-	fmt.Fprintf(ui.stdout, format+"\n", args...)
+	ui.writeLine(ui.stdout, "INFO", format, args...)
 }
 
 func (ui *consoleUI) Warnf(format string, args ...any) {
-	fmt.Fprintf(ui.stdout, format+"\n", args...)
+	ui.writeLine(ui.stdout, "WARN", format, args...)
 }
 
 func (ui *consoleUI) Errorf(format string, args ...any) {
-	fmt.Fprintf(ui.stderr, format+"\n", args...)
+	ui.writeLine(ui.stderr, "ERROR", format, args...)
 }
 
 func (ui *consoleUI) Confirm(prompt string, defaultYes bool) bool {
@@ -138,6 +148,81 @@ func (ui *consoleUI) ReadLine(prompt string) string {
 	fmt.Fprint(ui.stdout, prompt)
 	line, _ := ui.reader.ReadString('\n')
 	return strings.TrimSpace(line)
+}
+
+func (ui *consoleUI) LogPath() string {
+	return ui.logPath
+}
+
+func (ui *consoleUI) Close() {
+	if ui.logFile == nil {
+		return
+	}
+	ui.writeLog("INFO", "installer session finished")
+	_ = ui.logFile.Close()
+	ui.logFile = nil
+}
+
+func (ui *consoleUI) PresentCloseout(exitCode int) {
+	if !ui.interactive {
+		return
+	}
+	if exitCode == 0 {
+		ui.Infof("Installer finished. You can review the messages above, then close this window.")
+	} else {
+		ui.Warnf("Installer did not finish successfully. Review the error above before closing this window.")
+	}
+	if ui.logPath != "" {
+		ui.Infof("Installer log: %s", ui.logPath)
+	}
+	ui.WaitForEnter("Press Enter to close this window...")
+}
+
+func (ui *consoleUI) WaitForEnter(prompt string) {
+	if !ui.interactive {
+		return
+	}
+	fmt.Fprint(ui.stdout, prompt)
+	ui.writeLog("INFO", prompt)
+	_, _ = ui.reader.ReadString('\n')
+}
+
+func (ui *consoleUI) writeLine(dst io.Writer, level, format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(dst, "%s\n", msg)
+	ui.writeLog(level, msg)
+}
+
+func (ui *consoleUI) writeLog(level, msg string) {
+	if ui.logFile == nil {
+		return
+	}
+	fmt.Fprintf(ui.logFile, "%s [%s] %s\n", time.Now().Format(time.RFC3339), level, msg)
+}
+
+func defaultInstallerLogDir() string {
+	if runtime.GOOS == "windows" {
+		base := strings.TrimSpace(os.Getenv("ProgramData"))
+		if base == "" {
+			base = `C:\ProgramData`
+		}
+		return filepath.Join(base, "GST Reco", "installer", "logs")
+	}
+	return filepath.Join(os.TempDir(), "GST Reco", "installer", "logs")
+}
+
+func openInstallerRunLog() (string, *os.File, error) {
+	dir := defaultInstallerLogDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", nil, err
+	}
+	name := fmt.Sprintf("installer-%s-p%d.log", time.Now().UTC().Format("20060102-150405"), os.Getpid())
+	path := filepath.Join(dir, name)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return "", nil, err
+	}
+	return path, file, nil
 }
 
 type installerSessionClient struct {
@@ -417,9 +502,11 @@ func runInstaller(ctx context.Context, ui installerUI, opts installerOptions, de
 		return 1
 	}
 	if !isAdmin {
-		ui.Infof("Requesting administrator access for service installation…")
+		ui.Infof("GST Reco needs administrator permission to install or repair the Windows service.")
+		ui.Infof("Windows may show a permission prompt next. If you do not approve it, setup will stop.")
 		if err := deps.relaunchAsAdmin(os.Args[1:]); err != nil {
-			ui.Errorf("Could not relaunch as administrator: %v", err)
+			ui.Errorf("Could not relaunch with administrator permission: %v", err)
+			ui.Errorf("Please rerun the installer and accept the Windows permission prompt, or right-click it and choose 'Run as administrator'.")
 			return 1
 		}
 		return 0
@@ -682,11 +769,13 @@ func ensureServiceHealthy(
 	}
 
 	_, _ = runCommand(ctx, agentPath, "service", "uninstall")
-	if _, err := runCommand(ctx, agentPath, "service", "install"); err != nil {
-		return fmt.Errorf("service install: %w", err)
+	installResult, err := runCommand(ctx, agentPath, "service", "install")
+	if err != nil {
+		return formatCommandError(agentPath, []string{"service", "install"}, installResult, err)
 	}
-	if _, err := runCommand(ctx, agentPath, "service", "start"); err != nil {
-		return fmt.Errorf("service start: %w", err)
+	startResult, err := runCommand(ctx, agentPath, "service", "start")
+	if err != nil {
+		return formatCommandError(agentPath, []string{"service", "start"}, startResult, err)
 	}
 	return nil
 }
@@ -924,6 +1013,15 @@ func replaceDownloadedFile(tempPath, dest string) error {
 		_ = os.Remove(backupPath)
 	}
 	return nil
+}
+
+func formatCommandError(command string, args []string, result commandResult, err error) error {
+	commandText := strings.TrimSpace(strings.Join(append([]string{filepath.Base(command)}, args...), " "))
+	output := strings.TrimSpace(result.Output)
+	if output == "" {
+		return fmt.Errorf("%s: %w", commandText, err)
+	}
+	return fmt.Errorf("%s: %w\n%s", commandText, err, output)
 }
 
 func defaultInstallDir() string {

@@ -50,6 +50,9 @@ func resolveSetupBundleCode(opts installerOptions, ui installerUI, alreadyPaired
 		// Update on an already-paired machine — don't ask for a setup key.
 		return ""
 	}
+	ui.Infof("You're running the generic GST Reco installer without a setup key in the filename.")
+	ui.Infof("For the fastest setup, ask your accountant for a file named gstreco-tally-setup-<CODE>.exe.")
+	ui.Infof("You can still continue here: type the setup key below, or press Enter to switch to browser approval.")
 	entered := ui.ReadLine("Enter your GST Reco setup key (from your accountant), or press Enter to sign in with a browser: ")
 	return strings.ToUpper(strings.TrimSpace(entered))
 }
