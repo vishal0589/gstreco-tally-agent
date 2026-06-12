@@ -69,6 +69,41 @@ func TestNormalize_PurchaseSingleFromFixture(t *testing.T) {
 	}
 }
 
+func TestNormalize_SingleNonInvoiceBillAllocationKeepsVoucherInvoiceNumber(t *testing.T) {
+	v := RawVoucher{
+		GUID:            "purchase-on-account",
+		IsInvoice:       true,
+		Date:            parseDate(t, "2026-04-10"),
+		VoucherType:     "Purchase",
+		VoucherNumber:   "PI/ONACC/001",
+		PartyLedgerName: "Advance Vendor",
+		PartyGSTIN:      "29ABCDE1234F1Z5",
+		LedgerEntries: []LedgerEntry{
+			{
+				LedgerName:    "Advance Vendor",
+				Amount:        -11800,
+				IsPartyLedger: true,
+				BillAllocations: []BillRef{
+					{Name: "ADV-001", Amount: -11800, BillType: "On Account"},
+				},
+			},
+			{LedgerName: "Purchase A/c", Amount: 10000},
+			{LedgerName: "IGST @ 18%", Amount: 1800, GSTClass: "IGST@18"},
+		},
+	}
+
+	rows, err := Normalize(v, NormalizeOptions{})
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if rows[0].InvoiceNumber != "PI/ONACC/001" {
+		t.Errorf("InvoiceNumber = %q, want voucher invoice number PI/ONACC/001", rows[0].InvoiceNumber)
+	}
+}
+
 func TestNormalize_SalesCGSTSGST(t *testing.T) {
 	parsed, err := ParseDayBookV3(mustFixture(t, "voucher-v3-sales-cgst-sgst.xml"))
 	if err != nil {

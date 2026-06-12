@@ -409,15 +409,19 @@ func firstUsableBillRefName(v RawVoucher) string {
 	return ""
 }
 
-// onlyNewRefName returns the single bill ref's Name when the party ledger
-// has exactly one allocation. Lets single-bill vouchers use the BillRef
-// name (typically the counterparty's invoice number) instead of Tally's
-// internal VoucherNumber.
+// onlyNewRefName returns the single invoice-producing bill ref's Name when the
+// party ledger has exactly one allocation. Lets single-bill vouchers use the
+// BillRef name (typically the counterparty's invoice number) instead of
+// Tally's internal VoucherNumber, while ignoring cash-on-account allocations.
 func onlyNewRefName(party LedgerEntry) string {
 	if len(party.BillAllocations) != 1 {
 		return ""
 	}
-	return party.BillAllocations[0].Name
+	bill := party.BillAllocations[0]
+	if !isUsableBillRef(bill) {
+		return ""
+	}
+	return strings.TrimSpace(bill.Name)
 }
 
 // voucherParentRef returns the best voucher-level reference available for
