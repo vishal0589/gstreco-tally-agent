@@ -495,15 +495,11 @@ func (s *tickState) report() (time.Time, string) {
 }
 
 // wrapTickWithState wraps the bare tick function with state-recording
-// hooks. Status mapping: nil error = "ok", non-nil = "error".
+// hooks so heartbeat reports preserve local sync failure detail.
 func wrapTickWithState(fn scheduler.TickFunc, state *tickState) scheduler.TickFunc {
 	return func(ctx context.Context) error {
 		err := fn(ctx)
-		status := "ok"
-		if err != nil {
-			status = "error"
-		}
-		state.record(time.Now().UTC(), status)
+		state.record(time.Now().UTC(), tickStatusForError(err))
 		return err
 	}
 }
@@ -514,13 +510,25 @@ func wrapPeriodSyncWithState(
 ) func(ctx context.Context, period string) error {
 	return func(ctx context.Context, period string) error {
 		err := fn(ctx, period)
-		status := "ok"
-		if err != nil {
-			status = "error"
-		}
-		state.record(time.Now().UTC(), status)
+		state.record(time.Now().UTC(), tickStatusForError(err))
 		return err
 	}
+}
+
+func tickStatusForError(err error) string {
+	if err == nil {
+		return "ok"
+	}
+	msg := strings.TrimSpace(err.Error())
+	if msg == "" {
+		return "error"
+	}
+	status := "error: " + msg
+	const maxStatusLen = 500
+	if len(status) > maxStatusLen {
+		return status[:maxStatusLen]
+	}
+	return status
 }
 
 // makeTickFunc returns the closure the scheduler fires on each tick.
@@ -699,11 +707,25 @@ func runWindowSync(
 		Str("run_kind", runKind).
 		Msg("tick complete")
 
-	// Tick is "successful" even with non-zero failures — the
-	// scheduler keeps firing. The operator triages via the
-	// sync-status dashboard (B4) once it ships. A non-nil return
-	// here would just produce a duplicate scheduler-level log.
-	return nil
+	return errorFromWalkResult(res)
+}
+
+func errorFromWalkResult(res syncrun.WalkResult) error {
+	if res.FatalErrors == 0 &&
+		res.TotalBatchesFailed == 0 &&
+		res.TotalServerErrors == 0 {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"sync completed with failures: fatal_errors=%d batches_failed=%d server_errors=%d rows=%d batches_sent=%d mappings_run=%d",
+		res.FatalErrors,
+		res.TotalBatchesFailed,
+		res.TotalServerErrors,
+		res.TotalRows,
+		res.TotalBatchesSent,
+		res.MappingsRun,
+	)
 }
 
 // syncMastersForMappings fetches vendor + customer master ledgers
