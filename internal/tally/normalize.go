@@ -332,7 +332,7 @@ func classifyTaxLedger(gstClass, name string) string {
 			return "CESS"
 		}
 	}
-	n := strings.ToUpper(name)
+	n := compactTaxLedgerToken(name)
 	if looksLikeCommercialAccountLedger(n) {
 		return ""
 	}
@@ -343,10 +343,38 @@ func classifyTaxLedger(gstClass, name string) string {
 		return "CGST"
 	case strings.Contains(n, "SGST"), strings.Contains(n, "UTGST"):
 		return "SGST"
-	case strings.Contains(n, "CESS"):
+	case hasCessTaxToken(name):
 		return "CESS"
 	}
 	return ""
+}
+
+func compactTaxLedgerToken(value string) string {
+	var b strings.Builder
+	for _, r := range strings.ToUpper(value) {
+		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func hasTaxLedgerWord(value, word string) bool {
+	for _, field := range strings.FieldsFunc(strings.ToUpper(value), func(r rune) bool {
+		return !((r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'))
+	}) {
+		if field == word {
+			return true
+		}
+	}
+	return false
+}
+
+func hasCessTaxToken(value string) bool {
+	compact := compactTaxLedgerToken(value)
+	return hasTaxLedgerWord(value, "CESS") ||
+		strings.Contains(compact, "GSTCESS") ||
+		strings.Contains(compact, "COMPENSATIONCESS")
 }
 
 // looksLikeCommercialAccountLedger suppresses false tax classification for

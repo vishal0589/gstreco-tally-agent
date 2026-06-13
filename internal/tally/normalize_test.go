@@ -460,6 +460,27 @@ func TestClassifyTaxLedger_PrefersGSTClassOverName(t *testing.T) {
 	}
 }
 
+func TestClassifyTaxLedger_DoesNotTreatProcessingChargesAsCess(t *testing.T) {
+	for _, name := range []string{"S/B Processing Charges", "EGM Processing Charges"} {
+		if got := classifyTaxLedger("", name); got != "" {
+			t.Fatalf("classifyTaxLedger(%q) = %q, want non-tax ledger", name, got)
+		}
+	}
+}
+
+func TestClassifyTaxLedger_DetectsRealCessLedgers(t *testing.T) {
+	cases := []string{
+		"GST Cess Input Credit",
+		"Compensation Cess",
+		"CESS",
+	}
+	for _, name := range cases {
+		if got := classifyTaxLedger("", name); got != "CESS" {
+			t.Fatalf("classifyTaxLedger(%q) = %q, want CESS", name, got)
+		}
+	}
+}
+
 func TestNormalize_HSNFromFirstInventoryEntry(t *testing.T) {
 	// v0.1.11 — HSN flows from first inventory entry through to
 	// IngestVoucherRow.HSN. Drives server-side capital-goods
