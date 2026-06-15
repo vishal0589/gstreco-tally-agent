@@ -486,3 +486,24 @@ func TestApplyDirACLFnSeam(t *testing.T) {
 		t.Error("expected applyDirACLFn to be invoked from Set; got 0 calls")
 	}
 }
+
+func TestSet_ReappliesACLAfterRename(t *testing.T) {
+	prev := applyDirACLFn
+	t.Cleanup(func() { applyDirACLFn = prev })
+
+	var calls []string
+	applyDirACLFn = func(dir string) error {
+		calls = append(calls, dir)
+		return nil
+	}
+	s := tempStore(t)
+	if err := s.Set("svc", "k", "v"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("applyDirACLFn calls = %d, want 2", len(calls))
+	}
+	if calls[0] != calls[1] {
+		t.Fatalf("applyDirACLFn dirs differ: %q vs %q", calls[0], calls[1])
+	}
+}

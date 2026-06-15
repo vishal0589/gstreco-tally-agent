@@ -189,8 +189,18 @@ func (s *fileStore) Set(service, key, value string) error {
 		return fmt.Errorf("secretstore: rename %s: %w", tmp, err)
 	}
 
+	// Apply the directory ACL again after the final entry exists. On
+	// Windows, the temp-file creation path can leave the renamed file
+	// readable by the pairing user while still unreadable by the
+	// LocalSystem service. The pre-write ACL makes the directory
+	// traversable; the post-rename pass makes the concrete entry
+	// inherit the service-readable DACL before write-verify succeeds.
+	if err := applyDirACLFn(s.dir); err != nil {
+		return fmt.Errorf("secretstore: apply entry ACL %s: %w", path, err)
+	}
+
 	// Write-verify roundtrip. We just successfully wrote ciphertext to
-	// disk and applied the directory ACL; now confirm the resulting
+	// disk and applied the entry ACL; now confirm the resulting
 	// file is actually readable + decryptable from THIS process. If
 	// the host environment (EFS bound to a different user, restrictive
 	// inherited ACL, AV intercepting reads) blocks read access, this
