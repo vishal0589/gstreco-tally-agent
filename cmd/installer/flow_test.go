@@ -228,6 +228,82 @@ func TestRunInstaller_RerunRepairsServiceWithoutApproval(t *testing.T) {
 	}
 }
 
+func TestRunInstaller_RepairsACLAndRetriesLocalPairState(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "GST Reco", "agent", "config.yaml")
+
+	ui := &fakeUI{}
+	var commands [][]string
+	loadCalls := 0
+	deps := defaultInstallerDeps()
+	deps.goos = func() string { return "windows" }
+	deps.isAdmin = func() (bool, error) { return true, nil }
+	deps.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.Path, "/api/tally/agent/version") {
+				return jsonResponse(200, versionMetadataResponse{
+					Latest: "0.1.39",
+					Platforms: map[string]installerAsset{
+						"windows-amd64": {URL: "https://example.com/agentctl.exe"},
+					},
+					Daemon: map[string]installerAsset{
+						"windows-amd64": {URL: "https://example.com/agent.exe"},
+					},
+				}), nil
+			}
+			return binaryResponse(200, []byte("binary")), nil
+		}),
+	}
+	deps.loadLocalPair = func(string) (localPairState, error) {
+		loadCalls++
+		if loadCalls == 1 {
+			return localPairState{}, errors.New("config: read C:\\ProgramData\\GST Reco\\agent\\config.yaml: Access is denied")
+		}
+		return localPairState{
+			State:      "paired",
+			ConfigPath: cfgPath,
+			Config: &config.Config{
+				Server:       "https://example.com",
+				ConnectionID: "conn-1",
+				DeviceName:   "DESKTOP-1",
+			},
+		}, nil
+	}
+	deps.runCommand = func(_ context.Context, name string, args ...string) (commandResult, error) {
+		commands = append(commands, append([]string{name}, args...))
+		switch {
+		case filepath.Base(name) == "icacls.exe":
+			return commandResult{Output: "Successfully processed 1 files", ExitCode: 0}, nil
+		case len(args) >= 2 && args[0] == "service" && args[1] == "status":
+			return commandResult{Output: "service status: running", ExitCode: 0}, nil
+		default:
+			return commandResult{Output: "ok", ExitCode: 0}, nil
+		}
+	}
+
+	exitCode := runInstaller(context.Background(), ui, installerOptions{
+		server:     "https://example.com",
+		configPath: cfgPath,
+		installDir: tmp,
+	}, deps)
+	if exitCode != 0 {
+		t.Fatalf("exitCode=%d", exitCode)
+	}
+	if loadCalls != 2 {
+		t.Fatalf("loadLocalPair calls=%d want 2", loadCalls)
+	}
+	if !ui.sawLog("Repairing local GST Reco permissions and trying again") {
+		t.Fatalf("expected retry repair message, got %v", ui.logs)
+	}
+	joined := strings.Join(flattenCommands(commands), " | ")
+	if strings.Count(joined, "icacls.exe") < 2 {
+		t.Fatalf("expected preflight and retry icacls repair commands, got %v", commands)
+	}
+	if !strings.Contains(joined, "service restart") {
+		t.Fatalf("expected installer to continue to service repair, got %v", commands)
+	}
+}
+
 func TestRunInstaller_AddTenantStartsFreshApprovalOnPairedMachine(t *testing.T) {
 	tmp := t.TempDir()
 	cfgPath := filepath.Join(tmp, "config.yaml")

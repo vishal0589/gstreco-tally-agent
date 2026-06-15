@@ -518,10 +518,23 @@ func runInstaller(ctx context.Context, ui installerUI, opts installerOptions, de
 	serverURL := strings.TrimRight(opts.server, "/")
 	api := newInstallerSessionClient(serverURL, deps.httpClient)
 	deviceName := localHostname()
+	if err := repairLocalAgentAccess(ctx, deps.goos(), deps.runCommand, opts.configPath); err != nil {
+		ui.Warnf("Could not pre-repair local GST Reco permissions: %v", err)
+	}
 	pairState, err := deps.loadLocalPair(opts.configPath)
 	if err != nil {
-		ui.Errorf("Could not inspect local pairing state: %v", err)
-		return 1
+		ui.Warnf("Could not inspect local pairing state yet: %v", err)
+		ui.Infof("Repairing local GST Reco permissions and trying again…")
+		if repairErr := repairLocalAgentAccess(ctx, deps.goos(), deps.runCommand, opts.configPath); repairErr != nil {
+			ui.Errorf("Could not repair local GST Reco permissions: %v", repairErr)
+			ui.Errorf("Could not inspect local pairing state: %v", err)
+			return 1
+		}
+		pairState, err = deps.loadLocalPair(opts.configPath)
+		if err != nil {
+			ui.Errorf("Could not inspect local pairing state after permission repair: %v", err)
+			return 1
+		}
 	}
 
 	var activeSession *sessionRef
@@ -641,6 +654,71 @@ func runInstaller(ctx context.Context, ui installerUI, opts installerOptions, de
 		ui.Infof("GST Reco is paired and ready on this machine.")
 	}
 	return 0
+}
+
+func repairLocalAgentAccess(
+	ctx context.Context,
+	goos string,
+	runCommand func(context.Context, string, ...string) (commandResult, error),
+	configPath string,
+) error {
+	if goos != "windows" {
+		return nil
+	}
+	if configPath == "" {
+		configPath = config.DefaultPath()
+	}
+	agentDir := filepath.Dir(configPath)
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		return fmt.Errorf("create local agent directory %s: %w", agentDir, err)
+	}
+	for _, target := range windowsAgentACLTargets(configPath) {
+		if err := repairWindowsACLTarget(ctx, runCommand, target); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func windowsAgentACLTargets(configPath string) []string {
+	agentDir := filepath.Dir(configPath)
+	rootDir := filepath.Dir(agentDir)
+	if strings.EqualFold(filepath.Base(agentDir), "agent") &&
+		strings.EqualFold(filepath.Base(rootDir), "GST Reco") {
+		return []string{rootDir}
+	}
+	return []string{agentDir}
+}
+
+func repairWindowsACLTarget(
+	ctx context.Context,
+	runCommand func(context.Context, string, ...string) (commandResult, error),
+	target string,
+) error {
+	icaclsArgs := []string{
+		target,
+		"/inheritance:r",
+		"/grant:r", "SYSTEM:(OI)(CI)F",
+		"/grant:r", "BUILTIN\\Administrators:(OI)(CI)F",
+		"/T", "/C", "/Q",
+	}
+	result, err := runCommand(ctx, "icacls.exe", icaclsArgs...)
+	if err == nil {
+		return nil
+	}
+	firstErr := formatCommandError("icacls.exe", icaclsArgs, result, err)
+
+	takeownArgs := []string{"/F", target, "/R", "/D", "Y"}
+	takeResult, takeErr := runCommand(ctx, "takeown.exe", takeownArgs...)
+	if takeErr != nil {
+		return fmt.Errorf("repair ACL for %s failed: %w; take ownership failed: %w", target, firstErr, formatCommandError("takeown.exe", takeownArgs, takeResult, takeErr))
+	}
+
+	result, err = runCommand(ctx, "icacls.exe", icaclsArgs...)
+	if err != nil {
+		return fmt.Errorf("repair ACL for %s failed after ownership repair: %w", target, formatCommandError("icacls.exe", icaclsArgs, result, err))
+	}
+	return nil
 }
 
 func runApprovalFlow(
