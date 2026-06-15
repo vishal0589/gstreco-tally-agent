@@ -45,3 +45,26 @@ control recursively, with a `takeown` fallback before retrying `icacls`.
 DONE_WITH_CONCERNS: code and production manifest are fixed. The affected Windows
 host still needs to run the v0.1.39 installer/recovery command, then discovery
 and May syncs should be rechecked live.
+
+## Follow-up Same Day
+
+The affected Windows host still could not read `config.yaml` after v0.1.39
+folder repair. New evidence showed the problem was the exact `config.yaml` file
+remaining unreadable after recursive folder ACL repair. v0.1.40 therefore:
+
+- repairs exact file targets (`config.yaml`) in addition to the root folder,
+  secrets directory, and logs directory;
+- treats `icacls` output containing `Failed processing N files` as a real
+  failure even when the process exits 0;
+- applies ACL and read-verifies after every `config.Save` temp-file rename.
+
+Production now serves agent/installer manifest `latest=0.1.40`; downloaded
+installer SHA256 through `https://gstreco.m2ai.ai/api/tally/installer/download`
+verified as:
+
+`58e44f81b888893480897397f4e78056d96825f4ecdd41377425ef5e1bf35773`
+
+For the already-broken host, direct recovery is to rebuild the non-secret
+`config.yaml` from known connection IDs/endpoints, repair ProgramData ACL, then
+restart/discover. Avoid generating new pair codes unless the existing secret
+files prove absent after this config rebuild.
