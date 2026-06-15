@@ -297,6 +297,9 @@ func Save(path string, c *Config) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("config: mkdir %s: %w", dir, err)
 	}
+	if err := applyConfigDirACL(dir); err != nil {
+		return err
+	}
 	if c == nil {
 		return fmt.Errorf("config: nil config")
 	}
@@ -313,6 +316,12 @@ func Save(path string, c *Config) error {
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("config: rename %s → %s: %w", tmp, path, err)
+	}
+	if err := applyConfigFileACL(path); err != nil {
+		return err
+	}
+	if _, err := os.ReadFile(path); err != nil {
+		return fmt.Errorf("config: write-verify %s: %w", path, err)
 	}
 	return nil
 }

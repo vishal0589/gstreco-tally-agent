@@ -304,6 +304,54 @@ func TestRunInstaller_RepairsACLAndRetriesLocalPairState(t *testing.T) {
 	}
 }
 
+func TestIcaclsReportedFailures(t *testing.T) {
+	cases := []struct {
+		output string
+		want   bool
+	}{
+		{"Successfully processed 52 files; Failed processing 0 files", false},
+		{"Successfully processed 51 files; Failed processing 1 files", true},
+		{"failed processing 12 files", true},
+		{"Successfully processed 1 files", false},
+	}
+	for _, tc := range cases {
+		if got := icaclsReportedFailures(tc.output); got != tc.want {
+			t.Errorf("icaclsReportedFailures(%q)=%v want %v", tc.output, got, tc.want)
+		}
+	}
+}
+
+func TestRepairWindowsACLTargetTreatsFailedProcessingAsFailure(t *testing.T) {
+	var commands [][]string
+	runCommand := func(_ context.Context, name string, args ...string) (commandResult, error) {
+		commands = append(commands, append([]string{name}, args...))
+		if filepath.Base(name) == "icacls.exe" && len(commands) == 1 {
+			return commandResult{Output: "Successfully processed 0 files; Failed processing 1 files", ExitCode: 0}, nil
+		}
+		return commandResult{Output: "ok", ExitCode: 0}, nil
+	}
+
+	err := repairWindowsACLTarget(context.Background(), runCommand, windowsACLTarget{
+		path:      `C:\ProgramData\GST Reco\agent\config.yaml`,
+		recursive: false,
+	})
+	if err != nil {
+		t.Fatalf("repairWindowsACLTarget: %v", err)
+	}
+	if len(commands) != 3 {
+		t.Fatalf("commands=%d want 3 (%v)", len(commands), commands)
+	}
+	if filepath.Base(commands[1][0]) != "takeown.exe" {
+		t.Fatalf("second command=%v want takeown", commands[1])
+	}
+	if strings.Contains(strings.Join(commands[1], " "), "/R") {
+		t.Fatalf("file-target takeown must not use recursive flags: %v", commands[1])
+	}
+	if !strings.Contains(strings.Join(commands[0], " "), "SYSTEM:F") {
+		t.Fatalf("file-target icacls should use non-inheritable grants: %v", commands[0])
+	}
+}
+
 func TestRunInstaller_AddTenantStartsFreshApprovalOnPairedMachine(t *testing.T) {
 	tmp := t.TempDir()
 	cfgPath := filepath.Join(tmp, "config.yaml")

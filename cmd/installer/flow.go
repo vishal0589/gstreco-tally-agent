@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -673,6 +674,14 @@ func repairLocalAgentAccess(
 		return fmt.Errorf("create local agent directory %s: %w", agentDir, err)
 	}
 	for _, target := range windowsAgentACLTargets(configPath) {
+		if target.optional {
+			if _, err := os.Stat(target.path); err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+				return fmt.Errorf("inspect ACL target %s: %w", target.path, err)
+			}
+		}
 		if err := repairWindowsACLTarget(ctx, runCommand, target); err != nil {
 			return err
 		}
@@ -680,45 +689,81 @@ func repairLocalAgentAccess(
 	return nil
 }
 
-func windowsAgentACLTargets(configPath string) []string {
+type windowsACLTarget struct {
+	path      string
+	recursive bool
+	optional  bool
+}
+
+func windowsAgentACLTargets(configPath string) []windowsACLTarget {
 	agentDir := filepath.Dir(configPath)
 	rootDir := filepath.Dir(agentDir)
 	if strings.EqualFold(filepath.Base(agentDir), "agent") &&
 		strings.EqualFold(filepath.Base(rootDir), "GST Reco") {
-		return []string{rootDir}
+		return []windowsACLTarget{
+			{path: rootDir, recursive: true},
+			{path: configPath, optional: true},
+			{path: filepath.Join(agentDir, "secrets"), recursive: true, optional: true},
+			{path: filepath.Join(agentDir, "logs"), recursive: true, optional: true},
+		}
 	}
-	return []string{agentDir}
+	return []windowsACLTarget{
+		{path: agentDir, recursive: true},
+		{path: configPath, optional: true},
+	}
 }
 
 func repairWindowsACLTarget(
 	ctx context.Context,
 	runCommand func(context.Context, string, ...string) (commandResult, error),
-	target string,
+	target windowsACLTarget,
 ) error {
+	grants := []string{"SYSTEM:F", "BUILTIN\\Administrators:F"}
+	if target.recursive {
+		grants = []string{"SYSTEM:(OI)(CI)F", "BUILTIN\\Administrators:(OI)(CI)F"}
+	}
 	icaclsArgs := []string{
-		target,
+		target.path,
 		"/inheritance:r",
-		"/grant:r", "SYSTEM:(OI)(CI)F",
-		"/grant:r", "BUILTIN\\Administrators:(OI)(CI)F",
-		"/T", "/C", "/Q",
+		"/grant:r", grants[0],
+		"/grant:r", grants[1],
+		"/C",
+	}
+	if target.recursive {
+		icaclsArgs = append(icaclsArgs, "/T")
 	}
 	result, err := runCommand(ctx, "icacls.exe", icaclsArgs...)
-	if err == nil {
+	if err == nil && !icaclsReportedFailures(result.Output) {
 		return nil
+	}
+	if err == nil {
+		err = errors.New("icacls reported failed file processing")
 	}
 	firstErr := formatCommandError("icacls.exe", icaclsArgs, result, err)
 
-	takeownArgs := []string{"/F", target, "/R", "/D", "Y"}
+	takeownArgs := []string{"/F", target.path}
+	if target.recursive {
+		takeownArgs = append(takeownArgs, "/R", "/D", "Y")
+	}
 	takeResult, takeErr := runCommand(ctx, "takeown.exe", takeownArgs...)
 	if takeErr != nil {
-		return fmt.Errorf("repair ACL for %s failed: %w; take ownership failed: %w", target, firstErr, formatCommandError("takeown.exe", takeownArgs, takeResult, takeErr))
+		return fmt.Errorf("repair ACL for %s failed: %w; take ownership failed: %w", target.path, firstErr, formatCommandError("takeown.exe", takeownArgs, takeResult, takeErr))
 	}
 
 	result, err = runCommand(ctx, "icacls.exe", icaclsArgs...)
-	if err != nil {
-		return fmt.Errorf("repair ACL for %s failed after ownership repair: %w", target, formatCommandError("icacls.exe", icaclsArgs, result, err))
+	if err != nil || icaclsReportedFailures(result.Output) {
+		if err == nil {
+			err = errors.New("icacls reported failed file processing")
+		}
+		return fmt.Errorf("repair ACL for %s failed after ownership repair: %w", target.path, formatCommandError("icacls.exe", icaclsArgs, result, err))
 	}
 	return nil
+}
+
+var icaclsFailedProcessingRE = regexp.MustCompile(`(?i)failed processing\s+([1-9][0-9]*)\s+files?`)
+
+func icaclsReportedFailures(output string) bool {
+	return icaclsFailedProcessingRE.MatchString(output)
 }
 
 func runApprovalFlow(
