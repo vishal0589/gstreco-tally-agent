@@ -488,12 +488,21 @@ func TestApplyDirACLFnSeam(t *testing.T) {
 }
 
 func TestSet_ReappliesACLAfterRename(t *testing.T) {
-	prev := applyDirACLFn
-	t.Cleanup(func() { applyDirACLFn = prev })
+	prevDir := applyDirACLFn
+	prevEntry := applyEntryACLFn
+	t.Cleanup(func() {
+		applyDirACLFn = prevDir
+		applyEntryACLFn = prevEntry
+	})
 
 	var calls []string
 	applyDirACLFn = func(dir string) error {
 		calls = append(calls, dir)
+		return nil
+	}
+	var entryCalls []string
+	applyEntryACLFn = func(path string) error {
+		entryCalls = append(entryCalls, path)
 		return nil
 	}
 	s := tempStore(t)
@@ -505,5 +514,11 @@ func TestSet_ReappliesACLAfterRename(t *testing.T) {
 	}
 	if calls[0] != calls[1] {
 		t.Fatalf("applyDirACLFn dirs differ: %q vs %q", calls[0], calls[1])
+	}
+	if len(entryCalls) != 1 {
+		t.Fatalf("applyEntryACLFn calls = %d, want 1", len(entryCalls))
+	}
+	if filepath.Dir(entryCalls[0]) != calls[0] {
+		t.Fatalf("applyEntryACLFn path %q is not inside dir %q", entryCalls[0], calls[0])
 	}
 }

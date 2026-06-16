@@ -76,6 +76,7 @@ const nonceLen = 12
 // every heartbeat with no actionable error. v0.1.10 makes the
 // failure fatal so pair surfaces it immediately.
 var applyDirACLFn = applyDirACL
+var applyEntryACLFn = applyEntryACL
 
 // NewFileStore returns a Store backed by encrypted files at dir. The
 // directory is created on first write if it does not exist; an
@@ -197,6 +198,9 @@ func (s *fileStore) Set(service, key, value string) error {
 	// inherit the service-readable DACL before write-verify succeeds.
 	if err := applyDirACLFn(s.dir); err != nil {
 		return fmt.Errorf("secretstore: apply entry ACL %s: %w", path, err)
+	}
+	if err := applyEntryACLFn(path); err != nil {
+		return fmt.Errorf("secretstore: apply file ACL %s: %w", path, err)
 	}
 
 	// Write-verify roundtrip. We just successfully wrote ciphertext to
