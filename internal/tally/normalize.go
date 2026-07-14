@@ -38,9 +38,16 @@ func Normalize(v RawVoucher, opts NormalizeOptions) ([]IngestVoucherRow, error) 
 	if v.IsCancelled {
 		return nil, nil
 	}
-	if !v.IsInvoice {
-		return nil, nil
-	}
+	// NB: we deliberately do NOT gate on v.IsInvoice here. A purchase or sales
+	// booked in Tally's "as voucher" (accounting) mode exports ISINVOICE=No but
+	// is a real invoice-family document that must reconcile against GSTR-2B.
+	// The per-lane $$IsPurchase/$$IsSales/... family filter already guarantees
+	// every voucher on this lane belongs to the right parent class, so the only
+	// question is party/tax extraction (handled below). Dropping on ISINVOICE
+	// silently lost every voucher-mode purchase (e.g. purchases booked through a
+	// user-defined purchase voucher type in accounting mode), which never showed
+	// up in the purchase lane OR the journal lane. See classifyLedgers for the
+	// voucher-mode party fallback.
 
 	kind := opts.Kind
 	if kind == "" {
@@ -292,6 +299,12 @@ type taxTotals struct {
 // discounts) are ignored at this layer — taxable_value is recomputed as the
 // residual so rounding and sign conventions don't fight us.
 func classifyLedgers(entries []LedgerEntry) (party *LedgerEntry, tax taxTotals) {
+	// billBearers collects non-tax ledgers that carry bill allocations. In a
+	// purchase/sales voucher only the party ledger (Sundry Creditor / Debtor)
+	// carries bills — the purchase/sales account and tax ledgers never do. We
+	// use this as a deterministic party fallback for "as voucher" accounting
+	// mode, where PARTYLEDGERNAME is blank so IsPartyLedger is never set.
+	var billBearers []*LedgerEntry
 	for i := range entries {
 		e := &entries[i]
 		if e.IsPartyLedger && party == nil {
@@ -307,6 +320,23 @@ func classifyLedgers(entries []LedgerEntry) (party *LedgerEntry, tax taxTotals) 
 			tax.SGST += math.Abs(e.Amount)
 		case "CESS":
 			tax.CESS += math.Abs(e.Amount)
+		default:
+			// Non-tax, non-flagged-party ledger: a purchase/sales account, a
+			// charge (freight/discount), or — in voucher mode — the unflagged
+			// party ledger itself. Only the party carries bill allocations.
+			if len(e.BillAllocations) > 0 {
+				billBearers = append(billBearers, e)
+			}
+		}
+	}
+	// Voucher-mode fallback: no ledger matched PARTYLEDGERNAME, so recover the
+	// party as the bill-bearing ledger. If Tally spread bills across more than
+	// one line, take the largest-magnitude bearer (the true invoice total).
+	if party == nil {
+		for _, e := range billBearers {
+			if party == nil || math.Abs(e.Amount) > math.Abs(party.Amount) {
+				party = e
+			}
 		}
 	}
 	return party, tax

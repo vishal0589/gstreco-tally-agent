@@ -402,7 +402,7 @@ func TestNormalize_RCMMarksReverseChargeAndKind(t *testing.T) {
 	}
 }
 
-func TestNormalize_SkipsCancelledAndNonInvoice(t *testing.T) {
+func TestNormalize_SkipsCancelledButCapturesVoucherMode(t *testing.T) {
 	base := RawVoucher{
 		GUID: "g", Date: parseDate(t, "2026-04-10"),
 		VoucherType: "Purchase", VoucherNumber: "P1",
@@ -416,10 +416,88 @@ func TestNormalize_SkipsCancelledAndNonInvoice(t *testing.T) {
 	if rows, _ := Normalize(base, NormalizeOptions{}); rows != nil {
 		t.Errorf("cancelled voucher produced %d rows, want 0", len(rows))
 	}
+	// "As voucher" accounting mode (ISINVOICE=No) is NO LONGER dropped: as long
+	// as the party ledger is resolvable the document is captured exactly like
+	// an invoice-mode purchase. Regression guard for the vanished-voucher-mode
+	// purchases bug.
 	base.IsCancelled = false
 	base.IsInvoice = false
-	if rows, _ := Normalize(base, NormalizeOptions{}); rows != nil {
-		t.Errorf("non-invoice voucher produced %d rows, want 0", len(rows))
+	rows, err := Normalize(base, NormalizeOptions{})
+	if err != nil {
+		t.Fatalf("voucher-mode purchase errored: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("voucher-mode voucher produced %d rows, want 1", len(rows))
+	}
+	if rows[0].InvoiceValue != 118000 || rows[0].TaxableValue != 100000 {
+		t.Errorf("voucher-mode row = (inv %v, taxable %v), want (118000, 100000)",
+			rows[0].InvoiceValue, rows[0].TaxableValue)
+	}
+}
+
+func TestNormalize_VoucherModeRecoversPartyViaBillBearer(t *testing.T) {
+	// The realistic "as voucher" shape: ISINVOICE=No AND PARTYLEDGERNAME blank,
+	// so the parser never flags a party ledger (IsPartyLedger stays false on
+	// every line). The Sundry Creditor is still the only ledger carrying bill
+	// allocations, so classifyLedgers must recover it as the party. This is the
+	// shape of purchases booked through a user-defined purchase voucher type in
+	// accounting mode, which previously vanished from both the purchase lane and
+	// the journal lane.
+	v := RawVoucher{
+		GUID: "vmode-billbearer", Date: parseDate(t, "2026-06-17"),
+		VoucherType:     "Purchase Alt",
+		VoucherNumber:   "2103",
+		PartyLedgerName: "",
+		IsInvoice:       false,
+		LedgerEntries: []LedgerEntry{
+			{LedgerName: "Purchase Alt A/c", Amount: -100000},
+			{LedgerName: "IGST", Amount: -18000, GSTClass: "IGST@18"},
+			{
+				LedgerName: "Acme Traders", Amount: 118000,
+				BillAllocations: []BillRef{
+					{Name: "2103", Amount: 118000, BillType: "New Ref"},
+				},
+			},
+		},
+	}
+	rows, err := Normalize(v, NormalizeOptions{Kind: IngestKindPurchase})
+	if err != nil {
+		t.Fatalf("voucher-mode purchase errored: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	r := rows[0]
+	if r.InvoiceValue != 118000 {
+		t.Errorf("invoice_value = %v, want 118000", r.InvoiceValue)
+	}
+	if r.TaxableValue != 100000 {
+		t.Errorf("taxable_value = %v, want 100000", r.TaxableValue)
+	}
+	if r.IGST != 18000 {
+		t.Errorf("igst = %v, want 18000", r.IGST)
+	}
+	if r.InvoiceNumber != "2103" {
+		t.Errorf("invoice_number = %q, want 2103", r.InvoiceNumber)
+	}
+}
+
+func TestNormalize_VoucherModeWithoutResolvablePartyStillErrors(t *testing.T) {
+	// Residual edge: voucher mode, no party name AND no bill allocations on any
+	// line — we cannot deterministically tell the creditor from the purchase
+	// account, so we drop it with a COUNTED error (visible in DroppedOnNormalize)
+	// rather than guess. This is strictly better than the old silent skip.
+	v := RawVoucher{
+		GUID: "vmode-noparty", Date: parseDate(t, "2026-06-17"),
+		VoucherType: "Purchase", VoucherNumber: "9",
+		PartyLedgerName: "", IsInvoice: false,
+		LedgerEntries: []LedgerEntry{
+			{LedgerName: "Purchase A/c", Amount: -1340},
+			{LedgerName: "Cash Vendor", Amount: 1340},
+		},
+	}
+	if _, err := Normalize(v, NormalizeOptions{Kind: IngestKindPurchase}); err == nil {
+		t.Error("expected error when no party ledger is resolvable")
 	}
 }
 
