@@ -3,36 +3,25 @@
 package secretstore
 
 import (
-	"fmt"
-	"os/exec"
+	"github.com/vishal0589/gstreco-tally-agent/internal/winacl"
 )
 
 // applyDirACL tightens the secrets directory's ACL so non-admin users
-// on the same box cannot list or read entries. Uses icacls.exe (built
-// into Windows) rather than the Win32 SetSecurityInfo API because it's
-// a one-shot during first write — readability + portability across
-// Windows Server SKUs trumps avoiding a fork/exec.
+// on the same box cannot list or read entries.
 //
 // Final ACL after this runs:
-//   - SYSTEM            : Full control (inherited from parent)
-//   - Administrators    : Full control (inherited from parent)
+//   - SYSTEM            : Full control
+//   - Administrators    : Full control
 //   - Authenticated Users: REMOVED
 //   - Users              : REMOVED
 //
-// /inheritance:r removes inherited permissions; we then re-grant SYSTEM
-// + BUILTIN\Administrators explicitly so the service (LocalSystem) and
-// the operator's elevated PowerShell (Administrator) both have access.
+// v0.1.43: applied natively via SetNamedSecurityInfo instead of spawning
+// icacls.exe. Endpoint-protection filter drivers on pilot machines
+// suspended the icacls child indefinitely when spawned from the agent
+// (while the identical command ran instantly from an operator shell),
+// wedging every pair attempt with no error; the native call removes the
+// subprocess entirely and is also locale-independent (SDDL SID aliases
+// instead of the English-only "BUILTIN\Administrators" account name).
 func applyDirACL(dir string) error {
-	cmd := exec.Command(
-		"icacls.exe", dir,
-		"/inheritance:r",
-		"/grant:r", "SYSTEM:(OI)(CI)F",
-		"/grant:r", "BUILTIN\\Administrators:(OI)(CI)F",
-		"/T", "/C", "/Q",
-	)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("secretstore: icacls %s: %w (output: %s)", dir, err, string(out))
-	}
-	return nil
+	return winacl.ApplyProtectedDirTree(dir)
 }

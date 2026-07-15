@@ -114,22 +114,6 @@ func TestSaveDoesNotLeaveTempOnSuccess(t *testing.T) {
 	}
 }
 
-func TestIcaclsReportedFailures(t *testing.T) {
-	cases := []struct {
-		output string
-		want   bool
-	}{
-		{"Successfully processed 52 files; Failed processing 0 files", false},
-		{"Successfully processed 51 files; Failed processing 1 files", true},
-		{"failed processing 12 files", true},
-		{"Successfully processed 1 files", false},
-	}
-	for _, tc := range cases {
-		if got := icaclsReportedFailures(tc.output); got != tc.want {
-			t.Errorf("icaclsReportedFailures(%q)=%v want %v", tc.output, got, tc.want)
-		}
-	}
-}
 
 func TestDefaultDirReturnsNonEmpty(t *testing.T) {
 	dir := DefaultDir()
