@@ -51,7 +51,7 @@ func TestResolveMappingsForTick_ReadsACompanyWhereItIsOpen(t *testing.T) {
 
 	got := map[string]string{}
 	for _, m := range resolved {
-		got[m.MappingID] = m.TallyEndpoint
+		got[m.MappingID] = m.ReadEndpoint()
 	}
 	if got["m-aam"] != open.URL || got["m-hah"] != open.URL {
 		t.Fatalf("resolved = %v, want AAM and HaH both read from %s", got, open.URL)

@@ -25,6 +25,19 @@ type ActiveMapping struct {
 	TallyCompanyName string `json:"tally_company_name"`
 	TallyCompanyGUID string `json:"tally_company_guid,omitempty"`
 	CompanyGSTINID   string `json:"company_gstin_id"`
+	// FetchEndpoint, when set, is where the company is open this tick
+	// (syncrun.ResolveMappingEndpoints). Tally is read there, while ingest
+	// keeps reporting TallyEndpoint: the server finds the mapping (and its
+	// GSTIN) by that endpoint. Never sent or received.
+	FetchEndpoint string `json:"-"`
+}
+
+// ReadEndpoint is the Tally endpoint to read this tick.
+func (m ActiveMapping) ReadEndpoint() string {
+	if m.FetchEndpoint != "" {
+		return m.FetchEndpoint
+	}
+	return m.TallyEndpoint
 }
 
 // ActiveMappingsResponse is the body shape of GET

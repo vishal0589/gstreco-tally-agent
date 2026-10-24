@@ -2,6 +2,8 @@ package syncrun
 
 import (
 	"fmt"
+	"net/url"
+	"os"
 	"sort"
 	"strings"
 
@@ -34,15 +36,20 @@ type SkippedMapping struct {
 // failed request per voucher kind with no plain explanation.
 //
 //   - The company is open on its mapped port: read it there.
-//   - It isn't, and exactly one other port has it open: read it there.
+//   - It isn't, and exactly one other port has it open: read it there
+//     (FetchEndpoint). Ingest keeps reporting the mapped endpoint, which is
+//     how the server finds the mapping and its GSTIN.
 //   - It is open on several other ports: skip; two copies may hold
 //     different data, and the agent must not guess which is the books.
 //   - It is open nowhere: skip, saying so (and what the mapped port has).
 //
-// Names match exactly after trimming, as Tally shows them.
+// Names match exactly after trimming, as Tally shows them. When both the
+// mapping and the open company carry a Tally company GUID and they differ,
+// it is another company with the same name, never followed.
 func ResolveMappingEndpoints(mappings []ingest.ActiveMapping, probes []tally.ProbeResult) (resolved []ingest.ActiveMapping, followed []FollowedMapping, skipped []SkippedMapping) {
+	type openCopy struct{ endpoint, guid string }
 	byEndpoint := map[string]tally.ProbeResult{}
-	openOn := map[string][]string{}
+	openOn := map[string][]openCopy{}
 	for _, p := range probes {
 		ep := normalizeEndpoint(p.Endpoint)
 		byEndpoint[ep] = p
@@ -51,27 +58,43 @@ func ResolveMappingEndpoints(mappings []ingest.ActiveMapping, probes []tally.Pro
 		}
 		for _, c := range p.Companies {
 			name := strings.TrimSpace(c.Name)
-			if name != "" && !contains(openOn[name], ep) {
-				openOn[name] = append(openOn[name], ep)
+			if name == "" {
+				continue
+			}
+			dup := false
+			for _, oc := range openOn[name] {
+				dup = dup || oc.endpoint == ep
+			}
+			if !dup {
+				openOn[name] = append(openOn[name], openCopy{endpoint: ep, guid: strings.TrimSpace(c.GUID)})
 			}
 		}
-	}
-	for name := range openOn {
-		sort.Strings(openOn[name])
 	}
 
 	for _, m := range mappings {
 		name := strings.TrimSpace(m.TallyCompanyName)
 		mapped := normalizeEndpoint(m.TallyEndpoint)
-		where := openOn[name]
-		if contains(where, mapped) {
+		var where []string
+		onMapped := false
+		for _, oc := range openOn[name] {
+			if oc.endpoint == mapped {
+				onMapped = true
+				break
+			}
+			if m.TallyCompanyGUID != "" && oc.guid != "" && !strings.EqualFold(oc.guid, strings.TrimSpace(m.TallyCompanyGUID)) {
+				continue // same name, different company
+			}
+			where = append(where, oc.endpoint)
+		}
+		sort.Strings(where)
+		if onMapped {
 			resolved = append(resolved, m)
 			continue
 		}
 		switch len(where) {
 		case 1:
 			moved := m
-			moved.TallyEndpoint = where[0]
+			moved.FetchEndpoint = where[0]
 			resolved = append(resolved, moved)
 			followed = append(followed, FollowedMapping{Mapping: m, From: m.TallyEndpoint, To: where[0]})
 		case 0:
@@ -104,11 +127,35 @@ func notOpenReason(name, mapped string, byEndpoint map[string]tally.ProbeResult)
 	}
 }
 
-// normalizeEndpoint makes endpoints comparable: lower-case scheme and host,
-// localhost as 127.0.0.1, no trailing slash.
+// normalizeEndpoint makes endpoints comparable: lower case, no trailing
+// slash, and every name for this machine (localhost, loopback addresses,
+// 0.0.0.0, its host name) as 127.0.0.1, so one local Tally is never counted
+// as two copies or probed twice.
 func normalizeEndpoint(ep string) string {
 	ep = strings.TrimRight(strings.TrimSpace(strings.ToLower(ep)), "/")
-	return strings.Replace(ep, "://localhost:", "://127.0.0.1:", 1)
+	u, err := url.Parse(ep)
+	if err != nil || u.Host == "" {
+		return ep
+	}
+	if isLocalHost(u.Hostname()) {
+		port := u.Port()
+		u.Host = "127.0.0.1"
+		if port != "" {
+			u.Host += ":" + port
+		}
+	}
+	return u.String()
+}
+
+func isLocalHost(host string) bool {
+	switch host {
+	case "localhost", "127.0.0.1", "::1", "0.0.0.0":
+		return true
+	}
+	if name, err := os.Hostname(); err == nil && strings.EqualFold(host, name) {
+		return true
+	}
+	return false
 }
 
 func contains(list []string, s string) bool {

@@ -1,7 +1,9 @@
 package syncrun
 
 import (
+	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -50,10 +52,50 @@ func TestResolve_FollowsACompanyToTheOnePortItIsOpenOn(t *testing.T) {
 	}
 	got := map[string]string{}
 	for _, m := range resolved {
-		got[m.TallyCompanyName] = m.TallyEndpoint
+		got[m.TallyCompanyName] = m.ReadEndpoint()
+		// Ingest keeps the mapped endpoint: the server finds the mapping by it.
+		if m.TallyEndpoint != "http://127.0.0.1:9012" && m.TallyEndpoint != "http://localhost:9012/" {
+			t.Errorf("%s: TallyEndpoint changed to %s", m.TallyCompanyName, m.TallyEndpoint)
+		}
 	}
 	if got[aam] != "http://127.0.0.1:9552" || got[hah] != "http://127.0.0.1:9553" {
-		t.Fatalf("resolved endpoints = %v", got)
+		t.Fatalf("read endpoints = %v", got)
+	}
+}
+
+func TestResolve_NeverFollowsAnotherCompanyWithTheSameName(t *testing.T) {
+	m := mapping(aam, "http://127.0.0.1:9012")
+	m.TallyCompanyGUID = "guid-books"
+	other := probe("http://127.0.0.1:9552")
+	other.Companies = []tally.TallyCompany{{Name: aam, GUID: "guid-old-copy"}}
+	resolved, _, skipped := ResolveMappingEndpoints([]ingest.ActiveMapping{m}, []tally.ProbeResult{other})
+	if len(resolved) != 0 || len(skipped) != 1 {
+		t.Fatalf("resolved=%v skipped=%v: a different GUID must not be followed", resolved, skipped)
+	}
+	same := probe("http://127.0.0.1:9552")
+	same.Companies = []tally.TallyCompany{{Name: aam, GUID: "GUID-BOOKS"}}
+	resolved, _, _ = ResolveMappingEndpoints([]ingest.ActiveMapping{m}, []tally.ProbeResult{same})
+	if len(resolved) != 1 || resolved[0].ReadEndpoint() != "http://127.0.0.1:9552" {
+		t.Fatalf("the same GUID must be followed; resolved=%v", resolved)
+	}
+}
+
+func TestResolve_TreatsLocalAliasesAsOneTally(t *testing.T) {
+	host, err := os.Hostname()
+	if err != nil {
+		t.Skip("no host name")
+	}
+	// A mapping by host name and a probe by loopback reach the same Tally:
+	// one copy, read where it is mapped, not "several ports".
+	resolved, followed, skipped := ResolveMappingEndpoints(
+		[]ingest.ActiveMapping{mapping(aam, "http://"+host+":9012")},
+		[]tally.ProbeResult{probe("http://127.0.0.1:9012", aam), probe("http://localhost:9012", aam)},
+	)
+	if len(resolved) != 1 || len(followed) != 0 || len(skipped) != 0 {
+		t.Fatalf("resolved=%v followed=%v skipped=%v", resolved, followed, skipped)
+	}
+	if got := CandidateEndpoints([]ingest.ActiveMapping{mapping(aam, "http://"+host+":9012")}, []int{9012}); len(got) != 1 {
+		t.Fatalf("aliases must be probed once, got %v", got)
 	}
 }
 
@@ -62,7 +104,7 @@ func TestResolve_StaysOnTheMappedPortWhenTheCompanyIsAlsoOpenElsewhere(t *testin
 		[]ingest.ActiveMapping{mapping(aam, "http://127.0.0.1:9012")},
 		[]tally.ProbeResult{probe("http://127.0.0.1:9012", aam), probe("http://127.0.0.1:9552", aam)},
 	)
-	if len(followed) != 0 || resolved[0].TallyEndpoint != "http://127.0.0.1:9012" {
+	if len(followed) != 0 || resolved[0].ReadEndpoint() != "http://127.0.0.1:9012" {
 		t.Fatalf("want the mapped port kept; resolved=%v followed=%v", resolved, followed)
 	}
 }
@@ -99,5 +141,30 @@ func TestCandidateEndpoints_MappedPortsPlusEveryTallyListener(t *testing.T) {
 	want := []string{"http://127.0.0.1:9012", "http://127.0.0.1:3037", "http://127.0.0.1:9552"}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestWalkAll_ReadsTheFollowedPortButReportsTheMappedOne(t *testing.T) {
+	var readFrom []string
+	snd := &fakeSender{}
+	m := mapping("PLLUM CASA", "http://127.0.0.1:9012")
+	m.FetchEndpoint = "http://127.0.0.1:9552"
+	WalkAll(context.Background(), WalkOptions{
+		Mappings: []ingest.ActiveMapping{m},
+		Kinds:    []KindPair{{Name: "purchase", Tally: tally.VoucherPurchase, Ingest: tally.IngestKindPurchase}},
+		From:     makeReq().From,
+		To:       makeReq().To,
+		RunKind:  "manual",
+		NewTallyClient: func(endpoint string) TallyPoster {
+			readFrom = append(readFrom, endpoint)
+			return &fakeTally{resp: []byte(stubResponse)}
+		},
+		Sender: snd,
+	})
+	if len(readFrom) != 1 || readFrom[0] != "http://127.0.0.1:9552" {
+		t.Fatalf("read from %v, want the followed port", readFrom)
+	}
+	if len(snd.sent) == 0 || snd.sent[0].TallyEndpoint == nil || *snd.sent[0].TallyEndpoint != "http://127.0.0.1:9012" {
+		t.Fatalf("ingest must report the mapped endpoint; sent=%+v", snd.sent)
 	}
 }

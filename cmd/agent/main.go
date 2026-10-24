@@ -712,10 +712,9 @@ func runWindowSync(
 		Str("run_kind", runKind).
 		Msg("tick complete")
 
-	if err := errorFromWalkResult(res); err != nil {
-		return err
-	}
-	return unreadable
+	// Both reach the heartbeat: a walk failure must not hide which
+	// companies could not be read at all.
+	return errors.Join(errorFromWalkResult(res), unreadable)
 }
 
 // followProbeTimeout bounds each port probe before a tick. A Tally that
@@ -747,7 +746,7 @@ func resolveMappingsForTick(ctx context.Context, mappings []ingest.ActiveMapping
 		logger.Warn().
 			Str("mapping", f.Mapping.TallyCompanyName).
 			Str("mapped_endpoint", f.From).
-			Str("endpoint", f.To).
+			Str("read_endpoint", f.To).
 			Msg("company is open on another Tally port; reading it there")
 	}
 	if len(skipped) == 0 {
@@ -805,7 +804,7 @@ func syncMastersForMappings(
 	logger zerolog.Logger,
 ) {
 	for _, m := range mappings {
-		tc := newTallyClient(m.TallyEndpoint)
+		tc := newTallyClient(m.ReadEndpoint())
 		for _, kind := range []tally.MasterKind{tally.MasterVendor, tally.MasterCustomer} {
 			env, err := tally.BuildMasterXML(tally.MasterRequest{
 				Company: m.TallyCompanyName,
