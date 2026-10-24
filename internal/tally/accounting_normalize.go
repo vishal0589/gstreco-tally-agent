@@ -6,10 +6,23 @@ import (
 	"strings"
 )
 
+// AccountingNormalizeOptions carries lookups the journal and payment
+// normalisers use when the voucher itself is silent. Zero value: none.
+type AccountingNormalizeOptions struct {
+	// LedgerGSTIN returns the GSTIN on a ledger's master, or "". Used when
+	// the voucher has no PARTYGSTIN, which is the norm for journals.
+	LedgerGSTIN func(ledgerName string) string
+}
+
 // NormalizeJournal converts one raw Tally journal voucher into the agent's
 // journal-ingest shape. Returns nil,nil for cancelled vouchers so callers can
 // skip them without treating the row as malformed.
 func NormalizeJournal(v RawVoucher) (*JournalVoucherRow, error) {
+	return NormalizeJournalWith(v, AccountingNormalizeOptions{})
+}
+
+// NormalizeJournalWith is NormalizeJournal with ledger lookups.
+func NormalizeJournalWith(v RawVoucher, opts AccountingNormalizeOptions) (*JournalVoucherRow, error) {
 	if v.IsCancelled {
 		return nil, nil
 	}
@@ -43,7 +56,7 @@ func NormalizeJournal(v RawVoucher) (*JournalVoucherRow, error) {
 		return nil, fmt.Errorf("voucher %s: no ledger entries", voucherID(v))
 	}
 
-	partyName, partyGSTIN := chooseAccountingParty(v)
+	partyName, partyGSTIN := resolveAccountingParty(v, opts)
 	total := round2(math.Max(totalDebit, totalCredit))
 	refs := extractBillReferences(v)
 	voucherType := firstNonEmpty(strings.TrimSpace(v.VoucherType), "Journal Voucher")
@@ -90,6 +103,11 @@ func NormalizeJournal(v RawVoucher) (*JournalVoucherRow, error) {
 // NormalizePayment converts one raw Tally payment voucher into the
 // payment-ingest shape. Cancelled vouchers are skipped with nil,nil.
 func NormalizePayment(v RawVoucher) (*PaymentVoucherRow, error) {
+	return NormalizePaymentWith(v, AccountingNormalizeOptions{})
+}
+
+// NormalizePaymentWith is NormalizePayment with ledger lookups.
+func NormalizePaymentWith(v RawVoucher, opts AccountingNormalizeOptions) (*PaymentVoucherRow, error) {
 	if v.IsCancelled {
 		return nil, nil
 	}
@@ -116,7 +134,7 @@ func NormalizePayment(v RawVoucher) (*PaymentVoucherRow, error) {
 		return nil, fmt.Errorf("voucher %s: no ledger entries", voucherID(v))
 	}
 
-	partyName, partyGSTIN := chooseAccountingParty(v)
+	partyName, partyGSTIN := resolveAccountingParty(v, opts)
 	total := round2(math.Max(totalDebit, totalCredit))
 	refs := extractBillReferences(v)
 	voucherType := firstNonEmpty(strings.TrimSpace(v.VoucherType), "Payment Voucher")
@@ -183,6 +201,43 @@ func NormalizeTaxLedgerRows(raw []RawTaxLedger, period string) []TaxLedgerMonthl
 		out = append(out, item)
 	}
 	return out
+}
+
+// resolveAccountingParty picks the voucher's party and its GSTIN. The
+// voucher's own PARTYGSTIN wins. Without one, the chosen party ledger's
+// master GSTIN is used; and when that ledger has none (the chosen line can be
+// an expense when the voucher names no party and carries no bill refs), the
+// one other non-tax, non-bank ledger on the voucher that carries a GSTIN is
+// the party. With two or more such ledgers the GSTIN stays empty rather than
+// guessing between them.
+func resolveAccountingParty(v RawVoucher, opts AccountingNormalizeOptions) (name, gstin string) {
+	name, gstin = chooseAccountingParty(v)
+	if gstin != "" || opts.LedgerGSTIN == nil {
+		return name, gstin
+	}
+	if name != "" {
+		if g := opts.LedgerGSTIN(name); g != "" {
+			return name, g
+		}
+	}
+	var onlyName, onlyGSTIN string
+	distinct := 0
+	for _, le := range v.LedgerEntries {
+		ledger := strings.TrimSpace(le.LedgerName)
+		if ledger == "" || isBankOrCashLedger(ledger) || classifyTaxLedger(le.GSTClass, ledger) != "" {
+			continue
+		}
+		g := opts.LedgerGSTIN(ledger)
+		if g == "" || g == onlyGSTIN {
+			continue
+		}
+		distinct++
+		onlyName, onlyGSTIN = ledger, g
+	}
+	if distinct == 1 {
+		return onlyName, onlyGSTIN
+	}
+	return name, ""
 }
 
 func chooseAccountingParty(v RawVoucher) (name, gstin string) {

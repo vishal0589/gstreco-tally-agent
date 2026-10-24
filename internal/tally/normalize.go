@@ -15,6 +15,10 @@ type NormalizeOptions struct {
 	// RunKind is "full" | "incremental" | "manual"; passed through to the
 	// IngestRequestBody the ingest client builds.
 	RunKind string
+	// LedgerGSTIN returns the GSTIN on a ledger's master, or "". Fills the
+	// party GSTIN when the voucher carries no PARTYGSTIN (voucher-mode
+	// purchases and sales often don't).
+	LedgerGSTIN func(ledgerName string) string
 }
 
 // Normalize converts one RawVoucher into zero or more IngestVoucherRows.
@@ -71,6 +75,7 @@ func Normalize(v RawVoucher, opts NormalizeOptions) ([]IngestVoucherRow, error) 
 	}
 
 	base := baseRow(v, kind, side, invoiceValue, taxableValue, tax)
+	fillPartyFromLedger(&base, side, party.LedgerName, opts.LedgerGSTIN)
 
 	bills := relevantBillRefs(*party)
 	if len(bills) <= 1 {
@@ -131,6 +136,39 @@ func Normalize(v RawVoucher, opts NormalizeOptions) ([]IngestVoucherRow, error) 
 		rows = append(rows, row)
 	}
 	return rows, nil
+}
+
+// fillPartyFromLedger sets the party GSTIN from the party ledger's master
+// when the voucher left it empty, and the party name from the ledger line
+// when the voucher named no party.
+func fillPartyFromLedger(row *IngestVoucherRow, side IngestSide, partyLedger string, lookup func(string) string) {
+	partyLedger = strings.TrimSpace(partyLedger)
+	if lookup == nil || partyLedger == "" {
+		return
+	}
+	nameField, gstinField := &row.VendorName, &row.VendorGSTIN
+	if side == IngestSideSales {
+		nameField, gstinField = &row.CustomerName, &row.CustomerGSTIN
+	}
+	if *gstinField != nil && strings.TrimSpace(**gstinField) != "" {
+		return
+	}
+	name := partyLedger
+	if *nameField != nil && strings.TrimSpace(**nameField) != "" {
+		name = **nameField
+	}
+	g := lookup(name)
+	if g == "" && name != partyLedger {
+		g = lookup(partyLedger)
+	}
+	if g == "" {
+		return
+	}
+	*gstinField = &g
+	if *nameField == nil {
+		n := partyLedger
+		*nameField = &n
+	}
 }
 
 // baseRow fills the fields that don't depend on the single-vs-consolidated
