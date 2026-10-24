@@ -656,12 +656,17 @@ func runWindowSync(
 	// kind) failures log warn and the voucher walk still runs.
 	// Reusing the same Tally client per endpoint keeps connection
 	// pooling sensible (Tally HTTP is single-process anyway).
-	syncMastersForMappings(ctx, client, newTallyClient, mappings.Mappings, logger)
+	active, unreadable := resolveMappingsForTick(ctx, mappings.Mappings, logger)
+	if len(active) == 0 {
+		return unreadable
+	}
+
+	syncMastersForMappings(ctx, client, newTallyClient, active, logger)
 
 	runIDPrefix := fmt.Sprintf("%s-%d", runKind, time.Now().Unix())
 
 	res := syncrun.WalkAll(ctx, syncrun.WalkOptions{
-		Mappings:        mappings.Mappings,
+		Mappings:        active,
 		Kinds:           syncrun.DefaultKinds,
 		From:            from,
 		To:              to,
@@ -707,7 +712,56 @@ func runWindowSync(
 		Str("run_kind", runKind).
 		Msg("tick complete")
 
-	return errorFromWalkResult(res)
+	if err := errorFromWalkResult(res); err != nil {
+		return err
+	}
+	return unreadable
+}
+
+// followProbeTimeout bounds each port probe before a tick. A Tally that
+// can't list its companies in this time is busy or hung; it is skipped this
+// tick instead of holding every voucher kind for minutes.
+const followProbeTimeout = 8 * time.Second
+
+// resolveMappingsForTick reads each mapped company from the Tally port it is
+// open on right now (syncrun.ResolveMappingEndpoints): it probes the mapped
+// ports plus every port a tally.exe is listening on. Returns the mappings to
+// read and, when some company can't be read, an error naming each one. If
+// the probe itself can't run, the mappings are read as mapped, as before.
+func resolveMappingsForTick(ctx context.Context, mappings []ingest.ActiveMapping, logger zerolog.Logger) ([]ingest.ActiveMapping, error) {
+	ports, err := tally.TallyListeningPorts()
+	if err != nil {
+		logger.Warn().Err(err).Msg("could not list Tally ports; probing mapped ports only")
+	}
+	probes, err := tally.Discover(ctx, tally.DiscoverOptions{
+		Endpoints:   syncrun.CandidateEndpoints(mappings, ports),
+		Timeout:     followProbeTimeout,
+		Concurrency: 8,
+	})
+	if err != nil {
+		logger.Warn().Err(err).Msg("Tally port probe failed; reading mapped ports as before")
+		return mappings, nil
+	}
+	resolved, followed, skipped := syncrun.ResolveMappingEndpoints(mappings, probes)
+	for _, f := range followed {
+		logger.Warn().
+			Str("mapping", f.Mapping.TallyCompanyName).
+			Str("mapped_endpoint", f.From).
+			Str("endpoint", f.To).
+			Msg("company is open on another Tally port; reading it there")
+	}
+	if len(skipped) == 0 {
+		return resolved, nil
+	}
+	reasons := make([]string, 0, len(skipped))
+	for _, sk := range skipped {
+		logger.Error().
+			Str("mapping", sk.Mapping.TallyCompanyName).
+			Str("endpoint", sk.Mapping.TallyEndpoint).
+			Msg(sk.Reason)
+		reasons = append(reasons, sk.Reason)
+	}
+	return resolved, fmt.Errorf("%d of %d mapped companies not readable: %s", len(skipped), len(mappings), strings.Join(reasons, "; "))
 }
 
 func errorFromWalkResult(res syncrun.WalkResult) error {
