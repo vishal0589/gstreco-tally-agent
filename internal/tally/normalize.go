@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 )
 
 // NormalizeOptions tunes Normalize's behaviour. Zero value is sensible:
@@ -15,10 +16,10 @@ type NormalizeOptions struct {
 	// RunKind is "full" | "incremental" | "manual"; passed through to the
 	// IngestRequestBody the ingest client builds.
 	RunKind string
-	// LedgerGSTIN returns the GSTIN on a ledger's master, or "". Fills the
-	// party GSTIN when the voucher carries no PARTYGSTIN (voucher-mode
-	// purchases and sales often don't).
-	LedgerGSTIN func(ledgerName string) string
+	// Ledgers fills the party GSTIN from the party ledger's master when the
+	// voucher carries no PARTYGSTIN (voucher-mode purchases and sales often
+	// don't). Nil: voucher data only.
+	Ledgers LedgerDirectory
 }
 
 // Normalize converts one RawVoucher into zero or more IngestVoucherRows.
@@ -75,7 +76,7 @@ func Normalize(v RawVoucher, opts NormalizeOptions) ([]IngestVoucherRow, error) 
 	}
 
 	base := baseRow(v, kind, side, invoiceValue, taxableValue, tax)
-	fillPartyFromLedger(&base, side, party.LedgerName, opts.LedgerGSTIN)
+	fillPartyFromLedger(&base, side, party.LedgerName, v.Date, opts.Ledgers)
 
 	bills := relevantBillRefs(*party)
 	if len(bills) <= 1 {
@@ -141,11 +142,12 @@ func Normalize(v RawVoucher, opts NormalizeOptions) ([]IngestVoucherRow, error) 
 // fillPartyFromLedger sets the party GSTIN from the party ledger's master
 // when the voucher left it empty, and the party name from the ledger line
 // when the voucher named no party.
-func fillPartyFromLedger(row *IngestVoucherRow, side IngestSide, partyLedger string, lookup func(string) string) {
+func fillPartyFromLedger(row *IngestVoucherRow, side IngestSide, partyLedger string, on time.Time, ledgers LedgerDirectory) {
 	partyLedger = strings.TrimSpace(partyLedger)
-	if lookup == nil || partyLedger == "" {
+	if ledgers == nil || partyLedger == "" {
 		return
 	}
+	lookup := func(name string) string { return ledgers.GSTIN(name, on) }
 	nameField, gstinField := &row.VendorName, &row.VendorGSTIN
 	if side == IngestSideSales {
 		nameField, gstinField = &row.CustomerName, &row.CustomerGSTIN

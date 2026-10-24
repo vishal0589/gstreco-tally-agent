@@ -115,3 +115,40 @@ func TestRunOne_LedgerLookupFailureDoesNotFailTheRun(t *testing.T) {
 		t.Errorf("warnings = %v, want the lookup failure recorded", res.ParseWarnings)
 	}
 }
+
+func TestRunOne_FailedLedgerReplyIsNotCached(t *testing.T) {
+	resetLedgerGSTINCache()
+	defer resetLedgerGSTINCache()
+
+	healthy := false
+	tly := &fakeTally{respond: func(body []byte) []byte {
+		if strings.Contains(string(body), "GstrecoLedgerGstinCollection") {
+			if !healthy {
+				return []byte(`<ENVELOPE><HEADER><STATUS>0</STATUS></HEADER><BODY><DATA>Company not open</DATA></BODY></ENVELOPE>`)
+			}
+			return []byte(ledgerGSTINs)
+		}
+		return []byte(journalWithoutPartyGSTIN)
+	}}
+	req := makeReq()
+	req.KindName = "journal"
+	req.TallyKind = tally.VoucherJournal
+	req.IngestKind = ""
+
+	first := &fakeSender{}
+	if _, err := RunOne(context.Background(), tly, first, req, nil); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if first.journalSent[0].Batch[0].PartyGSTIN != nil {
+		t.Fatal("first run: Tally replied STATUS 0, so no GSTIN expected")
+	}
+
+	healthy = true
+	second := &fakeSender{}
+	if _, err := RunOne(context.Background(), tly, second, req, nil); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if got := second.journalSent[0].Batch[0].PartyGSTIN; got == nil || *got != "07ZZYAB1234C1Z5" {
+		t.Fatalf("second run PartyGSTIN = %v: the failed reply must not have been cached", got)
+	}
+}

@@ -55,6 +55,15 @@ func ledgerGSTINsFor(ctx context.Context, tallyClient TallyPoster, req Request) 
 	if err != nil {
 		return nil, err
 	}
+	// The group tree tells bank, cash and tax ledgers apart from parties by
+	// Tally's own grouping, whatever they are named. Without it, names decide.
+	if groupBody, gerr := tally.BuildGroupTreeXML(req.TallyCompany); gerr == nil {
+		if groupResp, gerr := tallyClient.PostXML(ctx, groupBody); gerr == nil {
+			if groups, gerr := tally.ParseGroupTree(groupResp); gerr == nil {
+				ledgers.ApplyGroupTree(groups)
+			}
+		}
+	}
 
 	ledgerGSTINCache.Lock()
 	ledgerGSTINCache.entries[key] = ledgerGSTINEntry{at: ledgerGSTINCache.now(), ledgers: ledgers}
@@ -73,9 +82,9 @@ func needsLedgerGSTINs(vouchers []tally.RawVoucher) bool {
 	return false
 }
 
-// ledgerGSTINLookup returns the lookup the normalisers use, or nil when no
-// voucher needs it. A failed lookup is recorded and the run continues: those
-// vouchers are sent without a GSTIN, as before.
+// ledgerGSTINLookup returns the ledger directory the normalisers use, or nil
+// when no voucher needs it. A failed lookup is recorded and the run
+// continues: those vouchers are sent without a GSTIN, as before.
 func ledgerGSTINLookup(
 	ctx context.Context,
 	tallyClient TallyPoster,
@@ -83,7 +92,7 @@ func ledgerGSTINLookup(
 	vouchers []tally.RawVoucher,
 	res *Result,
 	emit emitFn,
-) func(string) string {
+) tally.LedgerDirectory {
 	if !needsLedgerGSTINs(vouchers) {
 		return nil
 	}
@@ -95,5 +104,5 @@ func ledgerGSTINLookup(
 		return nil
 	}
 	emit("ledger_gstin", fmt.Sprintf("%d ledgers carry a GSTIN", ledgers.Len()))
-	return ledgers.Lookup
+	return ledgers
 }

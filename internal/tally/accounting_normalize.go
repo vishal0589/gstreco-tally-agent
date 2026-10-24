@@ -9,9 +9,9 @@ import (
 // AccountingNormalizeOptions carries lookups the journal and payment
 // normalisers use when the voucher itself is silent. Zero value: none.
 type AccountingNormalizeOptions struct {
-	// LedgerGSTIN returns the GSTIN on a ledger's master, or "". Used when
-	// the voucher has no PARTYGSTIN, which is the norm for journals.
-	LedgerGSTIN func(ledgerName string) string
+	// Ledgers answers from the ledger masters when the voucher has no
+	// PARTYGSTIN, which is the norm for journals. Nil: voucher data only.
+	Ledgers LedgerDirectory
 }
 
 // NormalizeJournal converts one raw Tally journal voucher into the agent's
@@ -204,30 +204,31 @@ func NormalizeTaxLedgerRows(raw []RawTaxLedger, period string) []TaxLedgerMonthl
 }
 
 // resolveAccountingParty picks the voucher's party and its GSTIN. The
-// voucher's own PARTYGSTIN wins. Without one, the chosen party ledger's
-// master GSTIN is used; and when that ledger has none (the chosen line can be
-// an expense when the voucher names no party and carries no bill refs), the
-// one other non-tax, non-bank ledger on the voucher that carries a GSTIN is
-// the party. With two or more such ledgers the GSTIN stays empty rather than
-// guessing between them.
+// voucher's own PARTYGSTIN wins. Without one:
+//   - an identified party (the voucher's party ledger, or the ledger holding
+//     its bill refs) takes its own ledger's GSTIN as of the voucher date, and
+//     is never swapped for another line, however unregistered it is;
+//   - an inferred party (neither exists, so the first ordinary line was
+//     taken) is replaced by the ledger that carries a GSTIN, but only when
+//     exactly one GSTIN appears among the voucher's party-capable lines.
+//     Tax lines and ledgers under bank, cash, duties-and-taxes or branch
+//     groups are never candidates. Two candidates: no GSTIN, no guess.
 func resolveAccountingParty(v RawVoucher, opts AccountingNormalizeOptions) (name, gstin string) {
-	name, gstin = chooseAccountingParty(v)
-	if gstin != "" || opts.LedgerGSTIN == nil {
+	name, gstin, identified := chooseAccountingParty(v)
+	if gstin != "" || opts.Ledgers == nil {
 		return name, gstin
 	}
-	if name != "" {
-		if g := opts.LedgerGSTIN(name); g != "" {
-			return name, g
-		}
+	if identified {
+		return name, opts.Ledgers.GSTIN(name, v.Date)
 	}
 	var onlyName, onlyGSTIN string
 	distinct := 0
 	for _, le := range v.LedgerEntries {
 		ledger := strings.TrimSpace(le.LedgerName)
-		if ledger == "" || isBankOrCashLedger(ledger) || classifyTaxLedger(le.GSTClass, ledger) != "" {
+		if ledger == "" || isBankOrCashLedger(ledger) || classifyTaxLedger(le.GSTClass, ledger) != "" || opts.Ledgers.IsNonParty(ledger) {
 			continue
 		}
-		g := opts.LedgerGSTIN(ledger)
+		g := opts.Ledgers.GSTIN(ledger, v.Date)
 		if g == "" || g == onlyGSTIN {
 			continue
 		}
@@ -240,16 +241,20 @@ func resolveAccountingParty(v RawVoucher, opts AccountingNormalizeOptions) (name
 	return name, ""
 }
 
-func chooseAccountingParty(v RawVoucher) (name, gstin string) {
+// chooseAccountingParty picks the party from the voucher alone. identified is
+// true when the voucher names it (party ledger, or the ledger with bill refs)
+// and false when the first ordinary line was taken as a best guess.
+func chooseAccountingParty(v RawVoucher) (name, gstin string, identified bool) {
+	gstin = strings.ToUpper(strings.TrimSpace(v.PartyGSTIN))
 	if n := strings.TrimSpace(v.PartyLedgerName); n != "" {
-		return n, strings.ToUpper(strings.TrimSpace(v.PartyGSTIN))
+		return n, gstin, true
 	}
 	for _, le := range v.LedgerEntries {
 		if len(relevantBillRefs(le)) == 0 {
 			continue
 		}
 		if n := strings.TrimSpace(le.LedgerName); n != "" {
-			return n, strings.ToUpper(strings.TrimSpace(v.PartyGSTIN))
+			return n, gstin, true
 		}
 	}
 	for _, le := range v.LedgerEntries {
@@ -257,9 +262,9 @@ func chooseAccountingParty(v RawVoucher) (name, gstin string) {
 		if name == "" || isBankOrCashLedger(name) || classifyTaxLedger(le.GSTClass, name) != "" {
 			continue
 		}
-		return name, strings.ToUpper(strings.TrimSpace(v.PartyGSTIN))
+		return name, gstin, false
 	}
-	return "", strings.ToUpper(strings.TrimSpace(v.PartyGSTIN))
+	return "", gstin, false
 }
 
 func extractBillReferences(v RawVoucher) []VoucherBillReference {
