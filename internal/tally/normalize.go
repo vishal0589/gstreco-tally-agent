@@ -3,6 +3,7 @@ package tally
 import (
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 )
 
@@ -27,10 +28,12 @@ type NormalizeOptions struct {
 // Responsibilities, in order:
 //  1. Infer kind (purchase|sales|credit_note|debit_note|rcm_self_invoice) from
 //     the voucher type name and ReverseCharge flag, unless overridden in opts.
-//  2. Classify every LedgerEntry as IGST / CGST / SGST / CESS / party / other,
-//     preferring GSTClass over name-pattern. Sum the tax buckets.
+//  2. Classify every LedgerEntry as IGST / CGST / SGST / CESS / party / TDS /
+//     base, preferring GSTClass over name-pattern and checking the tax legs
+//     against the whole voucher (classifyLedgers). Sum the tax buckets.
 //  3. Compute invoice_value from the party ledger's magnitude (Tally's
-//     double-entry invariant means |partyAmount| equals invoice total).
+//     double-entry invariant means |partyAmount| equals invoice total) plus
+//     any TDS withheld from it.
 //  4. Compute taxable_value = invoice_value - (igst + cgst + sgst + cess).
 //  5. For single-bill vouchers, emit one row. For multi-bill, prorate the
 //     per-bill amounts by allocation share.
@@ -55,19 +58,24 @@ func Normalize(v RawVoucher, opts NormalizeOptions) ([]IngestVoucherRow, error) 
 	}
 	side := inferSide(kind, v)
 
-	party, tax := classifyLedgers(v.LedgerEntries)
+	legs := classifyLedgers(v.LedgerEntries)
+	party, tax := legs.party, legs.tax
 	if party == nil {
 		return nil, fmt.Errorf("voucher %s: no party ledger (expected LedgerName=%q)", voucherID(v), v.PartyLedgerName)
 	}
 
-	invoiceValue := math.Abs(party.Amount)
-	taxTotal := tax.IGST + tax.CGST + tax.SGST + tax.CESS
+	// TDS the buyer withholds comes off what it owes the supplier, not off the
+	// invoice: the supplier's invoice (what GSTR-2B lists) is the party amount
+	// plus the TDS.
+	partyValue := math.Abs(party.Amount)
+	invoiceValue := partyValue + legs.withheld
+	taxTotal := tax.total()
 	taxableValue := invoiceValue - taxTotal
 	if taxableValue < 0 {
 		// Defensive: if totals don't match (missing child ledgers, rounding),
-		// fall back to summing the non-tax non-party ledgers so the value is
-		// never negative on the wire.
-		taxableValue = sumNonTaxNonPartyLedgers(v.LedgerEntries, party)
+		// fall back to the base legs so the value is never negative on the
+		// wire. TDS is never part of it.
+		taxableValue = legs.base
 	}
 
 	base := baseRow(v, kind, side, invoiceValue, taxableValue, tax)
@@ -80,8 +88,8 @@ func Normalize(v RawVoucher, opts NormalizeOptions) ([]IngestVoucherRow, error) 
 		return []IngestVoucherRow{base}, nil
 	}
 
-	// Consolidated: one row per bill ref, amounts prorated by share of the
-	// party ledger magnitude. parent_ref carries the best voucher-level
+	// Consolidated: one row per bill ref, amounts prorated by the bill's share
+	// of the party ledger magnitude. parent_ref carries the best voucher-level
 	// identity we have so the reco inspector can still re-stitch the group
 	// when Tally omits GUID on the parent voucher.
 	//
@@ -112,10 +120,10 @@ func Normalize(v RawVoucher, opts NormalizeOptions) ([]IngestVoucherRow, error) 
 			row.CESS = round2(tax.CESS - accCESS)
 		} else {
 			share := 0.0
-			if invoiceValue > 0 {
-				share = math.Abs(b.Amount) / invoiceValue
+			if partyValue > 0 {
+				share = math.Abs(b.Amount) / partyValue
 			}
-			row.InvoiceValue = round2(math.Abs(b.Amount))
+			row.InvoiceValue = round2(invoiceValue * share)
 			row.TaxableValue = round2(taxableValue * share)
 			row.IGST = round2(tax.IGST * share)
 			row.CGST = round2(tax.CGST * share)
@@ -294,89 +302,339 @@ type taxTotals struct {
 	IGST, CGST, SGST, CESS float64
 }
 
-// classifyLedgers splits LedgerEntries into the single party ledger and the
-// tax totals. Non-party non-tax ledgers (purchase / sales accounts, freight,
-// discounts) are ignored at this layer — taxable_value is recomputed as the
-// residual so rounding and sign conventions don't fight us.
-func classifyLedgers(entries []LedgerEntry) (party *LedgerEntry, tax taxTotals) {
+func (t taxTotals) total() float64 {
+	return t.IGST + t.CGST + t.SGST + t.CESS
+}
+
+func (t *taxTotals) add(head string, amount float64) {
+	switch head {
+	case "IGST":
+		t.IGST += math.Abs(amount)
+	case "CGST":
+		t.CGST += math.Abs(amount)
+	case "SGST":
+		t.SGST += math.Abs(amount)
+	case "CESS":
+		t.CESS += math.Abs(amount)
+	}
+}
+
+// voucherLegs is an invoice voucher split into its party ledger, its GST tax,
+// its taxable base and the TDS withheld from the party.
+type voucherLegs struct {
+	party *LedgerEntry
+	tax   taxTotals
+	// base sums the purchase / sales accounts, freight and other charges: the
+	// fallback taxable value when invoice - tax does not add up.
+	base float64
+	// withheld is the TDS on the party's side of the voucher (negative when a
+	// reversal books it on the other side). It is never taxable value or tax.
+	withheld float64
+}
+
+// taxLedgerGrade is how sure a leg's GST class and name are that it is a GST
+// tax ledger. Higher is surer.
+type taxLedgerGrade int
+
+const (
+	notTaxLedger taxLedgerGrade = iota
+	// namedTaxLedger carries a GST head in its name next to other words
+	// ("Exhibition Expenses IGST-18%", "IGST Exp 17(5)"): accountants name
+	// expense ledgers after the tax that goes with them.
+	namedTaxLedger
+	// classTaggedLedger has a head in Tally's GST class but none in its name.
+	classTaggedLedger
+	// taxLedger is named as a tax ledger: a head with only tax-ledger words
+	// and rates ("IGST Input Credit", "IGST ITC @ 18%", "Output IGST @ 18%",
+	// "IGST 18%"), or a head in both its GST class and its name. CESS
+	// ledgers are matched word for word and always count here.
+	taxLedger
+)
+
+type taxCandidate struct {
+	entry *LedgerEntry
+	head  string
+	grade taxLedgerGrade
+}
+
+// classifyLedgers splits an invoice voucher's LedgerEntries into the party
+// ledger, the GST tax, the taxable base and the TDS withheld. taxable_value is
+// recomputed by the caller as the residual so rounding and sign conventions
+// don't fight us.
+//
+// Whether a leg is tax is decided on the whole voucher, not on its name alone:
+//   - TDS is never tax or taxable value (isWithholdingLedger).
+//   - A leg only named after a GST head is the taxable base when the voucher
+//     also carries a tax ledger: next to "IGST ITC @ 18%", "Exhibition
+//     Expenses IGST-18%" is the expense.
+//   - A GST tax leg is never as large as the taxable value. While the tax
+//     would be at least the rest of the invoice, the least sure, largest leg
+//     counted as tax is the base. Legs named as tax ledgers are never moved.
+func classifyLedgers(entries []LedgerEntry) voucherLegs {
+	var legs voucherLegs
 	// billBearers collects non-tax ledgers that carry bill allocations. In a
 	// purchase/sales voucher only the party ledger (Sundry Creditor / Debtor)
 	// carries bills — the purchase/sales account and tax ledgers never do. We
 	// use this as a deterministic party fallback for "as voucher" accounting
 	// mode, where PARTYLEDGERNAME is blank so IsPartyLedger is never set.
-	var billBearers []*LedgerEntry
+	var billBearers, others, withholding []*LedgerEntry
+	var candidates []taxCandidate
+	hasTaxLedger := false
 	for i := range entries {
 		e := &entries[i]
-		if e.IsPartyLedger && party == nil {
-			party = e
+		if e.IsPartyLedger && legs.party == nil {
+			legs.party = e
 			continue
 		}
-		switch classifyTaxLedger(e.GSTClass, e.LedgerName) {
-		case "IGST":
-			tax.IGST += math.Abs(e.Amount)
-		case "CGST":
-			tax.CGST += math.Abs(e.Amount)
-		case "SGST":
-			tax.SGST += math.Abs(e.Amount)
-		case "CESS":
-			tax.CESS += math.Abs(e.Amount)
-		default:
-			// Non-tax, non-flagged-party ledger: a purchase/sales account, a
-			// charge (freight/discount), or — in voucher mode — the unflagged
-			// party ledger itself. Only the party carries bill allocations.
-			if len(e.BillAllocations) > 0 {
-				billBearers = append(billBearers, e)
-			}
+		if isWithholdingLedger(e.LedgerName) {
+			withholding = append(withholding, e)
+			continue
+		}
+		if head, grade := gradeTaxLedger(e.GSTClass, e.LedgerName); grade != notTaxLedger {
+			candidates = append(candidates, taxCandidate{entry: e, head: head, grade: grade})
+			hasTaxLedger = hasTaxLedger || grade == taxLedger
+			continue
+		}
+		// Non-tax, non-flagged-party ledger: a purchase/sales account, a
+		// charge (freight/discount), or — in voucher mode — the unflagged
+		// party ledger itself. Only the party carries bill allocations.
+		others = append(others, e)
+		if len(e.BillAllocations) > 0 {
+			billBearers = append(billBearers, e)
 		}
 	}
 	// Voucher-mode fallback: no ledger matched PARTYLEDGERNAME, so recover the
 	// party as the bill-bearing ledger. If Tally spread bills across more than
 	// one line, take the largest-magnitude bearer (the true invoice total).
-	if party == nil {
+	if legs.party == nil {
 		for _, e := range billBearers {
-			if party == nil || math.Abs(e.Amount) > math.Abs(party.Amount) {
-				party = e
+			if legs.party == nil || math.Abs(e.Amount) > math.Abs(legs.party.Amount) {
+				legs.party = e
 			}
 		}
 	}
-	return party, tax
+	if legs.party == nil {
+		return legs
+	}
+
+	for _, e := range others {
+		if e != legs.party {
+			legs.base += math.Abs(e.Amount)
+		}
+	}
+	for _, e := range withholding {
+		if sameSide(e.Amount, legs.party.Amount) {
+			legs.withheld += math.Abs(e.Amount)
+		} else {
+			legs.withheld -= math.Abs(e.Amount)
+		}
+	}
+
+	var taxed []taxCandidate
+	for _, c := range candidates {
+		if c.grade == namedTaxLedger && hasTaxLedger {
+			legs.base += math.Abs(c.entry.Amount)
+			continue
+		}
+		taxed = append(taxed, c)
+	}
+	// Least sure first, then largest: the order in which legs counted as tax
+	// give way to the base.
+	sort.SliceStable(taxed, func(i, j int) bool {
+		if taxed[i].grade != taxed[j].grade {
+			return taxed[i].grade < taxed[j].grade
+		}
+		return math.Abs(taxed[i].entry.Amount) > math.Abs(taxed[j].entry.Amount)
+	})
+	gross := math.Abs(legs.party.Amount) + legs.withheld
+	taxSum := 0.0
+	for _, c := range taxed {
+		taxSum += math.Abs(c.entry.Amount)
+	}
+	moved := 0
+	for moved < len(taxed) && taxed[moved].grade != taxLedger && gross > 0 && 2*taxSum >= gross {
+		amount := math.Abs(taxed[moved].entry.Amount)
+		taxSum -= amount
+		legs.base += amount
+		moved++
+	}
+	for _, c := range taxed[moved:] {
+		legs.tax.add(c.head, c.entry.Amount)
+	}
+	return legs
 }
 
-// classifyTaxLedger labels a single LedgerEntry. Prefers the explicit
-// GSTClass field (only populated when the ledger was created via Tally's GST
-// masters) and falls back to substring match on the ledger name for legacy
-// ledgers that people created manually.
+func sameSide(a, b float64) bool {
+	return (a > 0 && b > 0) || (a < 0 && b < 0)
+}
+
+// classifyTaxLedger labels a single LedgerEntry with its GST head, or "" when
+// it is not a tax ledger. Whether a named leg really is tax depends on the
+// rest of the voucher; see classifyLedgers.
+func classifyTaxLedger(gstClass, name string) string {
+	head, _ := gradeTaxLedger(gstClass, name)
+	return head
+}
+
+// gradeTaxLedger reads one leg's GST head and how sure we are that it is a
+// tax ledger. Tally's GST class wins when it names a head (it is only
+// populated when the ledger was created via Tally's GST masters); the name is
+// read word by word, so a head glued into another word ("Expenses GST" ->
+// "EXPENSESGST", "Big Stall" -> "BIGSTALL") is not one.
 //
 // UTGST (Union Territory GST) is folded into SGST — the GSTR-2B schema has
 // no separate bucket and the combined tax rate matches SGST everywhere.
-func classifyTaxLedger(gstClass, name string) string {
+func gradeTaxLedger(gstClass, name string) (string, taxLedgerGrade) {
+	words := ledgerWords(name)
+	nameHead := ""
+	for _, head := range []string{"IGST", "CGST", "SGST"} {
+		for _, w := range words {
+			if gstHeadOfWord(w) == head {
+				nameHead = head
+				break
+			}
+		}
+		if nameHead != "" {
+			break
+		}
+	}
+
 	if c := strings.ToUpper(strings.TrimSpace(gstClass)); c != "" {
+		classHead := ""
 		switch {
 		case strings.HasPrefix(c, "IGST"):
-			return "IGST"
+			classHead = "IGST"
 		case strings.HasPrefix(c, "CGST"):
-			return "CGST"
+			classHead = "CGST"
 		case strings.HasPrefix(c, "SGST"), strings.HasPrefix(c, "UTGST"):
-			return "SGST"
+			classHead = "SGST"
 		case strings.HasPrefix(c, "CESS"):
-			return "CESS"
+			classHead = "CESS"
+		}
+		if classHead != "" {
+			if nameHead != "" || classHead == "CESS" || isTaxLedgerName(words) {
+				return classHead, taxLedger
+			}
+			return classHead, classTaggedLedger
+		}
+	}
+	if looksLikeCommercialAccountLedger(compactTaxLedgerToken(name)) {
+		return "", notTaxLedger
+	}
+	if nameHead == "" {
+		if hasCessTaxToken(name) {
+			return "CESS", taxLedger
+		}
+		return "", notTaxLedger
+	}
+	if isTaxLedgerName(words) {
+		return nameHead, taxLedger
+	}
+	return nameHead, namedTaxLedger
+}
+
+// ledgerWords is a ledger name upper-cased and split on everything but
+// letters and digits.
+func ledgerWords(value string) []string {
+	return strings.FieldsFunc(strings.ToUpper(value), func(r rune) bool {
+		return !((r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'))
+	})
+}
+
+// taxLedgerWords mark a ledger that holds tax rather than an expense.
+var taxLedgerWords = map[string]bool{
+	"INPUT": true, "OUTPUT": true, "ITC": true, "CREDIT": true, "PAYABLE": true,
+	"RECEIVABLE": true, "LIABILITY": true, "TAX": true, "TAXES": true,
+	"DUTY": true, "DUTIES": true, "RCM": true,
+}
+
+// gstHeadOfWord is the head a word names: the head itself, a head with a rate
+// or tax word glued on ("IGST18", "IGSTPAYABLE"), or "INPUT"/"OUTPUT" glued in
+// front ("OUTPUTIGST").
+func gstHeadOfWord(w string) string {
+	for _, h := range []struct{ word, head string }{
+		{"IGST", "IGST"}, {"CGST", "CGST"}, {"SGST", "SGST"}, {"UTGST", "SGST"},
+	} {
+		if strings.HasPrefix(w, h.word) {
+			return h.head
+		}
+		if rest, ok := strings.CutSuffix(w, h.word); ok && (rest == "INPUT" || rest == "OUTPUT") {
+			return h.head
+		}
+	}
+	return ""
+}
+
+// isTaxLedgerName is a name made of a GST head and tax-ledger words or rates
+// only, or one with a tax-ledger word in it.
+func isTaxLedgerName(words []string) bool {
+	plain := true
+	for _, w := range words {
+		if taxLedgerWords[w] {
+			return true
+		}
+		if head := gstHeadOfWord(w); head != "" {
+			for _, h := range []string{"IGST", "CGST", "SGST", "UTGST"} {
+				if rest, ok := strings.CutPrefix(w, h); ok && taxLedgerWords[rest] {
+					return true
+				}
+			}
+			continue
+		}
+		if w == "GST" || len(w) == 1 || isDigits(w) {
+			continue
+		}
+		plain = false
+	}
+	return plain
+}
+
+func isDigits(w string) bool {
+	for _, r := range w {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return w != ""
+}
+
+// isWithholdingLedger is a TDS ledger: income-tax TDS ("TDS on Contractor -
+// 1%", "Tax Deducted at Source 194C") or GST TDS ("TDS Payable Under CGST @
+// 1%"). The buyer withholds it from what it owes the supplier, so it is never
+// the invoice's taxable value or GST.
+func isWithholdingLedger(name string) bool {
+	words := ledgerWords(name)
+	for i, w := range words {
+		if strings.HasPrefix(w, "TDS") || w == "WITHHOLDING" {
+			return true
+		}
+		if w == "TAX" && i+1 < len(words) && words[i+1] == "DEDUCTED" {
+			return true
+		}
+	}
+	return false
+}
+
+// mentionsGSTHead is deliberately broad: a GST head anywhere in the GST class
+// or the name, even glued into another word. The journal lane uses it only to
+// keep a GST-looking ledger from being guessed as a voucher's party.
+func mentionsGSTHead(gstClass, name string) bool {
+	if c := strings.ToUpper(strings.TrimSpace(gstClass)); c != "" {
+		for _, head := range []string{"IGST", "CGST", "SGST", "UTGST", "CESS"} {
+			if strings.HasPrefix(c, head) {
+				return true
+			}
 		}
 	}
 	n := compactTaxLedgerToken(name)
 	if looksLikeCommercialAccountLedger(n) {
-		return ""
+		return false
 	}
-	switch {
-	case strings.Contains(n, "IGST"):
-		return "IGST"
-	case strings.Contains(n, "CGST"):
-		return "CGST"
-	case strings.Contains(n, "SGST"), strings.Contains(n, "UTGST"):
-		return "SGST"
-	case hasCessTaxToken(name):
-		return "CESS"
-	}
-	return ""
+	return strings.Contains(n, "IGST") ||
+		strings.Contains(n, "CGST") ||
+		strings.Contains(n, "SGST") ||
+		strings.Contains(n, "UTGST") ||
+		hasCessTaxToken(name)
 }
 
 func compactTaxLedgerToken(value string) string {
@@ -390,9 +648,7 @@ func compactTaxLedgerToken(value string) string {
 }
 
 func hasTaxLedgerWord(value, word string) bool {
-	for _, field := range strings.FieldsFunc(strings.ToUpper(value), func(r rune) bool {
-		return !((r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'))
-	}) {
+	for _, field := range ledgerWords(value) {
 		if field == word {
 			return true
 		}
@@ -488,23 +744,6 @@ func onlyNewRefName(party LedgerEntry) string {
 // the first usable bill ref.
 func voucherParentRef(v RawVoucher) string {
 	return bestVoucherReference(v)
-}
-
-// sumNonTaxNonPartyLedgers is the fallback for taxable_value when the
-// straight invoice_value - tax subtraction goes negative (damaged data).
-func sumNonTaxNonPartyLedgers(entries []LedgerEntry, party *LedgerEntry) float64 {
-	total := 0.0
-	for i := range entries {
-		e := &entries[i]
-		if party != nil && e == party {
-			continue
-		}
-		if classifyTaxLedger(e.GSTClass, e.LedgerName) != "" {
-			continue
-		}
-		total += math.Abs(e.Amount)
-	}
-	return total
 }
 
 // taxRateFromClass extracts the numeric rate from the first tax ledger's
