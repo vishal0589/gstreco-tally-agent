@@ -130,7 +130,7 @@ func WalkAll(ctx context.Context, opts WalkOptions) WalkResult {
 		if opts.PerMappingHook != nil {
 			opts.PerMappingHook(mIdx, len(opts.Mappings), m)
 		}
-		tallyClient := opts.NewTallyClient(m.TallyEndpoint)
+		tallyClient := opts.NewTallyClient(m.ReadEndpoint())
 		mappingRan := false
 
 		for _, kind := range kinds {
