@@ -216,3 +216,63 @@ func TestVersionURLAccepted(t *testing.T) {
 type errClient struct{ err error }
 
 func (e *errClient) Get(_ string) (*http.Response, error) { return nil, e.err }
+
+func TestCheckOnce_CarriesTheAutoUpdateSwitchAndInstaller(t *testing.T) {
+	cases := []struct {
+		name        string
+		body        string
+		wantEnabled bool
+		wantURL     string
+	}{
+		{
+			name:        "server allows it",
+			body:        `{"latest":"0.1.45","auto_update":{"enabled":true},"installer":{"windows_amd64":{"url":"https://x/installer.exe","sha256":"abc","version":"0.1.41"}}}`,
+			wantEnabled: true,
+			wantURL:     "https://x/installer.exe",
+		},
+		{
+			name:        "kill switch",
+			body:        `{"latest":"0.1.45","auto_update":{"enabled":false},"installer":{"windows_amd64":{"url":"https://x/installer.exe","sha256":"abc"}}}`,
+			wantEnabled: false,
+			wantURL:     "https://x/installer.exe",
+		},
+		{
+			name:        "older server without the field",
+			body:        `{"latest":"0.1.45"}`,
+			wantEnabled: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			var got *Notification
+			c, err := New(Options{
+				HTTPClient:     http.DefaultClient,
+				VersionURL:     srv.URL,
+				CurrentVersion: "v0.1.44",
+				Handler:        func(n Notification) { got = &n },
+				Logger:         quietLogger(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.checkOnce(context.Background())
+			if got == nil {
+				t.Fatal("handler did not fire")
+			}
+			if got.AutoUpdate != tc.wantEnabled {
+				t.Errorf("AutoUpdate = %v, want %v", got.AutoUpdate, tc.wantEnabled)
+			}
+			gotURL := ""
+			if got.Installer != nil {
+				gotURL = got.Installer.URL
+			}
+			if gotURL != tc.wantURL {
+				t.Errorf("Installer URL = %q, want %q", gotURL, tc.wantURL)
+			}
+		})
+	}
+}
