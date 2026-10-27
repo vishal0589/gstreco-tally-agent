@@ -5,6 +5,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"time"
 )
 
 // NormalizeOptions tunes Normalize's behaviour. Zero value is sensible:
@@ -16,6 +17,10 @@ type NormalizeOptions struct {
 	// RunKind is "full" | "incremental" | "manual"; passed through to the
 	// IngestRequestBody the ingest client builds.
 	RunKind string
+	// Ledgers fills the party GSTIN from the party ledger's master when the
+	// voucher carries no PARTYGSTIN (voucher-mode purchases and sales often
+	// don't). Nil: voucher data only.
+	Ledgers LedgerDirectory
 }
 
 // Normalize converts one RawVoucher into zero or more IngestVoucherRows.
@@ -79,6 +84,7 @@ func Normalize(v RawVoucher, opts NormalizeOptions) ([]IngestVoucherRow, error) 
 	}
 
 	base := baseRow(v, kind, side, invoiceValue, taxableValue, tax)
+	fillPartyFromLedger(&base, side, party.LedgerName, v.Date, opts.Ledgers)
 
 	bills := relevantBillRefs(*party)
 	if len(bills) <= 1 {
@@ -139,6 +145,40 @@ func Normalize(v RawVoucher, opts NormalizeOptions) ([]IngestVoucherRow, error) 
 		rows = append(rows, row)
 	}
 	return rows, nil
+}
+
+// fillPartyFromLedger sets the party GSTIN from the party ledger's master
+// when the voucher left it empty, and the party name from the ledger line
+// when the voucher named no party.
+func fillPartyFromLedger(row *IngestVoucherRow, side IngestSide, partyLedger string, on time.Time, ledgers LedgerDirectory) {
+	partyLedger = strings.TrimSpace(partyLedger)
+	if ledgers == nil || partyLedger == "" {
+		return
+	}
+	lookup := func(name string) string { return ledgers.GSTIN(name, on) }
+	nameField, gstinField := &row.VendorName, &row.VendorGSTIN
+	if side == IngestSideSales {
+		nameField, gstinField = &row.CustomerName, &row.CustomerGSTIN
+	}
+	if *gstinField != nil && strings.TrimSpace(**gstinField) != "" {
+		return
+	}
+	name := partyLedger
+	if *nameField != nil && strings.TrimSpace(**nameField) != "" {
+		name = **nameField
+	}
+	g := lookup(name)
+	if g == "" && name != partyLedger {
+		g = lookup(partyLedger)
+	}
+	if g == "" {
+		return
+	}
+	*gstinField = &g
+	if *nameField == nil {
+		n := partyLedger
+		*nameField = &n
+	}
 }
 
 // baseRow fills the fields that don't depend on the single-vs-consolidated
