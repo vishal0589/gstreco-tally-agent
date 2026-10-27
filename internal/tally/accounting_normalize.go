@@ -199,7 +199,7 @@ func chooseAccountingParty(v RawVoucher) (name, gstin string) {
 	}
 	for _, le := range v.LedgerEntries {
 		name := strings.TrimSpace(le.LedgerName)
-		if name == "" || isBankOrCashLedger(name) || classifyTaxLedger(le.GSTClass, name) != "" {
+		if name == "" || isBankOrCashLedger(name) || mentionsGSTHead(le.GSTClass, name) {
 			continue
 		}
 		return name, strings.ToUpper(strings.TrimSpace(v.PartyGSTIN))
