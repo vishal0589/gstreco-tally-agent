@@ -48,11 +48,13 @@ func runInvoiceSync(
 	emit("parsed", fmt.Sprintf("parsed %d vouchers (status=%d, warnings=%d)",
 		len(parsed.Vouchers), parsed.Status, len(parsed.Warnings)))
 
+	lookup := ledgerGSTINLookup(ctx, tallyClient, req, parsed.Vouchers, &res, emit)
 	rows := make([]tally.IngestVoucherRow, 0, len(parsed.Vouchers))
 	for _, v := range parsed.Vouchers {
 		out, normErr := tally.Normalize(v, tally.NormalizeOptions{
 			Kind:    req.IngestKind,
 			RunKind: req.RunKind,
+			Ledgers: lookup,
 		})
 		if normErr != nil {
 			res.DroppedOnNormalize++
@@ -160,9 +162,12 @@ func runJournalSync(
 	emit("parsed", fmt.Sprintf("parsed %d vouchers (status=%d, warnings=%d)",
 		len(parsed.Vouchers), parsed.Status, len(parsed.Warnings)))
 
+	opts := tally.AccountingNormalizeOptions{
+		Ledgers: ledgerGSTINLookup(ctx, tallyClient, req, parsed.Vouchers, &res, emit),
+	}
 	rows := make([]tally.JournalVoucherRow, 0, len(parsed.Vouchers))
 	for _, v := range parsed.Vouchers {
-		out, normErr := tally.NormalizeJournal(v)
+		out, normErr := tally.NormalizeJournalWith(v, opts)
 		if normErr != nil {
 			res.DroppedOnNormalize++
 			continue
@@ -255,9 +260,12 @@ func runPaymentSync(
 	emit("parsed", fmt.Sprintf("parsed %d vouchers (status=%d, warnings=%d)",
 		len(parsed.Vouchers), parsed.Status, len(parsed.Warnings)))
 
+	opts := tally.AccountingNormalizeOptions{
+		Ledgers: ledgerGSTINLookup(ctx, tallyClient, req, parsed.Vouchers, &res, emit),
+	}
 	rows := make([]tally.PaymentVoucherRow, 0, len(parsed.Vouchers))
 	for _, v := range parsed.Vouchers {
-		out, normErr := tally.NormalizePayment(v)
+		out, normErr := tally.NormalizePaymentWith(v, opts)
 		if normErr != nil {
 			res.DroppedOnNormalize++
 			continue
