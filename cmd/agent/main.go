@@ -36,6 +36,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,6 +46,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/vishal0589/gstreco-tally-agent/internal/autodiscover"
+	"github.com/vishal0589/gstreco-tally-agent/internal/autoupdate"
 	"github.com/vishal0589/gstreco-tally-agent/internal/config"
 	"github.com/vishal0589/gstreco-tally-agent/internal/heartbeat"
 	"github.com/vishal0589/gstreco-tally-agent/internal/ingest"
@@ -362,20 +364,47 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 		}
 	}()
 
-	// Self-update notifier (B5). Polls /api/tally/agent/version every
-	// 6 hours; logs at warn level when a newer version is available
-	// so the operator's `journalctl` / Event Viewer surfaces it. The
-	// future tray UI reads this via IPC.
+	// Self-update (B5). Polls /api/tally/agent/version every 6 hours.
+	// When the server allows it (auto_update.enabled), a newer release
+	// installs itself through the installer's silent update
+	// (internal/autoupdate); otherwise the warning tells the operator.
+	installDir := ""
+	if exe, exeErr := os.Executable(); exeErr == nil {
+		installDir = filepath.Dir(exe)
+	}
+	updater := autoupdate.New(autoupdate.Options{
+		StateDir:   filepath.Dir(cfgPath),
+		Server:     runtimes[0].info.Server,
+		ConfigPath: cfgPath,
+		InstallDir: installDir,
+		GOOS:       runtime.GOOS,
+		Busy:       func() bool { return sched.RunningCount() > 0 },
+		Logger:     logger,
+	})
 	updateChecker, err := selfupdate.New(selfupdate.Options{
 		HTTPClient:     http.DefaultClient,
 		VersionURL:     strings.TrimRight(runtimes[0].info.Server, "/") + "/api/tally/agent/version",
 		CurrentVersion: version.Version,
 		Handler: func(n selfupdate.Notification) {
-			logger.Warn().
+			req := autoupdate.Request{
+				CurrentVersion: n.CurrentVersion,
+				LatestVersion:  n.LatestVersion,
+				Enabled:        n.AutoUpdate,
+			}
+			if n.Installer != nil {
+				req.Installer = &autoupdate.Installer{URL: n.Installer.URL, SHA256: n.Installer.SHA256, Version: n.Installer.Version}
+			}
+			outcome, updateErr := updater.Consider(runCtx, req)
+			event := logger.Info()
+			if updateErr != nil {
+				event = logger.Warn().Err(updateErr)
+			}
+			event.
 				Str("current", n.CurrentVersion).
 				Str("latest", n.LatestVersion).
 				Str("released_at", n.ReleasedAt).
-				Msg("self-update available — rerun install.ps1 on this PC to upgrade")
+				Str("auto_update", string(outcome)).
+				Msg(autoUpdateMessage(outcome, updateErr))
 		},
 		Logger: logger,
 	})
@@ -883,4 +912,23 @@ func signalContext() (context.Context, context.CancelFunc) {
 		cancel()
 	}()
 	return ctx, cancel
+}
+
+// autoUpdateMessage is the log line for one version check that found a
+// newer release.
+func autoUpdateMessage(outcome autoupdate.Outcome, err error) string {
+	switch {
+	case err != nil:
+		return "self-update failed; will retry at a later check (or rerun the installer on this PC)"
+	case outcome == autoupdate.OutcomeLaunched:
+		return "self-update: installing the new release; the service restarts when it is done"
+	case outcome == autoupdate.OutcomeBusy:
+		return "self-update available; waiting for the running sync to finish"
+	case outcome == autoupdate.OutcomeGaveUp:
+		return "self-update did not install after several attempts — rerun the installer on this PC"
+	case outcome == autoupdate.OutcomeNotNewer:
+		return "self-update: already on the latest release"
+	default:
+		return "self-update available — rerun the installer on this PC to upgrade"
+	}
 }

@@ -28,17 +28,36 @@ const DefaultCheckInterval = 6 * time.Hour
 // stays opaque so future server-side additions don't break old
 // agents.
 type VersionResponse struct {
-	Latest               string `json:"latest"`
-	ReleasedAt           string `json:"released_at,omitempty"`
-	PollIntervalSeconds  int    `json:"poll_interval_seconds,omitempty"`
+	Latest              string `json:"latest"`
+	ReleasedAt          string `json:"released_at,omitempty"`
+	PollIntervalSeconds int    `json:"poll_interval_seconds,omitempty"`
+	// AutoUpdate is the server's switch for agents installing Latest
+	// themselves. Absent (an older server) reads as off.
+	AutoUpdate struct {
+		Enabled bool `json:"enabled"`
+	} `json:"auto_update"`
+	Installer struct {
+		WindowsAMD64 *InstallerAsset `json:"windows_amd64"`
+	} `json:"installer"`
+}
+
+// InstallerAsset is the GST Reco installer the server publishes; its
+// silent update mode is how an agent installs a newer release.
+type InstallerAsset struct {
+	URL     string `json:"url"`
+	SHA256  string `json:"sha256"`
+	Version string `json:"version"`
 }
 
 // Notification carries the comparison result so the caller can
-// decide what to do with it (log, tray badge, future auto-apply).
+// decide what to do with it (log, tray badge, auto-update).
 type Notification struct {
 	CurrentVersion string
 	LatestVersion  string
 	ReleasedAt     string
+	// AutoUpdate and Installer come from the same response.
+	AutoUpdate bool
+	Installer  *InstallerAsset
 	// FetchedAt is the agent-side timestamp of the check; useful
 	// for tray UIs that want to show "checked X minutes ago".
 	FetchedAt time.Time
@@ -73,10 +92,10 @@ type Checker struct {
 
 // Options configures a new Checker.
 type Options struct {
-	HTTPClient     HTTPClient
+	HTTPClient HTTPClient
 	// VersionURL is the full URL of /api/tally/agent/version.
 	// Server URL + the route path; daemon's caller composes it.
-	VersionURL     string
+	VersionURL string
 	// CurrentVersion is the agent's own semver string. Comparison
 	// is plain string equality — semver-aware logic ships if/when
 	// we have downgrade-block scenarios. Today the server only
@@ -200,6 +219,8 @@ func (c *Checker) checkOnce(_ context.Context) {
 		CurrentVersion: c.currentVersion,
 		LatestVersion:  body.Latest,
 		ReleasedAt:     body.ReleasedAt,
+		AutoUpdate:     body.AutoUpdate.Enabled,
+		Installer:      body.Installer.WindowsAMD64,
 		FetchedAt:      time.Now(),
 	})
 }
