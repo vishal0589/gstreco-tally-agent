@@ -1,0 +1,221 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- QA v17 G3: purchase vouchers with TDS / GST-named expense legs.
+     Party names and GSTINs are made up; amounts follow the QA examples
+     (Vinayak VE-26/27-76, DD/26-27/001, Europa 03/04). -->
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <STATUS>1</STATUS>
+  </HEADER>
+  <BODY>
+    <DATA>
+      <COLLECTION>
+        <VOUCHER VCHTYPE="Purchase" ACTION="Create">
+          <DATE>20260915</DATE>
+          <GUID>g3-vinayak-ve-76</GUID>
+          <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+          <VOUCHERNUMBER>VE-26/27-76</VOUCHERNUMBER>
+          <REFERENCE>VE-26/27-76</REFERENCE>
+          <PARTYLEDGERNAME>Vinayak Events (sample)</PARTYLEDGERNAME>
+          <PARTYGSTIN>07AAAAA0000A1Z5</PARTYGSTIN>
+          <ISINVOICE>No</ISINVOICE>
+          <ISCANCELLED>No</ISCANCELLED>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>Vinayak Events (sample)</LEDGERNAME>
+            <AMOUNT>-163800.00</AMOUNT>
+            <BILLALLOCATIONS.LIST>
+              <NAME>VE-26/27-76</NAME>
+              <AMOUNT>-163800.00</AMOUNT>
+              <BILLTYPE>New Ref</BILLTYPE>
+            </BILLALLOCATIONS.LIST>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>Exhibition Expenses IGST-18%</LEDGERNAME>
+            <AMOUNT>140000.00</AMOUNT>
+            <GSTCLASS/>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>IGST Input @ 18%</LEDGERNAME>
+            <AMOUNT>25200.00</AMOUNT>
+            <GSTCLASS/>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>TDS on Contract 194C</LEDGERNAME>
+            <AMOUNT>-1400.00</AMOUNT>
+            <GSTCLASS/>
+          </ALLLEDGERENTRIES.LIST>
+        </VOUCHER>
+        <VOUCHER VCHTYPE="Purchase" ACTION="Create">
+          <DATE>20260620</DATE>
+          <GUID>g3-dd-001</GUID>
+          <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+          <VOUCHERNUMBER>DD/26-27/001</VOUCHERNUMBER>
+          <REFERENCE>DD/26-27/001</REFERENCE>
+          <PARTYLEDGERNAME>Stall Builders (sample)</PARTYLEDGERNAME>
+          <PARTYGSTIN>07AAAAB0000A1Z5</PARTYGSTIN>
+          <ISINVOICE>No</ISINVOICE>
+          <ISCANCELLED>No</ISCANCELLED>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>Stall Builders (sample)</LEDGERNAME>
+            <AMOUNT>-479700.00</AMOUNT>
+            <BILLALLOCATIONS.LIST>
+              <NAME>DD/26-27/001</NAME>
+              <AMOUNT>-479700.00</AMOUNT>
+              <BILLTYPE>New Ref</BILLTYPE>
+            </BILLALLOCATIONS.LIST>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>Event Expenses IGST-18%</LEDGERNAME>
+            <AMOUNT>410000.00</AMOUNT>
+            <GSTCLASS/>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>IGST ITC @ 18%</LEDGERNAME>
+            <AMOUNT>73800.00</AMOUNT>
+            <GSTCLASS/>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>TDS Payable 194Q</LEDGERNAME>
+            <AMOUNT>-4100.00</AMOUNT>
+            <GSTCLASS/>
+          </ALLLEDGERENTRIES.LIST>
+        </VOUCHER>
+        <VOUCHER VCHTYPE="Purchase" ACTION="Create">
+          <DATE>20260910</DATE>
+          <GUID>g3-europa-03</GUID>
+          <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+          <VOUCHERNUMBER>EUR/26-27/03</VOUCHERNUMBER>
+          <REFERENCE>03</REFERENCE>
+          <PARTYLEDGERNAME>Europa Materials (sample)</PARTYLEDGERNAME>
+          <PARTYGSTIN>27AAAAC0000A1Z5</PARTYGSTIN>
+          <ISINVOICE>No</ISINVOICE>
+          <ISCANCELLED>No</ISCANCELLED>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>Europa Materials (sample)</LEDGERNAME>
+            <AMOUNT>-826434.90</AMOUNT>
+            <BILLALLOCATIONS.LIST>
+              <NAME>03</NAME>
+              <AMOUNT>-826434.90</AMOUNT>
+              <BILLTYPE>New Ref</BILLTYPE>
+            </BILLALLOCATIONS.LIST>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>Material Purchase IGST 18%</LEDGERNAME>
+            <AMOUNT>706355.00</AMOUNT>
+            <GSTCLASS/>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>IGST Input</LEDGERNAME>
+            <AMOUNT>127143.90</AMOUNT>
+            <GSTCLASS/>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>TDS on Contract 194C</LEDGERNAME>
+            <AMOUNT>-7064.00</AMOUNT>
+            <GSTCLASS/>
+          </ALLLEDGERENTRIES.LIST>
+        </VOUCHER>
+        <VOUCHER VCHTYPE="Purchase" ACTION="Create">
+          <DATE>20260925</DATE>
+          <GUID>g3-europa-04</GUID>
+          <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+          <VOUCHERNUMBER>EUR/26-27/04</VOUCHERNUMBER>
+          <REFERENCE>04</REFERENCE>
+          <PARTYLEDGERNAME>Europa Materials (sample)</PARTYLEDGERNAME>
+          <PARTYGSTIN>27AAAAC0000A1Z5</PARTYGSTIN>
+          <ISINVOICE>No</ISINVOICE>
+          <ISCANCELLED>No</ISCANCELLED>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>Europa Materials (sample)</LEDGERNAME>
+            <AMOUNT>-1377392.80</AMOUNT>
+            <BILLALLOCATIONS.LIST>
+              <NAME>04</NAME>
+              <AMOUNT>-1377392.80</AMOUNT>
+              <BILLTYPE>New Ref</BILLTYPE>
+            </BILLALLOCATIONS.LIST>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>Material Purchase IGST 18%</LEDGERNAME>
+            <AMOUNT>1177260.00</AMOUNT>
+            <GSTCLASS/>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>IGST Input</LEDGERNAME>
+            <AMOUNT>211906.80</AMOUNT>
+            <GSTCLASS/>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>TDS on Contract 194C</LEDGERNAME>
+            <AMOUNT>-11774.00</AMOUNT>
+            <GSTCLASS/>
+          </ALLLEDGERENTRIES.LIST>
+        </VOUCHER>
+        <VOUCHER VCHTYPE="Purchase" ACTION="Create">
+          <DATE>20260912</DATE>
+          <GUID>g3-plain</GUID>
+          <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+          <VOUCHERNUMBER>PI/26-27/090</VOUCHERNUMBER>
+          <REFERENCE>SUP/090</REFERENCE>
+          <PARTYLEDGERNAME>Plain Supplies (sample)</PARTYLEDGERNAME>
+          <PARTYGSTIN>09AAAAD0000A1Z5</PARTYGSTIN>
+          <ISINVOICE>No</ISINVOICE>
+          <ISCANCELLED>No</ISCANCELLED>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>Plain Supplies (sample)</LEDGERNAME>
+            <AMOUNT>-59000.00</AMOUNT>
+            <BILLALLOCATIONS.LIST>
+              <NAME>SUP/090</NAME>
+              <AMOUNT>-59000.00</AMOUNT>
+              <BILLTYPE>New Ref</BILLTYPE>
+            </BILLALLOCATIONS.LIST>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>Purchase - Local</LEDGERNAME>
+            <AMOUNT>50000.00</AMOUNT>
+            <GSTCLASS/>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>CGST Input @ 9%</LEDGERNAME>
+            <AMOUNT>4500.00</AMOUNT>
+            <GSTCLASS>CGST@9</GSTCLASS>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>SGST Input @ 9%</LEDGERNAME>
+            <AMOUNT>4500.00</AMOUNT>
+            <GSTCLASS>SGST@9</GSTCLASS>
+          </ALLLEDGERENTRIES.LIST>
+        </VOUCHER>
+        <VOUCHER VCHTYPE="Purchase" ACTION="Create">
+          <DATE>20260918</DATE>
+          <GUID>g3-named-only</GUID>
+          <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+          <VOUCHERNUMBER>PI/26-27/091</VOUCHERNUMBER>
+          <REFERENCE>SUP/091</REFERENCE>
+          <PARTYLEDGERNAME>Vinayak Events (sample)</PARTYLEDGERNAME>
+          <PARTYGSTIN>07AAAAA0000A1Z5</PARTYGSTIN>
+          <ISINVOICE>No</ISINVOICE>
+          <ISCANCELLED>No</ISCANCELLED>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>Vinayak Events (sample)</LEDGERNAME>
+            <AMOUNT>-99000.00</AMOUNT>
+            <BILLALLOCATIONS.LIST>
+              <NAME>SUP/091</NAME>
+              <AMOUNT>-99000.00</AMOUNT>
+              <BILLTYPE>New Ref</BILLTYPE>
+            </BILLALLOCATIONS.LIST>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>Exhibition Expenses IGST-18%</LEDGERNAME>
+            <AMOUNT>100000.00</AMOUNT>
+            <GSTCLASS/>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>TDS on Contract 194C</LEDGERNAME>
+            <AMOUNT>-1000.00</AMOUNT>
+            <GSTCLASS/>
+          </ALLLEDGERENTRIES.LIST>
+        </VOUCHER>
+      </COLLECTION>
+    </DATA>
+  </BODY>
+</ENVELOPE>

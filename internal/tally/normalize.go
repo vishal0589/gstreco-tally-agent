@@ -378,16 +378,18 @@ type taxLedgerGrade int
 
 const (
 	notTaxLedger taxLedgerGrade = iota
-	// namedTaxLedger carries a GST head in its name next to other words
-	// ("Exhibition Expenses IGST-18%", "IGST Exp 17(5)"): accountants name
-	// expense ledgers after the tax that goes with them.
+	// namedTaxLedger carries a GST head in its name after other words
+	// ("Exhibition Expenses IGST-18%", "Material Purchase IGST 18%"):
+	// accountants name expense ledgers after the tax that goes with them.
 	namedTaxLedger
 	// classTaggedLedger has a head in Tally's GST class but none in its name.
 	classTaggedLedger
 	// taxLedger is named as a tax ledger: a head with only tax-ledger words
 	// and rates ("IGST Input Credit", "IGST ITC @ 18%", "Output IGST @ 18%",
-	// "IGST 18%"), or a head in both its GST class and its name. CESS
-	// ledgers are matched word for word and always count here.
+	// "IGST 18%", "ECL - IGST"), blocked credit ("IGST Exp 17(5)"), a head
+	// followed by "Exp" or "on" ("CGST Exp", "IGST on Freight"), or a head in
+	// both its GST class and its name. CESS ledgers are matched word for word
+	// and always count here.
 	taxLedger
 )
 
@@ -583,6 +585,8 @@ func ledgerWords(value string) []string {
 
 // taxLedgerWords mark a ledger that holds tax rather than an expense.
 var taxLedgerWords = map[string]bool{
+	// The GST portal's electronic cash ledger ("ECL - IGST").
+	"ECL":   true,
 	"INPUT": true, "OUTPUT": true, "ITC": true, "CREDIT": true, "PAYABLE": true,
 	"RECEIVABLE": true, "LIABILITY": true, "TAX": true, "TAXES": true,
 	"DUTY": true, "DUTIES": true, "RCM": true,
@@ -605,12 +609,40 @@ func gstHeadOfWord(w string) string {
 	return ""
 }
 
+// blockedCreditWords mark a ledger holding GST whose credit is blocked
+// ("Ineligible IGST", "Disallowed CGST"); "17 5" is section 17(5).
+var blockedCreditWords = map[string]bool{
+	"BLOCKED": true, "INELIGIBLE": true, "DISALLOW": true, "DISALLOWED": true,
+}
+
+// headLeadWords after a GST head make it name the tax itself: GST written off
+// to expense ("CGST Exp - Revenue Expenditure") or the tax on a supply ("IGST
+// on Freight"). After other words a head usually names the thing taxed.
+var headLeadWords = map[string]bool{
+	"EXP": true, "EXPENSE": true, "EXPENSES": true, "ON": true,
+}
+
+// plainTaxNameWords leave a GST head's name plain: "GST" and the words of the
+// spelled-out heads ("Integrated Tax").
+var plainTaxNameWords = map[string]bool{
+	"GST": true, "INTEGRATED": true, "CENTRAL": true, "STATE": true,
+	"UNION": true, "TERRITORY": true,
+}
+
 // isTaxLedgerName is a name made of a GST head and tax-ledger words or rates
-// only, or one with a tax-ledger word in it.
+// only, one with a tax-ledger or blocked-credit word in it, or one where a
+// head is followed by "Exp" or "on". It matches the server's journal-lane
+// rule (GST_Reco isTaxLedgerName).
 func isTaxLedgerName(words []string) bool {
 	plain := true
-	for _, w := range words {
-		if taxLedgerWords[w] {
+	for i, w := range words {
+		if taxLedgerWords[w] || blockedCreditWords[w] {
+			return true
+		}
+		if w == "17" && i+1 < len(words) && words[i+1] == "5" {
+			return true
+		}
+		if gstHeadOfWord(w) != "" && i+1 < len(words) && headLeadWords[words[i+1]] {
 			return true
 		}
 		if head := gstHeadOfWord(w); head != "" {
@@ -621,7 +653,7 @@ func isTaxLedgerName(words []string) bool {
 			}
 			continue
 		}
-		if w == "GST" || len(w) == 1 || isDigits(w) {
+		if plainTaxNameWords[w] || len(w) == 1 || isDigits(w) {
 			continue
 		}
 		plain = false
