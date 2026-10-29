@@ -225,7 +225,7 @@ func resolveAccountingParty(v RawVoucher, opts AccountingNormalizeOptions) (name
 	distinct := 0
 	for _, le := range v.LedgerEntries {
 		ledger := strings.TrimSpace(le.LedgerName)
-		if ledger == "" || isBankOrCashLedger(ledger) || classifyTaxLedger(le.GSTClass, ledger) != "" || opts.Ledgers.IsNonParty(ledger) {
+		if ledger == "" || isBankOrCashLedger(ledger) || headFromGSTClass(le.GSTClass) != "" || headFromNameTokens(ledger) != "" || opts.Ledgers.IsNonParty(ledger) {
 			continue
 		}
 		g := opts.Ledgers.GSTIN(ledger, v.Date)
@@ -259,7 +259,7 @@ func chooseAccountingParty(v RawVoucher) (name, gstin string, identified bool) {
 	}
 	for _, le := range v.LedgerEntries {
 		name := strings.TrimSpace(le.LedgerName)
-		if name == "" || isBankOrCashLedger(name) || mentionsGSTHead(le.GSTClass, name) {
+		if name == "" || isBankOrCashLedger(name) || namesGSTLedger(le.GSTClass, name) {
 			continue
 		}
 		return name, gstin, false

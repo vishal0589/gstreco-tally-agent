@@ -48,13 +48,17 @@ func runInvoiceSync(
 	emit("parsed", fmt.Sprintf("parsed %d vouchers (status=%d, warnings=%d)",
 		len(parsed.Vouchers), parsed.Status, len(parsed.Warnings)))
 
+	// QA v18 R3: only a Duties & Taxes ledger makes a leg GST, so the
+	// company's duty-ledger masters are read once before any voucher.
+	dutyLedgers := dutyLedgerLookup(ctx, tallyClient, req, parsed.Vouchers, &res, emit)
 	lookup := ledgerGSTINLookup(ctx, tallyClient, req, parsed.Vouchers, &res, emit)
 	rows := make([]tally.IngestVoucherRow, 0, len(parsed.Vouchers))
 	for _, v := range parsed.Vouchers {
 		out, normErr := tally.Normalize(v, tally.NormalizeOptions{
-			Kind:    req.IngestKind,
-			RunKind: req.RunKind,
-			Ledgers: lookup,
+			Kind:        req.IngestKind,
+			RunKind:     req.RunKind,
+			Ledgers:     lookup,
+			DutyLedgers: dutyLedgers,
 		})
 		if normErr != nil {
 			res.DroppedOnNormalize++

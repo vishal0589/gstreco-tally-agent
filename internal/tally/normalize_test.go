@@ -409,6 +409,9 @@ func TestNormalize_SkipsCancelledButCapturesVoucherMode(t *testing.T) {
 		PartyLedgerName: "V", IsInvoice: true,
 		LedgerEntries: []LedgerEntry{
 			{LedgerName: "V", Amount: -118000, IsPartyLedger: true},
+			// QA v18 R3: the taxable value comes from the base leg, never
+			// from party - tax, so the voucher carries its purchase leg.
+			{LedgerName: "Purchase A/c", Amount: 100000},
 			{LedgerName: "IGST", Amount: 18000, GSTClass: "IGST@18"},
 		},
 	}
@@ -520,8 +523,13 @@ func TestClassifyTaxLedger_PrefersGSTClassOverName(t *testing.T) {
 	if classifyTaxLedger("CGST@9", "IGST @ 18%") != "CGST" {
 		t.Error("classifyTaxLedger should prefer GSTClass when present")
 	}
-	if classifyTaxLedger("", "Output IGST @ 18%") != "IGST" {
-		t.Error("classifyTaxLedger should fall back to name pattern")
+	// QA v18 R3: a name alone never makes a leg GST, so there is no name
+	// fallback; the name only says which head it mentions.
+	if classifyTaxLedger("", "Output IGST @ 18%") != "" {
+		t.Error("classifyTaxLedger must read the GST class only")
+	}
+	if headFromNameTokens("Output IGST @ 18%") != "IGST" {
+		t.Error("headFromNameTokens should read the head from the name")
 	}
 	// UTGST folds into SGST — single bucket on the wire.
 	if classifyTaxLedger("UTGST@9", "UTGST 9%") != "SGST" {
@@ -543,6 +551,12 @@ func TestClassifyTaxLedger_DoesNotTreatProcessingChargesAsCess(t *testing.T) {
 		if got := classifyTaxLedger("", name); got != "" {
 			t.Fatalf("classifyTaxLedger(%q) = %q, want non-tax ledger", name, got)
 		}
+		if got := headFromNameTokens(name); got != "" {
+			t.Fatalf("headFromNameTokens(%q) = %q, want no head", name, got)
+		}
+		if d := classifyLeg(LedgerEntry{LedgerName: name}, nil); d.role != LegBase || len(d.flags) > 0 {
+			t.Fatalf("classifyLeg(%q) = %s %v, want an unflagged base", name, d.role, d.flags)
+		}
 	}
 }
 
@@ -553,8 +567,12 @@ func TestClassifyTaxLedger_DetectsRealCessLedgers(t *testing.T) {
 		"CESS",
 	}
 	for _, name := range cases {
-		if got := classifyTaxLedger("", name); got != "CESS" {
-			t.Fatalf("classifyTaxLedger(%q) = %q, want CESS", name, got)
+		if got := headFromNameTokens(name); got != "CESS" {
+			t.Fatalf("headFromNameTokens(%q) = %q, want CESS", name, got)
+		}
+		book := NewDutyLedgerBook([]DutyLedger{{Name: name, TaxType: "GST", DutyHead: "Cess"}})
+		if d := classifyLeg(LedgerEntry{LedgerName: name}, book); d.role != LegTax || d.head != "CESS" {
+			t.Fatalf("classifyLeg(%q) with its Cess master = %s %q, want tax CESS", name, d.role, d.head)
 		}
 	}
 }
@@ -636,7 +654,12 @@ func TestNormalize_PurchaseLedgerNamedWithTaxFamilyDoesNotCollapseTaxableValue(t
 		},
 	}
 
-	rows, err := Normalize(v, NormalizeOptions{})
+	// QA v18 R3: the IGST ledger is tax by its Duties & Taxes master. The
+	// legs come to 2,539.95 against a party amount of 2,540: the 0.05 is
+	// flagged, not folded into the taxable value as v0.1.46 did (2,152.55).
+	rows, err := Normalize(v, NormalizeOptions{DutyLedgers: NewDutyLedgerBook([]DutyLedger{
+		{Name: "IGST Input Credit", Parent: "GST Input", TaxType: "GST", DutyHead: "Integrated Tax"},
+	})})
 	if err != nil {
 		t.Fatalf("Normalize: %v", err)
 	}
@@ -647,11 +670,14 @@ func TestNormalize_PurchaseLedgerNamedWithTaxFamilyDoesNotCollapseTaxableValue(t
 	if row.InvoiceNumber != "EYUP-5" {
 		t.Errorf("InvoiceNumber = %q, want EYUP-5", row.InvoiceNumber)
 	}
-	if !nearly(row.InvoiceValue, 2540, 0.01) {
-		t.Errorf("InvoiceValue = %v, want 2540", row.InvoiceValue)
+	if !nearly(row.InvoiceValue, 2539.95, 0.001) {
+		t.Errorf("InvoiceValue = %v, want 2539.95", row.InvoiceValue)
 	}
-	if !nearly(row.TaxableValue, 2152.55, 0.01) {
-		t.Errorf("TaxableValue = %v, want 2152.55", row.TaxableValue)
+	if !nearly(row.TaxableValue, 2152.50, 0.001) {
+		t.Errorf("TaxableValue = %v, want 2152.50", row.TaxableValue)
+	}
+	if !hasFlag(row, "legs do not balance: they establish 2539.95 net of TDS/TCS against a party amount of 2540.00") {
+		t.Errorf("flags = %v", row.NormalizationFlags)
 	}
 	if !nearly(row.IGST, 387.45, 0.01) || row.CGST != 0 || row.SGST != 0 {
 		t.Errorf("tax buckets: igst=%v cgst=%v sgst=%v, want 387.45/0/0", row.IGST, row.CGST, row.SGST)
