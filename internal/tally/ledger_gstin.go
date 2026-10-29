@@ -3,6 +3,7 @@ package tally
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -317,6 +318,11 @@ type xmlGroup struct {
 	Parent   string `xml:"PARENT"`
 }
 
+// ErrExportRefused is Tally answering a master export with an error (STATUS 0
+// or a LINEERROR, e.g. the company is not open): the masters were not
+// fetched, as opposed to a reply that could not be parsed.
+var ErrExportRefused = errors.New("tally: export failed")
+
 // walkTallyExport decodes a Tally export, calls onElement for each element
 // named elem, and fails on Tally's own error replies (STATUS 0, LINEERROR):
 // an HTTP 200 carrying an error must not read as an empty, successful
@@ -346,13 +352,13 @@ func walkTallyExport(raw []byte, elem string, onElement func(*xml.Decoder, *xml.
 			var s string
 			if err := dec.DecodeElement(&s, &start); err == nil {
 				if v, perr := strconv.Atoi(strings.TrimSpace(s)); perr == nil && v == 0 {
-					return fmt.Errorf("tally: export failed (STATUS 0)")
+					return fmt.Errorf("%w (STATUS 0)", ErrExportRefused)
 				}
 			}
 		case "LINEERROR":
 			var s string
 			_ = dec.DecodeElement(&s, &start)
-			return fmt.Errorf("tally: export failed: %s", strings.TrimSpace(s))
+			return fmt.Errorf("%w: %s", ErrExportRefused, strings.TrimSpace(s))
 		case elem:
 			if err := onElement(dec, &start); err != nil {
 				return err

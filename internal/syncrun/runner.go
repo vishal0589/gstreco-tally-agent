@@ -95,6 +95,10 @@ type Result struct {
 	// (unparsable date, malformed amount, dropped voucher). Same
 	// purpose as DroppedOnNormalize at parser-level.
 	ParseWarnings []string
+	// SyncWarnings are the masters fetch/parse failures of this run, sent
+	// on every ingest batch so the app's sync health shows them (QA v21
+	// G-A). Each also stays in ParseWarnings, the local log.
+	SyncWarnings []tally.SyncWarning
 	// ServerInserted / ServerAmended / ServerSkipped / ServerErrors are
 	// the counters returned by the app on 2xx ingest responses. They are
 	// authoritative for what the server says actually landed.

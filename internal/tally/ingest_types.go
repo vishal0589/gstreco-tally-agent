@@ -170,4 +170,7 @@ type IngestRequestBody struct {
 	// the first batch of a run and ignores it on subsequent batches.
 	RunKind   string `json:"run_kind,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
+	// SyncWarnings carries the run's masters fetch/parse failures to sync
+	// health. Omitted when there are none.
+	SyncWarnings []SyncWarning `json:"sync_warnings,omitempty"`
 }
