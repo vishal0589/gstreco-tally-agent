@@ -84,6 +84,11 @@ func runInvoiceSync(
 	periodTo := req.To.Format("2006-01-02")
 	batches := ingest.BuildBatches(req.RunID, req.RunID, req.IngestKind,
 		req.TallyCompany, tallyEndpoint, req.RunKind, &periodFrom, &periodTo, chunks)
+	// Every batch carries the run's masters warnings, so a run whose first
+	// batch fails still records them; the server de-duplicates (QA v21 G-A).
+	for i := range batches {
+		batches[i].SyncWarnings = res.SyncWarnings
+	}
 
 	for i, body := range batches {
 		if err := ctx.Err(); err != nil {
@@ -194,6 +199,9 @@ func runJournalSync(
 		tallyEndpoint = &req.TallyEndpoint
 	}
 	batches := buildJournalBatches(req.RunID, req.RunID, req.TallyCompany, tallyEndpoint, rows, req.BatchSize)
+	for i := range batches {
+		batches[i].SyncWarnings = res.SyncWarnings
+	}
 	for i, body := range batches {
 		if err := ctx.Err(); err != nil {
 			emit("complete", fmt.Sprintf("aborted: %v (sent=%d, remaining=%d)",
@@ -292,6 +300,9 @@ func runPaymentSync(
 		tallyEndpoint = &req.TallyEndpoint
 	}
 	batches := buildPaymentBatches(req.RunID, req.RunID, req.TallyCompany, tallyEndpoint, rows, req.BatchSize)
+	for i := range batches {
+		batches[i].SyncWarnings = res.SyncWarnings
+	}
 	for i, body := range batches {
 		if err := ctx.Err(); err != nil {
 			emit("complete", fmt.Sprintf("aborted: %v (sent=%d, remaining=%d)",
@@ -375,6 +386,9 @@ func runTaxLedgerSync(
 		tallyEndpoint = &req.TallyEndpoint
 	}
 	batches := buildTaxLedgerBatches(req.RunID, req.RunID, req.TallyCompany, tallyEndpoint, rows, req.BatchSize)
+	for i := range batches {
+		batches[i].SyncWarnings = res.SyncWarnings
+	}
 	for i, body := range batches {
 		if err := ctx.Err(); err != nil {
 			emit("complete", fmt.Sprintf("aborted: %v (sent=%d, remaining=%d)",

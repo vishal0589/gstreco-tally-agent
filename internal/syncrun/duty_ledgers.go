@@ -67,7 +67,8 @@ func dutyLedgersFor(ctx context.Context, tallyClient TallyPoster, req Request) (
 // fetched once per company before any voucher is normalised. A failed or
 // empty fetch is recorded and the run continues with no book: legs named
 // after a GST head are then uncertain and every row says the masters were
-// missing.
+// missing. The failure is logged and sent to GST Reco's sync health with the
+// run's batches (QA v21 G-A).
 func dutyLedgerLookup(
 	ctx context.Context,
 	tallyClient TallyPoster,
@@ -81,17 +82,25 @@ func dutyLedgerLookup(
 	}
 	book, err := dutyLedgersFor(ctx, tallyClient, req)
 	if err != nil {
-		msg := fmt.Sprintf("duty ledger masters unavailable; GST taken from the GST class alone and GST-named legs left uncertain: %v", err)
-		res.ParseWarnings = append(res.ParseWarnings, msg)
-		emit("duty_ledgers", msg)
+		dutyLedgersUnavailable(req, vouchers, res, emit,
+			fmt.Sprintf("duty ledger masters unavailable; GST taken from the GST class alone and GST-named legs left uncertain: %v", err))
 		return nil
 	}
 	if book == nil {
-		msg := "duty ledger masters came back empty; GST taken from the GST class alone and GST-named legs left uncertain"
-		res.ParseWarnings = append(res.ParseWarnings, msg)
-		emit("duty_ledgers", msg)
+		dutyLedgersUnavailable(req, vouchers, res, emit,
+			"duty ledger masters came back empty; GST taken from the GST class alone and GST-named legs left uncertain")
 		return nil
 	}
 	emit("duty_ledgers", fmt.Sprintf("%d Duties & Taxes ledgers", book.Len()))
 	return book
+}
+
+// dutyLedgersUnavailable logs the missing masters locally and records them for
+// every batch of the run, naming each live voucher: all were normalised
+// without the book.
+func dutyLedgersUnavailable(req Request, vouchers []tally.RawVoucher, res *Result, emit emitFn, msg string) {
+	res.ParseWarnings = append(res.ParseWarnings, msg)
+	emit("duty_ledgers", msg)
+	res.addSyncWarning(newSyncWarning(tally.SyncWarningDutyLedgerMastersUnavailable,
+		req.TallyCompany, msg, syncWarningNow(), liveVoucherGUIDs(vouchers, nil)))
 }
