@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SYNTHETIC TEST DATA - NOT REAL CLIENT DATA.
+  QA v18 R3: purchase vouchers with TDS, shaped like a day-book export.
+  Party names, GSTINs and voucher numbers are made up. Signs follow Tally's
+  export convention (debit negative, credit positive); the G3 fixture uses
+  the opposite one, so the two together prove the arithmetic orients on the
+  party leg rather than on a sign convention.
+    SYN-R3-001: net party 479,700 = taxable 410,000 + IGST 73,800 - TDS 4,100,
+                the expense named after IGST with an unmatched GST class.
+    SYN-R3-002: "Processing Charges" (not CESS), GST TDS under CGST / SGST and
+                income-tax TDS, all withheld from the party.
+-->
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <STATUS>1</STATUS>
+  </HEADER>
+  <BODY>
+    <DATA>
+      <COLLECTION>
+        <VOUCHER VCHTYPE="Purchase" ACTION="Create">
+          <DATE>20260620</DATE>
+          <GUID>syn-r3-001</GUID>
+          <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+          <VOUCHERNUMBER>SYN-R3-001</VOUCHERNUMBER>
+          <REFERENCE>SYN/26-27/001</REFERENCE>
+          <PARTYLEDGERNAME>Synthetic Stalls (SYNTHETIC)</PARTYLEDGERNAME>
+          <PARTYGSTIN>27AAAAA0000A1Z5</PARTYGSTIN>
+          <ISINVOICE>No</ISINVOICE>
+          <ISCANCELLED>No</ISCANCELLED>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>Synthetic Stalls (SYNTHETIC)</LEDGERNAME>
+            <AMOUNT>479700.00</AMOUNT>
+            <BILLALLOCATIONS.LIST>
+              <NAME>SYN/26-27/001</NAME>
+              <AMOUNT>479700.00</AMOUNT>
+              <BILLTYPE>New Ref</BILLTYPE>
+            </BILLALLOCATIONS.LIST>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>Event Expense IGST @18%</LEDGERNAME>
+            <AMOUNT>-410000.00</AMOUNT>
+            <GSTCLASS>Not Applicable</GSTCLASS>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>IGST ITC @ 18%</LEDGERNAME>
+            <AMOUNT>-73800.00</AMOUNT>
+            <GSTCLASS/>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>TDS on Contract 194C</LEDGERNAME>
+            <AMOUNT>4100.00</AMOUNT>
+            <GSTCLASS/>
+          </ALLLEDGERENTRIES.LIST>
+        </VOUCHER>
+        <VOUCHER VCHTYPE="Purchase" ACTION="Create">
+          <DATE>20260622</DATE>
+          <GUID>syn-r3-002</GUID>
+          <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+          <VOUCHERNUMBER>SYN-R3-002</VOUCHERNUMBER>
+          <REFERENCE>SYN/26-27/002</REFERENCE>
+          <PARTYLEDGERNAME>Synthetic Processors (SYNTHETIC)</PARTYLEDGERNAME>
+          <PARTYGSTIN>27AAAAA0001A1Z3</PARTYGSTIN>
+          <ISINVOICE>Yes</ISINVOICE>
+          <ISCANCELLED>No</ISCANCELLED>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>Synthetic Processors (SYNTHETIC)</LEDGERNAME>
+            <AMOUNT>11500.00</AMOUNT>
+            <BILLALLOCATIONS.LIST>
+              <NAME>SYN/26-27/002</NAME>
+              <AMOUNT>11500.00</AMOUNT>
+              <BILLTYPE>New Ref</BILLTYPE>
+            </BILLALLOCATIONS.LIST>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>Processing Charges</LEDGERNAME>
+            <AMOUNT>-10000.00</AMOUNT>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>CGST Input Credit</LEDGERNAME>
+            <AMOUNT>-900.00</AMOUNT>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>SGST Input Credit</LEDGERNAME>
+            <AMOUNT>-900.00</AMOUNT>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>TDS Payable Under CGST @ 1%</LEDGERNAME>
+            <AMOUNT>100.00</AMOUNT>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>TDS Payable Under SGST @ 1%</LEDGERNAME>
+            <AMOUNT>100.00</AMOUNT>
+          </ALLLEDGERENTRIES.LIST>
+          <ALLLEDGERENTRIES.LIST>
+            <LEDGERNAME>Tds Payable (94C) @ 1% (Non-Company)</LEDGERNAME>
+            <AMOUNT>100.00</AMOUNT>
+          </ALLLEDGERENTRIES.LIST>
+        </VOUCHER>
+      </COLLECTION>
+    </DATA>
+  </BODY>
+</ENVELOPE>

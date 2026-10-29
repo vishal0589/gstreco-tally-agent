@@ -57,8 +57,11 @@ func assertValues(t *testing.T, row IngestVoucherRow, invoice, taxable, igst, cg
 
 // QA v16 F4: v0.1.43 read the GST-named expense ledger as IGST, so the tax
 // came to more than the invoice and the TDS leg became the taxable value
-// (taxable 4,100 / IGST 4,83,800 and taxable 1,400 / IGST 1,65,200).
+// (taxable 4,100 / IGST 4,83,800 and taxable 1,400 / IGST 1,65,200). Under
+// QA v18 R3 the "IGST ITC" ledger is tax because its Duties & Taxes master
+// says so, and the expense is the base because it is not a duty ledger.
 func TestNormalize_TDSPurchaseWithGSTNamedExpenseLedger(t *testing.T) {
+	book := syntheticDutyBook(t)
 	cases := []struct {
 		name                                  string
 		number, expenseName, taxName, tdsName string
@@ -86,10 +89,23 @@ func TestNormalize_TDSPurchaseWithGSTNamedExpenseLedger(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			row := normalizeOne(t, tdsPurchase(t, tc.number, tc.expenseName, tc.taxName, tc.tdsName, tc.party, tc.expense, tc.tax, tc.tds))
+			row := normalizeOneWith(t, tdsPurchase(t, tc.number, tc.expenseName, tc.taxName, tc.tdsName, tc.party, tc.expense, tc.tax, tc.tds), book)
 			// The invoice is the supplier's: the party amount plus the TDS.
 			assertValues(t, row, tc.expense+tc.tax, tc.expense, tc.tax, 0, 0)
+			assertSource(t, row, tc.expense+tc.tax, tc.tds, tc.party)
 		})
+	}
+}
+
+// Without the duty-ledger masters the "IGST ITC" ledger is only named after
+// IGST: it is never counted as GST, but kept in the gross and flagged.
+func TestNormalize_TDSPurchaseWithoutMastersKeepsNamedTaxOutOfGST(t *testing.T) {
+	v := tdsPurchase(t, "INV/26-27/002", "Event Expenses GST-18%", "IGST ITC @ 18%", "Tds on Contractor - 1%", 479700, 410000, 73800, 4100)
+	row := normalizeOne(t, v)
+	assertValues(t, row, 483800, 410000, 0, 0, 0)
+	assertSource(t, row, 483800, 4100, 479700)
+	if !hasFlag(row, `"IGST ITC @ 18%" is named after IGST with no duty-ledger or GST-class evidence`) {
+		t.Errorf("flags = %v", row.NormalizationFlags)
 	}
 }
 
@@ -122,21 +138,33 @@ func TestNormalize_TDSIsNeitherTaxNorTaxable(t *testing.T) {
 			{LedgerName: "TDS Payable Under SGST @ 1%", Amount: 246},
 		},
 	}
-	row := normalizeOne(t, v)
-	assertValues(t, row, 57997, 49150, 0, 4423.5, 4423.5)
+	// The GST class alone decides without masters; the masters decide with
+	// them. The answer is the same.
+	for _, book := range []*DutyLedgerBook{nil, syntheticDutyBook(t)} {
+		row := normalizeOneWith(t, v, book)
+		assertValues(t, row, 57997, 49150, 0, 4423.5, 4423.5)
+		assertSource(t, row, 57997, 984, 57013)
+	}
 }
 
-func TestNormalize_GSTNamedLedgerStaysTaxWithoutATaxLedger(t *testing.T) {
-	// Blocked credit booked straight to an expense-style tax ledger: the
-	// only GST leg on the voucher is still the tax.
+func TestNormalize_BlockedCreditLedgerIsTaxOnlyWithItsMaster(t *testing.T) {
+	// Blocked credit booked straight to an expense-style tax ledger, the only
+	// GST leg on the voucher: tax when its Duties & Taxes master is GST.
 	v := tdsPurchase(t, "INV/26-27/003", "Event Expenses", "IGST Exp 17(5)", "Round Off", 118000, 100000, 18000, 0)
-	row := normalizeOne(t, v)
+	row := normalizeOneWith(t, v, syntheticDutyBook(t))
 	assertValues(t, row, 118000, 100000, 18000, 0, 0)
+	// Its name alone is no evidence: uncertain, out of GST, still in the gross.
+	row = normalizeOne(t, v)
+	assertValues(t, row, 118000, 100000, 0, 0, 0)
+	if !hasFlag(row, `"IGST Exp 17(5)" is named after IGST with no duty-ledger`) {
+		t.Errorf("flags = %v", row.NormalizationFlags)
+	}
 }
 
-func TestNormalize_TaxLegNeverOutweighsTheTaxableValue(t *testing.T) {
-	// Two GST-named legs and no tax ledger: counted as tax together they
-	// would be the whole invoice. The larger one is the expense.
+func TestNormalize_GSTNamedLegsWithoutEvidenceAreNeverTax(t *testing.T) {
+	// Two GST-named legs and no tax ledger. v0.1.46 guessed the smaller one
+	// was the tax; under QA v18 R3 a name never makes a leg GST. Outside
+	// Duties & Taxes both are the base; with no masters both are uncertain.
 	v := RawVoucher{
 		GUID:            "f4-two-named",
 		IsInvoice:       true,
@@ -150,11 +178,18 @@ func TestNormalize_TaxLegNeverOutweighsTheTaxableValue(t *testing.T) {
 			{LedgerName: "Event Expenses IGST 5%", Amount: -100000},
 		},
 	}
-	row := normalizeOne(t, v)
-	assertValues(t, row, 105000, 100000, 5000, 0, 0)
+	row := normalizeOneWith(t, v, syntheticDutyBook(t))
+	assertValues(t, row, 105000, 105000, 0, 0, 0)
+	row = normalizeOne(t, v)
+	assertValues(t, row, 105000, 0, 0, 0, 0)
+	for _, name := range []string{"Prchase IGST 5%", "Event Expenses IGST 5%"} {
+		if !hasFlag(row, `"`+name+`" is named after IGST with no duty-ledger`) {
+			t.Errorf("%s not flagged: %v", name, row.NormalizationFlags)
+		}
+	}
 }
 
-func TestNormalize_GSTClassOnAnExpenseLedgerGivesWayToTheTaxLedger(t *testing.T) {
+func TestNormalize_GSTClassOnAnExpenseLedgerGivesWayToTheDutyMaster(t *testing.T) {
 	v := RawVoucher{
 		GUID:            "f4-class-tagged",
 		IsInvoice:       true,
@@ -169,8 +204,16 @@ func TestNormalize_GSTClassOnAnExpenseLedgerGivesWayToTheTaxLedger(t *testing.T)
 			{LedgerName: "TDS on Contractor - 1%", Amount: 1000},
 		},
 	}
-	row := normalizeOne(t, v)
+	row := normalizeOneWith(t, v, syntheticDutyBook(t))
 	assertValues(t, row, 118000, 100000, 18000, 0, 0)
+	if !hasFlag(row, `"Event Expenses" has GST class "IGST@18" but is not a Duties & Taxes ledger`) {
+		t.Errorf("flags = %v", row.NormalizationFlags)
+	}
+	// Without masters the GST class is the only evidence and it calls the
+	// expense IGST: the row says the tax outweighs the taxable value.
+	if row = normalizeOne(t, v); !hasFlag(row, "exceeds the taxable value") {
+		t.Errorf("no-masters flags = %v", row.NormalizationFlags)
+	}
 }
 
 func TestNormalize_TDSConsolidatedBillsShareTheGrossInvoice(t *testing.T) {
@@ -196,7 +239,7 @@ func TestNormalize_TDSConsolidatedBillsShareTheGrossInvoice(t *testing.T) {
 			{LedgerName: "TDS on Contractor - 1%", Amount: 1000},
 		},
 	}
-	rows, err := Normalize(v, NormalizeOptions{})
+	rows, err := Normalize(v, NormalizeOptions{DutyLedgers: syntheticDutyBook(t)})
 	if err != nil {
 		t.Fatalf("Normalize: %v", err)
 	}
@@ -205,27 +248,29 @@ func TestNormalize_TDSConsolidatedBillsShareTheGrossInvoice(t *testing.T) {
 	}
 	for _, row := range rows {
 		assertValues(t, row, 59000, 50000, 9000, 0, 0)
+		assertSource(t, row, 59000, 500, 58500)
 	}
 }
 
-func TestClassifyTaxLedger_ReadsHeadsWordByWord(t *testing.T) {
-	cases := map[string]string{
-		"Exhibition Expenses GST-18%": "",
-		"Big Stall Charges":           "",
-		"Tds on Contractor - 1%":      "",
-		"OutputIGST 18%":              "IGST",
-		"IGSTPAYABLE":                 "IGST",
-		"IGST ITC @ 18%":              "IGST",
-		"Event Expenses IGST-18%":     "IGST",
-		"UTGST Output":                "SGST",
+// The journal lane's party guess stays broad: a GST class head, a head read
+// word by word, or the word GST keeps a ledger from being guessed as the
+// party. Taxable purchase accounts named after their tax are not GST ledgers.
+func TestNamesGSTLedger_KeepsTheJournalPartyGuessBroad(t *testing.T) {
+	cases := map[string]bool{
+		"Exhibition Expenses GST-18%": true,
+		"CGST Input Credit":           true,
+		"OutputIGST 18%":              true,
+		"Compensation Cess":           true,
+		"Terminal Handling Charges":   false,
+		"Processing Charges":          false,
+		"Purchase (IGST)@18%":         false,
 	}
 	for name, want := range cases {
-		if got := classifyTaxLedger("", name); got != want {
-			t.Errorf("classifyTaxLedger(%q) = %q, want %q", name, got, want)
+		if got := namesGSTLedger("", name); got != want {
+			t.Errorf("namesGSTLedger(%q) = %v, want %v", name, got, want)
 		}
 	}
-	// The journal lane's party guess stays as broad as before.
-	if !mentionsGSTHead("", "Exhibition Expenses GST-18%") {
-		t.Error("mentionsGSTHead should still flag a name that runs into a head")
+	if !namesGSTLedger("IGST@18", "Event Expenses") {
+		t.Error("a GST class head must count")
 	}
 }

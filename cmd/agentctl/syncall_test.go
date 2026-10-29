@@ -187,9 +187,22 @@ func TestRunSyncAll_HappyPath_WalksAllMappingsAndKinds(t *testing.T) {
 	if got := len(srvIngest.sent); got != 4 {
 		t.Errorf("ingest sends = %d, want 4", got)
 	}
-	// 2 mappings × 2 kinds = 4 Tally PostXML calls.
-	if got := len(tly.got); got != 4 {
-		t.Errorf("tally fetches = %d, want 4", got)
+	// 2 mappings × 2 kinds = 4 Tally voucher fetches. The duty-ledger
+	// masters are read at most once per company within their TTL (QA v18
+	// R3), and the cache is shared with earlier tests.
+	vouchers, duty := 0, 0
+	for _, body := range tly.got {
+		if bytes.Contains(body, []byte("GstrecoDutyLedgerCollection")) {
+			duty++
+		} else {
+			vouchers++
+		}
+	}
+	if vouchers != 4 {
+		t.Errorf("tally voucher fetches = %d, want 4", vouchers)
+	}
+	if duty > 2 {
+		t.Errorf("duty-ledger fetches = %d, want at most one per mapping's company", duty)
 	}
 	if !strings.Contains(stdout.String(), "summary: connections_with_mappings=1/1 · mappings_ran=2/2") {
 		t.Errorf("stdout missing summary: %s", stdout.String())

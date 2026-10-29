@@ -47,7 +47,10 @@ type ledgerRecord struct {
 	// oldest first. An entry with an empty GSTIN means "unregistered from".
 	registrations []ledgerRegistration
 	parent        string
-	nonParty      bool
+	// primary is the top-level group the parent chain ends in, once
+	// ApplyGroupTree has run.
+	primary  string
+	nonParty bool
 }
 
 type ledgerRegistration struct {
@@ -55,7 +58,10 @@ type ledgerRegistration struct {
 	gstin string
 }
 
-var _ LedgerDirectory = (*LedgerGSTINs)(nil)
+var (
+	_ LedgerDirectory = (*LedgerGSTINs)(nil)
+	_ LedgerGroups    = (*LedgerGSTINs)(nil)
+)
 
 func (l *LedgerGSTINs) record(name string) *ledgerRecord {
 	if l == nil {
@@ -105,6 +111,23 @@ func (l *LedgerGSTINs) IsNonParty(name string) bool {
 	return r != nil && r.nonParty
 }
 
+// ParentGroup is the ledger's group in Tally, or "".
+func (l *LedgerGSTINs) ParentGroup(name string) string {
+	if r := l.record(name); r != nil {
+		return r.parent
+	}
+	return ""
+}
+
+// PrimaryGroup is the top-level group the ledger's group chain ends in
+// ("Purchase Accounts", "Indirect Expenses"), or "" before ApplyGroupTree.
+func (l *LedgerGSTINs) PrimaryGroup(name string) string {
+	if r := l.record(name); r != nil {
+		return r.primary
+	}
+	return ""
+}
+
 // Len is the number of ledgers that carry a GSTIN.
 func (l *LedgerGSTINs) Len() int {
 	if l == nil {
@@ -130,26 +153,44 @@ var nonPartyGroups = map[string]bool{
 	"branch / divisions": true,
 }
 
-// ApplyGroupTree marks ledgers whose group chain reaches a non-party group.
-// groups maps each group name to its parent.
+// ApplyGroupTree marks ledgers whose group chain reaches a non-party group
+// and records the top-level group each chain ends in. groups maps each group
+// name to its parent.
 func (l *LedgerGSTINs) ApplyGroupTree(groups map[string]string) {
 	if l == nil {
 		return
 	}
 	fold := make(map[string]string, len(groups))
+	spelled := make(map[string]string, len(groups))
 	for name, parent := range groups {
-		fold[strings.ToLower(strings.TrimSpace(name))] = strings.ToLower(strings.TrimSpace(parent))
+		key := strings.ToLower(strings.TrimSpace(name))
+		fold[key] = strings.ToLower(strings.TrimSpace(parent))
+		spelled[key] = strings.TrimSpace(name)
 	}
 	for _, r := range l.byName {
 		g := strings.ToLower(strings.TrimSpace(r.parent))
 		for hops := 0; g != "" && hops < 32; hops++ {
 			if nonPartyGroups[g] {
 				r.nonParty = true
+			}
+			parent, known := fold[g]
+			if !known {
 				break
 			}
-			g = fold[g]
+			if isPrimaryGroupParent(parent) {
+				r.primary = spelled[g]
+				break
+			}
+			g = parent
 		}
 	}
+}
+
+// isPrimaryGroupParent is the parent Tally gives a top-level group: none, or
+// its reserved "Primary" (exported with a leading control character).
+func isPrimaryGroupParent(parent string) bool {
+	p := strings.Trim(parent, "\x04 ")
+	return p == "" || p == "primary"
 }
 
 // gstinShape accepts a 15-character registration: two-digit state code then

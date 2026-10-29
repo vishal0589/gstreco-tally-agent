@@ -44,6 +44,20 @@ const stubResponse = `<ENVELOPE>
   </COLLECTION></DATA></BODY>
 </ENVELOPE>`
 
+// stubDutyLedgers is a SYNTHETIC Duties & Taxes master export holding the
+// tax ledgers the stub vouchers in these tests use (QA v18 R3: only a duty
+// ledger makes a leg GST).
+const stubDutyLedgers = `<ENVELOPE><HEADER><STATUS>1</STATUS></HEADER><BODY><DATA><COLLECTION>
+  <LEDGER NAME="IGST @ 18%"><NAME>IGST @ 18%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>GST</TAXTYPE><GSTDUTYHEAD>Integrated Tax</GSTDUTYHEAD></LEDGER>
+  <LEDGER NAME="IGST 18"><NAME>IGST 18</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>GST</TAXTYPE><GSTDUTYHEAD>Integrated Tax</GSTDUTYHEAD></LEDGER>
+  <LEDGER NAME="CGST @ 9%"><NAME>CGST @ 9%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>GST</TAXTYPE><GSTDUTYHEAD>Central Tax</GSTDUTYHEAD></LEDGER>
+  <LEDGER NAME="SGST @ 9%"><NAME>SGST @ 9%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>GST</TAXTYPE><GSTDUTYHEAD>State Tax</GSTDUTYHEAD></LEDGER>
+</COLLECTION></DATA></BODY></ENVELOPE>`
+
+func isDutyLedgerRequest(body []byte) bool {
+	return strings.Contains(string(body), "GstrecoDutyLedgerCollection")
+}
+
 type fakeTally struct {
 	resp    []byte
 	err     error
@@ -52,10 +66,14 @@ type fakeTally struct {
 }
 
 func (f *fakeTally) PostXML(_ context.Context, body []byte) ([]byte, error) {
-	f.got = body
 	if f.respond != nil {
+		f.got = body
 		return f.respond(body), f.err
 	}
+	if isDutyLedgerRequest(body) && f.err == nil {
+		return []byte(stubDutyLedgers), nil
+	}
+	f.got = body
 	return f.resp, f.err
 }
 
@@ -586,7 +604,7 @@ func TestRunOne_ProgressCallbackEmitsExpectedStages(t *testing.T) {
 	if _, err := RunOne(context.Background(), tly, snd, makeReq(), progress); err != nil {
 		t.Fatalf("RunOne: %v", err)
 	}
-	want := []string{"fetching", "parsed", "normalized", "batch_sending", "batch_sent", "complete"}
+	want := []string{"fetching", "parsed", "duty_ledgers", "normalized", "batch_sending", "batch_sent", "complete"}
 	if !equalSlice(stages, want) {
 		t.Errorf("stages=%v, want %v", stages, want)
 	}

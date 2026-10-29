@@ -73,6 +73,57 @@ type IngestVoucherRow struct {
 	// defaults is_capital_good=false there, which is correct since services
 	// are never capital goods.
 	HSN *string `json:"hsn,omitempty"`
+
+	// QA v18 R3 source fields. All optional: servers that predate them ignore
+	// unknown keys. Names follow GST Reco's ingest contract (QA 28 Oct P1-C).
+	//
+	// GrossAmount is the invoice gross the signed legs establish (equals
+	// InvoiceValue); never the net payable.
+	GrossAmount *float64 `json:"gross_amount,omitempty"`
+	// TDSAmount is TDS withheld from the party; TCSAmount is TCS the party
+	// collected. Neither is GST nor taxable value.
+	TDSAmount *float64 `json:"tds_amount,omitempty"`
+	TCSAmount *float64 `json:"tcs_amount,omitempty"`
+	// NetPayable is the party ledger amount: gross less TDS, plus TCS.
+	NetPayable *float64 `json:"net_payable,omitempty"`
+	// VoucherLegs are the voucher's ledger legs as Tally sent them, with the
+	// role each one got. Every split row of a consolidated voucher carries
+	// the whole voucher's legs.
+	VoucherLegs []IngestVoucherLeg `json:"voucher_legs,omitempty"`
+	// NormalizationFlags explain each leg kept out of GST or taxable value
+	// and each gap in the evidence.
+	NormalizationFlags []string `json:"normalization_flags,omitempty"`
+}
+
+// IngestVoucherLeg is one ledger leg of an invoice voucher (GST Reco's
+// TallyVoucherLeg).
+type IngestVoucherLeg struct {
+	LedgerName string `json:"ledger_name"`
+	// ParentGroup / PrimaryGroup are the ledger's Tally group and the
+	// reserved group its chain ends in, when the agent knows them.
+	ParentGroup  *string `json:"parent_group,omitempty"`
+	PrimaryGroup *string `json:"primary_group,omitempty"`
+	// Amount is Tally's signed AMOUNT, unchanged.
+	Amount        float64 `json:"amount"`
+	IsPartyLedger bool    `json:"is_party_ledger,omitempty"`
+	GSTClass      *string `json:"gst_class,omitempty"`
+	// TaxType / GSTDutyHead come from the Duties & Taxes ledger master.
+	TaxType        *string                 `json:"tax_type,omitempty"`
+	GSTDutyHead    *string                 `json:"gst_duty_head,omitempty"`
+	Classification IngestLegClassification `json:"classification"`
+}
+
+// IngestLegClassification is the agent's decision on one leg. Role, Method
+// and Head use GST Reco's words (party, tax, tds, tcs, base, round_off,
+// unclassified; group, duty_field, name_fallback, unclassified; igst, cgst,
+// sgst, cess) so the server compares like with like. AgentRole and Evidence
+// are the agent's own finer role and what decided it.
+type IngestLegClassification struct {
+	Role      string      `json:"role"`
+	Method    string      `json:"method"`
+	Head      *string     `json:"head,omitempty"`
+	AgentRole LegRole     `json:"agent_role"`
+	Evidence  LegEvidence `json:"evidence"`
 }
 
 // IngestMasterItem is one party-master row sent to /api/tally/masters.
