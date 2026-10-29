@@ -76,14 +76,7 @@ func dutyLedgerLookup(
 	res *Result,
 	emit emitFn,
 ) *tally.DutyLedgerBook {
-	live := false
-	for _, v := range vouchers {
-		if !v.IsCancelled {
-			live = true
-			break
-		}
-	}
-	if !live {
+	if !hasLiveVoucher(vouchers) {
 		return nil
 	}
 	book, err := dutyLedgersFor(ctx, tallyClient, req)
