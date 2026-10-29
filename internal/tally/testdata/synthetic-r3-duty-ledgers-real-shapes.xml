@@ -1,0 +1,37 @@
+<!--
+  SYNTHETIC TEST DATA - NOT REAL CLIENT DATA.
+  Duties & Taxes ledger masters in the shapes a real company's Tally exports
+  (seen in GST Reco's stored masters, 29 Oct 2026): GST ledgers with duty
+  heads "IGST" / "CGST" / "SGST/UTGST"; RCM, import, URD and GST TCS
+  ledgers typed "Others" with no duty head; pre-GST Service Tax, cess and VAT
+  ledgers; TDS ledgers typed "Others" carrying a stray duty head. Ledger names
+  are generic accounting names, not taken from any client's Tally.
+-->
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <STATUS>1</STATUS>
+  </HEADER>
+  <BODY>
+    <DATA>
+      <COLLECTION>
+        <LEDGER NAME="IGST Input Credit"><NAME>IGST Input Credit</NAME><PARENT>GST Input Credit</PARENT><TAXTYPE>GST</TAXTYPE><GSTDUTYHEAD>IGST</GSTDUTYHEAD></LEDGER>
+        <LEDGER NAME="CGST Input Credit"><NAME>CGST Input Credit</NAME><PARENT>GST Input Credit</PARENT><TAXTYPE>GST</TAXTYPE><GSTDUTYHEAD>CGST</GSTDUTYHEAD></LEDGER>
+        <LEDGER NAME="SGST Input Credit"><NAME>SGST Input Credit</NAME><PARENT>GST Input Credit</PARENT><TAXTYPE>GST</TAXTYPE><GSTDUTYHEAD>SGST/UTGST</GSTDUTYHEAD></LEDGER>
+        <LEDGER NAME="SGST Output"><NAME>SGST Output</NAME><PARENT>GST Payable</PARENT><TAXTYPE>GST</TAXTYPE><GSTDUTYHEAD>SGST/UTGST</GSTDUTYHEAD></LEDGER>
+        <LEDGER NAME="RCM IGST Input Credit"><NAME>RCM IGST Input Credit</NAME><PARENT>Input Credit on RCM</PARENT><TAXTYPE>Others</TAXTYPE><GSTDUTYHEAD></GSTDUTYHEAD></LEDGER>
+        <LEDGER NAME="RCM IGST Payable"><NAME>RCM IGST Payable</NAME><PARENT>GST Payable on RCM</PARENT><TAXTYPE>Others</TAXTYPE><GSTDUTYHEAD></GSTDUTYHEAD></LEDGER>
+        <LEDGER NAME="IGST Input Credit on Import"><NAME>IGST Input Credit on Import</NAME><PARENT>GST Input Credit</PARENT><TAXTYPE>Others</TAXTYPE><GSTDUTYHEAD></GSTDUTYHEAD></LEDGER>
+        <LEDGER NAME="URD CGST Input Credit"><NAME>URD CGST Input Credit</NAME><PARENT>GST Input Credit</PARENT><TAXTYPE>Others</TAXTYPE><GSTDUTYHEAD></GSTDUTYHEAD></LEDGER>
+        <LEDGER NAME="TCS - IGST"><NAME>TCS - IGST</NAME><PARENT>ECL GST</PARENT><TAXTYPE>Others</TAXTYPE><GSTDUTYHEAD></GSTDUTYHEAD></LEDGER>
+        <LEDGER NAME="Service Tax Payable @ 14%"><NAME>Service Tax Payable @ 14%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Service Tax</TAXTYPE><GSTDUTYHEAD></GSTDUTYHEAD></LEDGER>
+        <LEDGER NAME="Krishi Kalyan Cess @ 0.5% Payable"><NAME>Krishi Kalyan Cess @ 0.5% Payable</NAME><PARENT>Service Tax Payable - Services</PARENT><TAXTYPE>Krishi Kalyan Cess</TAXTYPE><GSTDUTYHEAD></GSTDUTYHEAD></LEDGER>
+        <LEDGER NAME="Vat Input @ 5%"><NAME>Vat Input @ 5%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>VAT</TAXTYPE><GSTDUTYHEAD></GSTDUTYHEAD></LEDGER>
+        <LEDGER NAME="TDS Payable-Rent (94I) - Co"><NAME>TDS Payable-Rent (94I) - Co</NAME><PARENT>TDS Payable</PARENT><TAXTYPE>TDS</TAXTYPE><GSTDUTYHEAD></GSTDUTYHEAD></LEDGER>
+        <LEDGER NAME="TDS Pending Old"><NAME>TDS Pending Old</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><GSTDUTYHEAD>CGST</GSTDUTYHEAD></LEDGER>
+        <LEDGER NAME="TDS Payable (94Q) @ 0.1 %"><NAME>TDS Payable (94Q) @ 0.1 %</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><GSTDUTYHEAD>State Cess</GSTDUTYHEAD></LEDGER>
+        <LEDGER NAME="Advance Tax Paid"><NAME>Advance Tax Paid</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><GSTDUTYHEAD></GSTDUTYHEAD></LEDGER>
+      </COLLECTION>
+    </DATA>
+  </BODY>
+</ENVELOPE>
