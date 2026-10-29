@@ -234,12 +234,28 @@ func classifyLeg(e LedgerEntry, book *DutyLedgerBook) legDecision {
 			d.role, d.withholding = LegWithholding, nameWithholding
 			d.flags = append(d.flags, fmt.Sprintf("%q: duty master type %q, but its name is %s: counted as withholding", name, m.TaxType, nameWithholding))
 		case taxType == "GST":
-			if head := headFromDutyHead(m.DutyHead); head != "" {
+			switch head := headFromDutyHead(m.DutyHead); {
+			case head != "":
 				d.role, d.head = LegTax, head
-			} else {
+			case nameHead != "":
+				d.role, d.head = LegTax, nameHead
+				d.flags = append(d.flags, fmt.Sprintf("%q is a GST duty ledger whose duty head %q names no GST head: counted as %s from its name", name, m.DutyHead, nameHead))
+			default:
 				d.role = LegUncertain
 				d.flags = append(d.flags, fmt.Sprintf("%q is a GST duty ledger with no GST duty head (%q): kept out of GST and taxable value", name, m.DutyHead))
 			}
+		case (taxType == "" || taxType == "OTHERS") && (headFromDutyHead(m.DutyHead) != "" || nameHead != ""):
+			// Companies often keep RCM, import, URD and advance-receipt GST
+			// ledgers under Duties & Taxes typed "Others" (seen on a real
+			// company's masters: 33 of its 56 GST-named duty ledgers).
+			// Membership of Duties & Taxes is the evidence; the head comes
+			// from the duty head, else the name.
+			head := headFromDutyHead(m.DutyHead)
+			if head == "" {
+				head = nameHead
+			}
+			d.role, d.head = LegTax, head
+			d.flags = append(d.flags, fmt.Sprintf("%q is a Duties & Taxes ledger typed %q, not GST: counted as %s", name, m.TaxType, head))
 		default:
 			d.role = LegOtherDuty
 			if nameHead != "" {
@@ -332,15 +348,29 @@ func headFromNameTokens(name string) string {
 }
 
 // headFromDutyHead maps Tally's GSTDUTYHEAD to a GST head.
+// Tally writes the heads as "IGST", "CGST" and "SGST/UTGST" on real masters,
+// and as "Integrated Tax", "Central Tax", "State Tax" / "UT Tax" in its
+// screens. A "State Cess" is a state levy, not GST compensation cess.
 func headFromDutyHead(dutyHead string) string {
-	switch strings.Join(strings.Fields(strings.ToUpper(dutyHead)), " ") {
-	case "INTEGRATED TAX", "IGST":
+	words := ledgerWords(dutyHead)
+	has := func(want ...string) bool {
+		for _, w := range words {
+			for _, x := range want {
+				if w == x {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	switch {
+	case has("IGST", "INTEGRATED"):
 		return "IGST"
-	case "CENTRAL TAX", "CGST":
+	case has("CGST", "CENTRAL"):
 		return "CGST"
-	case "STATE TAX", "UT TAX", "UNION TERRITORY TAX", "STATE/UT TAX", "SGST", "UTGST":
+	case has("SGST", "UTGST") || (has("STATE", "UT", "UNION") && has("TAX")):
 		return "SGST"
-	case "CESS", "COMPENSATION CESS", "GST CESS":
+	case has("CESS") && !has("STATE"):
 		return "CESS"
 	}
 	return ""
