@@ -604,7 +604,7 @@ func TestRunOne_ProgressCallbackEmitsExpectedStages(t *testing.T) {
 	if _, err := RunOne(context.Background(), tly, snd, makeReq(), progress); err != nil {
 		t.Fatalf("RunOne: %v", err)
 	}
-	want := []string{"fetching", "parsed", "duty_ledgers", "normalized", "batch_sending", "batch_sent", "complete"}
+	want := []string{"fetching", "parsed", "duty_ledgers", "ledger_gstin", "normalized", "batch_sending", "batch_sent", "complete"}
 	if !equalSlice(stages, want) {
 		t.Errorf("stages=%v, want %v", stages, want)
 	}

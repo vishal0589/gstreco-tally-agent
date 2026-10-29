@@ -82,9 +82,20 @@ func needsLedgerGSTINs(vouchers []tally.RawVoucher) bool {
 	return false
 }
 
-// ledgerGSTINLookup returns the ledger directory the normalisers use, or nil
-// when no voucher needs it. A failed lookup is recorded and the run
-// continues: those vouchers are sent without a GSTIN, as before.
+// hasLiveVoucher reports whether any voucher is not cancelled.
+func hasLiveVoucher(vouchers []tally.RawVoucher) bool {
+	for _, v := range vouchers {
+		if !v.IsCancelled {
+			return true
+		}
+	}
+	return false
+}
+
+// ledgerGSTINLookup returns the ledger directory the journal and payment
+// normalisers use, or nil when no voucher needs it. A failed lookup is
+// recorded and the run continues: those vouchers are sent without a GSTIN,
+// as before.
 func ledgerGSTINLookup(
 	ctx context.Context,
 	tallyClient TallyPoster,
@@ -93,12 +104,42 @@ func ledgerGSTINLookup(
 	res *Result,
 	emit emitFn,
 ) tally.LedgerDirectory {
-	if !needsLedgerGSTINs(vouchers) {
+	return lookupLedgerDirectory(ctx, tallyClient, req, needsLedgerGSTINs(vouchers), res, emit,
+		"vouchers without a voucher GSTIN are sent without one")
+}
+
+// invoiceLedgerLookup returns the ledger directory for an invoice lane. It is
+// read for every live voucher, not only those without a voucher GSTIN: each
+// leg sent to GST Reco carries its Tally group, which is what the server
+// classes legs by (QA v18 R3). A leg without one is logged as "classified by
+// name - needs confirmation", and the filing gate waits on those.
+func invoiceLedgerLookup(
+	ctx context.Context,
+	tallyClient TallyPoster,
+	req Request,
+	vouchers []tally.RawVoucher,
+	res *Result,
+	emit emitFn,
+) tally.LedgerDirectory {
+	return lookupLedgerDirectory(ctx, tallyClient, req, hasLiveVoucher(vouchers), res, emit,
+		"vouchers without a voucher GSTIN are sent without one, and legs without their Tally group")
+}
+
+func lookupLedgerDirectory(
+	ctx context.Context,
+	tallyClient TallyPoster,
+	req Request,
+	needed bool,
+	res *Result,
+	emit emitFn,
+	onFailure string,
+) tally.LedgerDirectory {
+	if !needed {
 		return nil
 	}
 	ledgers, err := ledgerGSTINsFor(ctx, tallyClient, req)
 	if err != nil {
-		msg := fmt.Sprintf("ledger GSTIN lookup failed; vouchers without a voucher GSTIN are sent without one: %v", err)
+		msg := fmt.Sprintf("ledger GSTIN lookup failed; %s: %v", onFailure, err)
 		res.ParseWarnings = append(res.ParseWarnings, msg)
 		emit("ledger_gstin", msg)
 		return nil

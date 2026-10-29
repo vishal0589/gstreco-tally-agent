@@ -130,9 +130,9 @@ type fakeTallyPoster struct {
 }
 
 func (f *fakeTallyPoster) PostXML(_ context.Context, body []byte) ([]byte, error) {
-	// Invoice syncs also read the duty-ledger masters (QA v18 R3); gotBody
-	// keeps the voucher request.
-	if !bytes.Contains(body, []byte("GstrecoDutyLedgerCollection")) {
+	// Invoice syncs also read the duty-ledger and ledger masters (QA v18
+	// R3); gotBody keeps the voucher request.
+	if bytes.Contains(body, []byte("GstrecoVoucherCollection")) {
 		f.gotBody = body
 	}
 	return f.resp, f.err
