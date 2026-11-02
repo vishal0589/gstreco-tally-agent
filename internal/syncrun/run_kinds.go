@@ -85,6 +85,9 @@ func runInvoiceSync(
 				len(notNormalized), req.IngestKind, strings.Join(notNormalizedWhy, "; ")),
 			syncWarningNow(), notNormalized))
 	}
+	// QA v27 B25: one run is one company and period, so two vouchers of a
+	// party keyed to the same invoice number are flagged here.
+	tally.FlagDuplicateInvoiceNumbers(rows)
 	res.RowCount = len(rows)
 	emit("normalized", fmt.Sprintf("%d ingest rows (dropped %d on normalize)",
 		len(rows), res.DroppedOnNormalize))
