@@ -84,11 +84,16 @@ func Normalize(v RawVoucher, opts NormalizeOptions) ([]IngestVoucherRow, error) 
 
 	bills := relevantBillRefs(*b.party)
 	if len(bills) <= 1 {
-		if name := onlyNewRefName(*b.party); name != "" {
-			base.InvoiceNumber = name
+		// QA v27 L3: the voucher header keys the row; the bill-allocation
+		// reference travels as bill_reference and a disagreement is flagged.
+		k := keyInvoiceNumber(v, side, *b.party)
+		base.InvoiceNumber = k.number
+		if k.billRef != "" {
+			ref := k.billRef
+			base.BillReference = &ref
 		}
 		setSourceAmounts(&base, amounts)
-		base.NormalizationFlags = b.flags
+		base.NormalizationFlags = withFlags(b.flags, k.flags...)
 		return []IngestVoucherRow{base}, nil
 	}
 
@@ -117,7 +122,16 @@ func Normalize(v RawVoucher, opts NormalizeOptions) ([]IngestVoucherRow, error) 
 	last := len(bills) - 1
 	for i, bill := range bills {
 		row := base
-		row.InvoiceNumber = bill.Name
+		rowFlags := flags
+		// Each bill of a consolidated voucher is its own invoice, keyed by
+		// the bill's name; a placeholder name ("No") never becomes a key.
+		if name := usableReference(bill.Name); name != "" {
+			row.InvoiceNumber = name
+			ref := name
+			row.BillReference = &ref
+		} else {
+			rowFlags = withFlags(flags, FlagPlaceholderReference)
+		}
 		if parentRef := voucherParentRef(v); parentRef != "" {
 			parent := parentRef
 			row.ParentRef = &parent
@@ -137,7 +151,7 @@ func Normalize(v RawVoucher, opts NormalizeOptions) ([]IngestVoucherRow, error) 
 		row.TaxableValue = part.taxable
 		row.IGST, row.CGST, row.SGST, row.CESS = part.tax.IGST, part.tax.CGST, part.tax.SGST, part.tax.CESS
 		setSourceAmounts(&row, part)
-		row.NormalizationFlags = flags
+		row.NormalizationFlags = rowFlags
 		rows = append(rows, row)
 	}
 	return rows, nil
@@ -559,7 +573,7 @@ func fillPartyFromLedger(row *IngestVoucherRow, side IngestSide, partyLedger str
 // branch. Separated out so both branches can start from the same struct.
 func baseRow(v RawVoucher, kind IngestKind, side IngestSide, invoice, taxable float64, tax taxTotals) IngestVoucherRow {
 	row := IngestVoucherRow{
-		InvoiceNumber: preferredInvoiceNumber(v),
+		InvoiceNumber: keyInvoiceNumber(v, side, LedgerEntry{}).number,
 		InvoiceDate:   v.Date.Format("2006-01-02"),
 		InvoiceValue:  round2(invoice),
 		TaxableValue:  round2(taxable),
@@ -858,9 +872,10 @@ func firstUsableBillRefName(v RawVoucher) string {
 }
 
 // onlyNewRefName returns the single invoice-producing bill ref's Name when the
-// party ledger has exactly one allocation. Lets single-bill vouchers use the
-// BillRef name (typically the counterparty's invoice number) instead of
-// Tally's internal VoucherNumber, while ignoring cash-on-account allocations.
+// party ledger has exactly one allocation, ignoring cash-on-account
+// allocations. Since QA v27 L3 it never overrides the voucher header: it is
+// shipped as bill_reference and keys the row only when the header carries no
+// number (keyInvoiceNumber).
 func onlyNewRefName(party LedgerEntry) string {
 	if len(party.BillAllocations) != 1 {
 		return ""

@@ -93,6 +93,13 @@ type IngestVoucherRow struct {
 	// NormalizationFlags explain each leg kept out of GST or taxable value
 	// and each gap in the evidence.
 	NormalizationFlags []string `json:"normalization_flags,omitempty"`
+
+	// BillReference is the party's bill-allocation reference (Tally's
+	// "New Ref" / "Agst Ref" name) when it is not a placeholder. It never
+	// overrides the voucher header number in InvoiceNumber; a disagreement
+	// is flagged "reference_conflict" (QA v27 L3). Optional: older servers
+	// ignore unknown keys.
+	BillReference *string `json:"bill_reference,omitempty"`
 }
 
 // IngestVoucherLeg is one ledger leg of an invoice voucher (GST Reco's
