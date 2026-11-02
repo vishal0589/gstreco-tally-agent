@@ -39,6 +39,9 @@ type LedgerDirectory interface {
 type LedgerGSTINs struct {
 	byName map[string]*ledgerRecord
 	byFold map[string]*ledgerRecord
+	// dutiesGroup is the company's own name for Tally's reserved Duties &
+	// Taxes group when it was renamed, once ApplyGroups has run.
+	dutiesGroup string
 }
 
 type ledgerRecord struct {
@@ -52,6 +55,9 @@ type ledgerRecord struct {
 	// ApplyGroupTree has run.
 	primary  string
 	nonParty bool
+	// duty is true when the ledger's group chain reaches Tally's reserved
+	// Duties & Taxes group (by name or, when renamed, by its reserved name).
+	duty bool
 }
 
 type ledgerRegistration struct {
@@ -154,25 +160,63 @@ var nonPartyGroups = map[string]bool{
 	"branch / divisions": true,
 }
 
+// GroupTree is a company's groups: each group's parent and, for Tally's
+// reserved groups, the reserved name (RESERVEDNAME), which stays "Duties &
+// Taxes" when a company renames the group.
+type GroupTree struct {
+	Parents  map[string]string
+	Reserved map[string]string
+}
+
 // ApplyGroupTree marks ledgers whose group chain reaches a non-party group
 // and records the top-level group each chain ends in. groups maps each group
 // name to its parent.
 func (l *LedgerGSTINs) ApplyGroupTree(groups map[string]string) {
+	l.ApplyGroups(GroupTree{Parents: groups})
+}
+
+// ApplyGroups is ApplyGroupTree with reserved names: a renamed reserved group
+// counts as the reserved group (QA v27 L1), so a company that renamed Duties
+// & Taxes still has its duty ledgers recognised.
+func (l *LedgerGSTINs) ApplyGroups(tree GroupTree) {
 	if l == nil {
 		return
 	}
-	fold := make(map[string]string, len(groups))
-	spelled := make(map[string]string, len(groups))
-	for name, parent := range groups {
+	fold := make(map[string]string, len(tree.Parents))
+	spelled := make(map[string]string, len(tree.Parents))
+	reserved := make(map[string]string, len(tree.Reserved))
+	for name, parent := range tree.Parents {
 		key := strings.ToLower(strings.TrimSpace(name))
 		fold[key] = strings.ToLower(strings.TrimSpace(parent))
 		spelled[key] = strings.TrimSpace(name)
 	}
+	for name, res := range tree.Reserved {
+		key := strings.ToLower(strings.TrimSpace(name))
+		res = strings.TrimSpace(res)
+		if key == "" || res == "" {
+			continue
+		}
+		reserved[key] = res
+		if strings.EqualFold(res, dutiesAndTaxesGroup) && !strings.EqualFold(strings.TrimSpace(name), dutiesAndTaxesGroup) {
+			l.dutiesGroup = strings.TrimSpace(name)
+		}
+	}
+	// canonical is the reserved name a group stands for, else its own name.
+	canonical := func(g string) string {
+		if res, ok := reserved[g]; ok {
+			return strings.ToLower(res)
+		}
+		return g
+	}
 	for _, r := range l.byName {
 		g := strings.ToLower(strings.TrimSpace(r.parent))
 		for hops := 0; g != "" && hops < 32; hops++ {
-			if nonPartyGroups[g] {
+			c := canonical(g)
+			if nonPartyGroups[c] {
 				r.nonParty = true
+			}
+			if c == strings.ToLower(dutiesAndTaxesGroup) {
+				r.duty = true
 			}
 			parent, known := fold[g]
 			if !known {
@@ -180,11 +224,43 @@ func (l *LedgerGSTINs) ApplyGroupTree(groups map[string]string) {
 			}
 			if isPrimaryGroupParent(parent) {
 				r.primary = spelled[g]
+				if res, ok := reserved[g]; ok {
+					r.primary = res
+				}
 				break
 			}
 			g = parent
 		}
 	}
+}
+
+// DutiesAndTaxesGroup is the name of the company's Duties & Taxes group as
+// the group tree spells it: "Duties & Taxes", or the company's own name for
+// it when renamed.
+func (l *LedgerGSTINs) DutiesAndTaxesGroup() string {
+	if l == nil || l.dutiesGroup == "" {
+		return dutiesAndTaxesGroup
+	}
+	return l.dutiesGroup
+}
+
+// DutyLedgersByGroup is every ledger whose group chain reaches Duties &
+// Taxes, with its parent group: Tally's own grouping, not the ledger's name.
+// It carries no type of duty or duty head; those come only from the duty
+// ledger masters.
+func (l *LedgerGSTINs) DutyLedgersByGroup() []DutyLedger {
+	if l == nil {
+		return nil
+	}
+	var out []DutyLedger
+	for name, r := range l.byName {
+		if !r.duty {
+			continue
+		}
+		out = append(out, DutyLedger{Name: name, Parent: r.parent})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // isPrimaryGroupParent is the parent Tally gives a top-level group: none, or
@@ -261,7 +337,7 @@ var groupTreeTmpl = template.Must(template.New("group-tree").Parse(`<ENVELOPE>
         <TDLMESSAGE>
           <COLLECTION NAME="GstrecoGroupTreeCollection" ISINITIALIZE="Yes">
             <TYPE>Group</TYPE>
-            <FETCH>NAME, PARENT</FETCH>
+            <FETCH>NAME, PARENT, RESERVEDNAME</FETCH>
           </COLLECTION>
         </TDLMESSAGE>
       </TDL>
@@ -313,9 +389,11 @@ type xmlLedgerGSTIN struct {
 }
 
 type xmlGroup struct {
-	NameAttr string `xml:"NAME,attr"`
-	Name     string `xml:"NAME"`
-	Parent   string `xml:"PARENT"`
+	NameAttr         string `xml:"NAME,attr"`
+	Name             string `xml:"NAME"`
+	Parent           string `xml:"PARENT"`
+	ReservedNameAttr string `xml:"RESERVEDNAME,attr"`
+	ReservedName     string `xml:"RESERVEDNAME"`
 }
 
 // ErrExportRefused is Tally answering a master export with an error (STATUS 0
@@ -418,19 +496,32 @@ func ParseLedgerGSTINs(raw []byte) (*LedgerGSTINs, []string, error) {
 
 // ParseGroupTree decodes the BuildGroupTreeXML response into group → parent.
 func ParseGroupTree(raw []byte) (map[string]string, error) {
-	groups := map[string]string{}
+	tree, err := ParseGroups(raw)
+	if err != nil {
+		return nil, err
+	}
+	return tree.Parents, nil
+}
+
+// ParseGroups decodes the BuildGroupTreeXML response with each reserved
+// group's reserved name.
+func ParseGroups(raw []byte) (GroupTree, error) {
+	tree := GroupTree{Parents: map[string]string{}, Reserved: map[string]string{}}
 	err := walkTallyExport(raw, "GROUP", func(dec *xml.Decoder, start *xml.StartElement) error {
 		var x xmlGroup
 		if err := dec.DecodeElement(&x, start); err != nil {
 			return nil
 		}
 		if name := strings.TrimSpace(firstNonEmpty(x.Name, x.NameAttr)); name != "" {
-			groups[name] = strings.TrimSpace(x.Parent)
+			tree.Parents[name] = strings.TrimSpace(x.Parent)
+			if res := strings.TrimSpace(firstNonEmpty(x.ReservedName, x.ReservedNameAttr)); res != "" {
+				tree.Reserved[name] = res
+			}
 		}
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return GroupTree{}, err
 	}
-	return groups, nil
+	return tree, nil
 }

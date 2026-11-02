@@ -1,6 +1,7 @@
 package tally
 
 import (
+	"bytes"
 	"encoding/xml"
 	"fmt"
 	"html/template"
@@ -39,6 +40,10 @@ const (
 	// EvidenceDutyMaster: the Duties & Taxes ledger master (TAXTYPE,
 	// GSTDUTYHEAD).
 	EvidenceDutyMaster LegEvidence = "duty_master"
+	// EvidenceDutyGroup: the ledger sits under Duties & Taxes in the company's
+	// group tree, read when the duty ledger masters were not (QA v27 L1). It
+	// carries no type of duty or duty head.
+	EvidenceDutyGroup LegEvidence = "duty_group"
 	// EvidenceNotDutyLedger: the company's duty ledgers are known and this
 	// ledger is not one of them, so it is never tax.
 	EvidenceNotDutyLedger LegEvidence = "not_duty_ledger"
@@ -70,12 +75,35 @@ type DutyLedger struct {
 // company with no duty ledgers.
 type DutyLedgerBook struct {
 	byKey map[string]DutyLedger
+	// fromGroups: the book was built from the group tree, not the duty
+	// ledger masters, so it says which ledgers are duty ledgers but not
+	// their type of duty or duty head.
+	fromGroups bool
 }
 
 // NewDutyLedgerBook builds a book from ledger masters, or nil when there are
 // none.
 func NewDutyLedgerBook(ledgers []DutyLedger) *DutyLedgerBook {
-	book := &DutyLedgerBook{byKey: map[string]DutyLedger{}}
+	return newDutyLedgerBook(ledgers, false)
+}
+
+// NewDutyLedgerBookFromGroups builds a book from the ledgers the company's
+// group tree places under Duties & Taxes (LedgerGSTINs.DutyLedgersByGroup),
+// or nil when there are none. Used only when the duty ledger masters could
+// not be read: membership of Duties & Taxes is evidence beyond a ledger's
+// name; the GST head then comes from the name and every such leg is flagged.
+func NewDutyLedgerBookFromGroups(ledgers []DutyLedger) *DutyLedgerBook {
+	return newDutyLedgerBook(ledgers, true)
+}
+
+// FromGroups reports whether the book came from the group tree rather than
+// the duty ledger masters.
+func (b *DutyLedgerBook) FromGroups() bool {
+	return b != nil && b.fromGroups
+}
+
+func newDutyLedgerBook(ledgers []DutyLedger, fromGroups bool) *DutyLedgerBook {
+	book := &DutyLedgerBook{byKey: map[string]DutyLedger{}, fromGroups: fromGroups}
 	for _, l := range ledgers {
 		l.Name = strings.TrimSpace(l.Name)
 		if key := dutyLedgerKey(l.Name); key != "" {
@@ -131,7 +159,7 @@ var dutyLedgerTmpl = template.Must(template.New("duty-ledgers").Parse(`<ENVELOPE
         <TDLMESSAGE>
           <COLLECTION NAME="GstrecoDutyLedgerCollection" ISINITIALIZE="Yes">
             <TYPE>Ledger</TYPE>
-            <CHILDOF>Duties &amp; Taxes</CHILDOF>
+            <CHILDOF>{{.Group}}</CHILDOF>
             <BELONGSTO>Yes</BELONGSTO>
             <FETCH>NAME, PARENT, TAXTYPE, GSTDUTYHEAD</FETCH>
           </COLLECTION>
@@ -145,15 +173,51 @@ var dutyLedgerTmpl = template.Must(template.New("duty-ledgers").Parse(`<ENVELOPE
 // Duties & Taxes, at any depth (BELONGSTO), with its parent group, type of
 // duty (TAXTYPE) and GST duty head.
 func BuildDutyLedgerXML(company string) ([]byte, error) {
-	return renderCompanyEnvelope(dutyLedgerTmpl, company)
+	return BuildDutyLedgerXMLUnder(company, dutiesAndTaxesGroup)
+}
+
+// BuildDutyLedgerXMLUnder is BuildDutyLedgerXML for a company that renamed
+// its Duties & Taxes group (QA v27 L1): CHILDOF names a group by its current
+// name, so asking for "Duties & Taxes" there returns nothing.
+func BuildDutyLedgerXMLUnder(company, group string) ([]byte, error) {
+	if company == "" {
+		return nil, fmt.Errorf("tally: Company is required")
+	}
+	if strings.TrimSpace(group) == "" {
+		group = dutiesAndTaxesGroup
+	}
+	for _, b := range []byte(company + group) {
+		if b < 0x20 && b != '\t' {
+			return nil, fmt.Errorf("tally: Company or group contains control character 0x%02x", b)
+		}
+	}
+	var buf bytes.Buffer
+	if err := dutyLedgerTmpl.Execute(&buf, struct{ Company, Group string }{company, strings.TrimSpace(group)}); err != nil {
+		return nil, fmt.Errorf("tally: render %s envelope: %w", dutyLedgerTmpl.Name(), err)
+	}
+	return buf.Bytes(), nil
 }
 
 type xmlDutyLedger struct {
 	NameAttr string `xml:"NAME,attr"`
 	Name     string `xml:"NAME"`
-	Parent   string `xml:"PARENT"`
-	TaxType  string `xml:"TAXTYPE"`
-	DutyHead string `xml:"GSTDUTYHEAD"`
+	// Some Tally releases export a master's name only inside its name
+	// lists, with no NAME attribute or element.
+	NameList     []string `xml:"NAME.LIST>NAME"`
+	LanguageName []string `xml:"LANGUAGENAME.LIST>NAME.LIST>NAME"`
+	Parent       string   `xml:"PARENT"`
+	ParentAttr   string   `xml:"PARENT,attr"`
+	TaxType      string   `xml:"TAXTYPE"`
+	DutyHead     string   `xml:"GSTDUTYHEAD"`
+}
+
+func firstOf(names []string) string {
+	for _, n := range names {
+		if strings.TrimSpace(n) != "" {
+			return n
+		}
+	}
+	return ""
 }
 
 // ParseDutyLedgers decodes the BuildDutyLedgerXML response. An export with no
@@ -168,8 +232,8 @@ func ParseDutyLedgers(raw []byte) (*DutyLedgerBook, []string, error) {
 			return nil
 		}
 		ledgers = append(ledgers, DutyLedger{
-			Name:     firstNonEmpty(x.Name, x.NameAttr),
-			Parent:   x.Parent,
+			Name:     firstNonEmpty(x.Name, x.NameAttr, firstOf(x.NameList), firstOf(x.LanguageName)),
+			Parent:   firstNonEmpty(x.Parent, x.ParentAttr),
 			TaxType:  x.TaxType,
 			DutyHead: x.DutyHead,
 		})
@@ -224,6 +288,9 @@ func classifyLeg(e LedgerEntry, book *DutyLedgerBook) legDecision {
 			return d
 		}
 		d := legDecision{evidence: EvidenceDutyMaster, parent: m.Parent, taxType: m.TaxType, dutyHead: m.DutyHead}
+		if book.FromGroups() {
+			return classifyDutyGroupLeg(name, m, nameHead, nameWithholding)
+		}
 		taxType := strings.ToUpper(strings.TrimSpace(m.TaxType))
 		switch {
 		case taxType == WithholdingTDS || taxType == WithholdingTCS:
@@ -283,6 +350,24 @@ func classifyLeg(e LedgerEntry, book *DutyLedgerBook) legDecision {
 	return legDecision{role: LegUncertain, evidence: EvidenceName, flags: []string{
 		fmt.Sprintf("%q is named after %s with no duty-ledger or GST-class evidence: kept out of GST and taxable value", name, nameHead),
 	}}
+}
+
+// classifyDutyGroupLeg decides a leg the group tree places under Duties &
+// Taxes when the duty ledger masters were not read (QA v27 L1). Membership of
+// Duties & Taxes is the evidence beyond the name; the head comes from the
+// name, and the leg is flagged so the row says how it was read.
+func classifyDutyGroupLeg(name string, m DutyLedger, nameHead, nameWithholding string) legDecision {
+	d := legDecision{evidence: EvidenceDutyGroup, parent: m.Parent}
+	switch {
+	case nameWithholding != "":
+		d.role, d.withholding = LegWithholding, nameWithholding
+	case nameHead != "":
+		d.role, d.head = LegTax, nameHead
+		d.flags = append(d.flags, fmt.Sprintf("%q is under Duties & Taxes in the group tree (duty ledger masters not read): counted as %s from its name", name, nameHead))
+	default:
+		d.role = LegOtherDuty
+	}
+	return d
 }
 
 // classifyByName is the name step for a leg that is not GST: withholding,

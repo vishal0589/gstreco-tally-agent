@@ -1,0 +1,17 @@
+<!--
+  SYNTHETIC TEST DATA - NOT REAL CLIENT DATA (QA v27 L1).
+  A company group tree in which the reserved "Duties & Taxes" group was
+  renamed "Duties and Taxes". Tally keeps the reserved name in RESERVEDNAME,
+  so CHILDOF "Duties & Taxes" finds nothing on such a company.
+-->
+<ENVELOPE>
+  <HEADER><VERSION>1</VERSION><STATUS>1</STATUS></HEADER>
+  <BODY><DATA><COLLECTION>
+    <GROUP NAME="Current Liabilities" RESERVEDNAME="Current Liabilities"><NAME>Current Liabilities</NAME><PARENT>&#4; Primary</PARENT></GROUP>
+    <GROUP NAME="Duties and Taxes" RESERVEDNAME="Duties &amp; Taxes"><NAME>Duties and Taxes</NAME><PARENT>Current Liabilities</PARENT></GROUP>
+    <GROUP NAME="GST Input" RESERVEDNAME=""><NAME>GST Input</NAME><PARENT>Duties and Taxes</PARENT></GROUP>
+    <GROUP NAME="Sundry Creditors" RESERVEDNAME="Sundry Creditors"><NAME>Sundry Creditors</NAME><PARENT>Current Liabilities</PARENT></GROUP>
+    <GROUP NAME="Purchase Accounts" RESERVEDNAME="Purchase Accounts"><NAME>Purchase Accounts</NAME><PARENT>&#4; Primary</PARENT></GROUP>
+    <GROUP NAME="Current Assets" RESERVEDNAME="Current Assets"><NAME>Current Assets</NAME><PARENT>&#4; Primary</PARENT></GROUP>
+  </COLLECTION></DATA></BODY>
+</ENVELOPE>

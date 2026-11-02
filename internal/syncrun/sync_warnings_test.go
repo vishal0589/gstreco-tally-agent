@@ -239,8 +239,8 @@ func TestRunOne_DutyLedgerMastersUnavailableReachesEveryBatch(t *testing.T) {
 				t.Errorf("row %s: igst %v, want 0 without the masters", *row.TallyVoucherGUID, row.IGST)
 			}
 			for _, leg := range row.VoucherLegs {
-				if leg.LedgerName == "Synthetic IGST Input" && (leg.Classification.AgentRole != tally.LegUncertain || leg.Classification.Method != "unclassified") {
-					t.Errorf("row %s: IGST leg classified %+v, want uncertain / unclassified", *row.TallyVoucherGUID, leg.Classification)
+				if leg.LedgerName == "Synthetic IGST Input" && (leg.Classification.AgentRole != tally.LegUncertain || leg.Classification.Method != "name_fallback" || leg.Classification.Role != "uncertain") {
+					t.Errorf("row %s: IGST leg classified %+v, want uncertain / name_fallback", *row.TallyVoucherGUID, leg.Classification)
 				}
 			}
 		}
