@@ -72,7 +72,7 @@ func ledgerGSTINsFor(ctx context.Context, tallyClient TallyPoster, req Request) 
 	if groups, gerr := groupTreeFor(ctx, tallyClient, req); gerr != nil {
 		groupFailure = &groupTreeFailure{err: gerr, at: syncWarningNow()}
 	} else {
-		ledgers.ApplyGroupTree(groups)
+		ledgers.ApplyGroups(groups)
 	}
 
 	ledgerGSTINCache.Lock()
@@ -83,18 +83,18 @@ func ledgerGSTINsFor(ctx context.Context, tallyClient TallyPoster, req Request) 
 
 // groupTreeFor reads the company's group tree. Errors carry their
 // sync-warning code.
-func groupTreeFor(ctx context.Context, tallyClient TallyPoster, req Request) (map[string]string, error) {
+func groupTreeFor(ctx context.Context, tallyClient TallyPoster, req Request) (tally.GroupTree, error) {
 	body, err := tally.BuildGroupTreeXML(req.TallyCompany)
 	if err != nil {
-		return nil, mastersFetchFailed(err)
+		return tally.GroupTree{}, mastersFetchFailed(err)
 	}
 	resp, err := tallyClient.PostXML(ctx, body)
 	if err != nil {
-		return nil, mastersFetchFailed(fmt.Errorf("tally fetch: %w", err))
+		return tally.GroupTree{}, mastersFetchFailed(fmt.Errorf("tally fetch: %w", err))
 	}
-	groups, err := tally.ParseGroupTree(resp)
+	groups, err := tally.ParseGroups(resp)
 	if err != nil {
-		return nil, mastersParseFailed(err)
+		return tally.GroupTree{}, mastersParseFailed(err)
 	}
 	return groups, nil
 }

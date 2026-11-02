@@ -3,6 +3,7 @@ package syncrun
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/vishal0589/gstreco-tally-agent/internal/ingest"
 	"github.com/vishal0589/gstreco-tally-agent/internal/tally"
@@ -49,10 +50,15 @@ func runInvoiceSync(
 		len(parsed.Vouchers), parsed.Status, len(parsed.Warnings)))
 
 	// QA v18 R3: only a Duties & Taxes ledger makes a leg GST, so the
-	// company's duty-ledger masters are read once before any voucher.
-	dutyLedgers := dutyLedgerLookup(ctx, tallyClient, req, parsed.Vouchers, &res, emit)
+	// company's duty-ledger masters are read once before any voucher. The
+	// ledger directory is read first: its group tree names the company's
+	// Duties & Taxes group and stands in for the masters when they cannot be
+	// read (QA v27 L1).
 	lookup := invoiceLedgerLookup(ctx, tallyClient, req, parsed.Vouchers, &res, emit)
+	dutyLedgers := dutyLedgerLookup(ctx, tallyClient, req, parsed.Vouchers, lookup, &res, emit)
 	rows := make([]tally.IngestVoucherRow, 0, len(parsed.Vouchers))
+	var notNormalized []string
+	var notNormalizedWhy []string
 	for _, v := range parsed.Vouchers {
 		out, normErr := tally.Normalize(v, tally.NormalizeOptions{
 			Kind:        req.IngestKind,
@@ -62,9 +68,22 @@ func runInvoiceSync(
 		})
 		if normErr != nil {
 			res.DroppedOnNormalize++
+			res.ParseWarnings = append(res.ParseWarnings, normErr.Error())
+			notNormalized = append(notNormalized, v.GUID)
+			if len(notNormalizedWhy) < 3 {
+				notNormalizedWhy = append(notNormalizedWhy, normErr.Error())
+			}
 			continue
 		}
 		rows = append(rows, out...)
+	}
+	// A voucher the agent cannot turn into a row is never dropped silently:
+	// sync health names it (QA v27 L1).
+	if len(notNormalized) > 0 {
+		res.addSyncWarning(newSyncWarning(tally.SyncWarningVouchersNotNormalized, req.TallyCompany,
+			fmt.Sprintf("%d %s vouchers could not be read into rows and were not sent: %s",
+				len(notNormalized), req.IngestKind, strings.Join(notNormalizedWhy, "; ")),
+			syncWarningNow(), notNormalized))
 	}
 	// QA v27 B25: one run is one company and period, so two vouchers of a
 	// party keyed to the same invoice number are flagged here.

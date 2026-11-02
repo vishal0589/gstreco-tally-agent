@@ -122,9 +122,11 @@ type IngestVoucherLeg struct {
 
 // IngestLegClassification is the agent's decision on one leg. Role, Method
 // and Head use GST Reco's words (party, tax, tds, tcs, base, round_off,
-// unclassified; group, duty_field, name_fallback, unclassified; igst, cgst,
-// sgst, cess) so the server compares like with like. AgentRole and Evidence
-// are the agent's own finer role and what decided it.
+// uncertain, unclassified; group, duty_field, name_fallback, unclassified;
+// igst, cgst, sgst, cess) so the server compares like with like. Role
+// "uncertain" with method "name_fallback" is a leg named after a GST head
+// with no other evidence (QA v27 L1). AgentRole and Evidence are the agent's
+// own finer role and what decided it.
 type IngestLegClassification struct {
 	Role      string      `json:"role"`
 	Method    string      `json:"method"`

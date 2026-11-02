@@ -258,7 +258,9 @@ func (x xmlVoucher) toRaw() (RawVoucher, []string) {
 			LedgerName: strings.TrimSpace(le.LedgerName),
 			GSTClass:   strings.TrimSpace(le.GSTClass),
 		}
-		entry.IsPartyLedger = entry.LedgerName != "" && entry.LedgerName == r.PartyLedgerName
+		// Tally ledger names are case-insensitive; a voucher-mode note can spell
+		// the party differently from PARTYLEDGERNAME (QA v27 L1).
+		entry.IsPartyLedger = entry.LedgerName != "" && dutyLedgerKey(entry.LedgerName) == dutyLedgerKey(r.PartyLedgerName)
 
 		if amt, err := parseTallyAmount(le.Amount); err == nil {
 			entry.Amount = amt

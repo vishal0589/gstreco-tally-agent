@@ -7,6 +7,13 @@ import (
 	"time"
 )
 
+// FlagTaxLegsUncertain is the machine-readable normalization flag on a row
+// whose voucher has a leg that may be GST but has no evidence beyond its name
+// (QA v27 L1). The row is still sent, with that leg kept out of GST and
+// taxable value: GST Reco holds it in a visible quarantine (reason
+// tax_legs_uncertain) instead of guessing its tax or rejecting it.
+const FlagTaxLegsUncertain = "tax_legs_uncertain"
+
 // NormalizeOptions tunes Normalize's behaviour. Zero value is sensible:
 // default kind = IngestKindPurchase, derive from VoucherType if RCM is true.
 type NormalizeOptions struct {
@@ -241,8 +248,11 @@ func breakDownVoucher(v RawVoucher, book *DutyLedgerBook) voucherBreakdown {
 		return b
 	}
 	b.party = &entries[partyIdx]
-	if book == nil {
+	switch {
+	case book == nil:
 		b.flags = appendFlag(b.flags, "no Duties & Taxes ledger masters: GST taken from the GST class alone")
+	case book.FromGroups():
+		b.flags = appendFlag(b.flags, "Duties & Taxes ledger masters not read: duty ledgers taken from the group tree, GST heads from their names")
 	}
 
 	// orient makes the side opposite the party positive.
@@ -336,6 +346,15 @@ func breakDownVoucher(v RawVoucher, book *DutyLedgerBook) voucherBreakdown {
 
 	if residual := s.gross() - s.tds + s.tcs - s.rcmLiability - s.party; math.Abs(residual) > 0.01 {
 		b.flags = appendFlag(b.flags, fmt.Sprintf("legs do not balance: they establish %.2f net of TDS/TCS against a party amount of %.2f", s.gross()-s.tds+s.tcs-s.rcmLiability, s.party))
+	}
+	// A leg that may be GST with no evidence beyond its name is never
+	// guessed: the row is sent with it kept out of GST and taxable value, and
+	// flagged so GST Reco quarantines it for review (QA v27 L1).
+	for _, l := range b.legs {
+		if l.decision.role == LegUncertain {
+			b.flags = appendFlag(b.flags, FlagTaxLegsUncertain)
+			break
+		}
 	}
 	// No GST rate is above 100%: tax larger than the taxable value means a
 	// leg's evidence is wrong. Flagged, not guessed away.
@@ -470,7 +489,7 @@ func (b *voucherBreakdown) ingestLegs(ledgers LedgerDirectory) []IngestVoucherLe
 			head := strings.ToLower(d.head)
 			leg.Classification.Head = &head
 		}
-		if d.evidence == EvidenceDutyMaster {
+		if d.evidence == EvidenceDutyMaster || d.evidence == EvidenceDutyGroup {
 			leg.ParentGroup = optionalString(d.parent)
 			primary := dutiesAndTaxesGroup
 			leg.PrimaryGroup = &primary
@@ -499,6 +518,8 @@ func serverLegRole(d legDecision) string {
 		return "base"
 	case LegRounding:
 		return "round_off"
+	case LegUncertain:
+		return "uncertain"
 	}
 	return "unclassified"
 }
@@ -506,12 +527,14 @@ func serverLegRole(d legDecision) string {
 // serverLegMethod maps the evidence to GST Reco's classification methods.
 func serverLegMethod(d legDecision) string {
 	switch d.evidence {
-	case EvidencePartyLedger, EvidenceNotDutyLedger:
+	case EvidencePartyLedger, EvidenceNotDutyLedger, EvidenceDutyGroup:
 		return "group"
 	case EvidenceDutyMaster, EvidenceGSTClass:
 		return "duty_field"
 	}
-	if d.role == LegUncertain || d.role == LegOtherDuty {
+	// A leg named after a GST head with no other evidence is a name match:
+	// role uncertain, method name_fallback (QA v27 L1).
+	if d.role == LegOtherDuty {
 		return "unclassified"
 	}
 	return "name_fallback"
