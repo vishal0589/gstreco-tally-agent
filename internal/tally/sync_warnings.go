@@ -22,6 +22,10 @@ const (
 	SyncWarningDutyLedgerMastersUnavailable = "duty_ledger_masters_unavailable"
 	SyncWarningMastersFetchFailed           = "masters_fetch_failed"
 	SyncWarningMastersParseFailed           = "masters_parse_failed"
+	// SyncWarningVouchersNotNormalized names invoice-family vouchers the
+	// agent could not read into rows (no party ledger found), so they were
+	// not sent (QA v27 L1).
+	SyncWarningVouchersNotNormalized = "vouchers_not_normalized"
 )
 
 // Server-side caps on sync_warnings; the agent applies them before sending.

@@ -35,8 +35,8 @@ func resetDutyLedgerCache() {
 // dutyLedgersFor returns the company's Duties & Taxes masters, from the cache
 // when fresh. The Tally request runs outside the lock. A failed request is
 // not cached; an empty export is cached as nil (no evidence).
-func dutyLedgersFor(ctx context.Context, tallyClient TallyPoster, req Request) (*tally.DutyLedgerBook, error) {
-	key := req.TallyEndpoint + "\x00" + req.TallyCompany
+func dutyLedgersFor(ctx context.Context, tallyClient TallyPoster, req Request, group string) (*tally.DutyLedgerBook, error) {
+	key := req.TallyEndpoint + "\x00" + req.TallyCompany + "\x00" + group
 	dutyLedgerCache.Lock()
 	if e, ok := dutyLedgerCache.entries[key]; ok && dutyLedgerCache.now().Sub(e.at) < dutyLedgerTTL {
 		dutyLedgerCache.Unlock()
@@ -44,7 +44,7 @@ func dutyLedgersFor(ctx context.Context, tallyClient TallyPoster, req Request) (
 	}
 	dutyLedgerCache.Unlock()
 
-	body, err := tally.BuildDutyLedgerXML(req.TallyCompany)
+	body, err := tally.BuildDutyLedgerXMLUnder(req.TallyCompany, group)
 	if err != nil {
 		return nil, err
 	}
@@ -63,36 +63,66 @@ func dutyLedgersFor(ctx context.Context, tallyClient TallyPoster, req Request) (
 	return book, nil
 }
 
+// dutyGroupSource is a ledger directory that knows which ledgers its group
+// tree places under Duties & Taxes (tally.LedgerGSTINs).
+type dutyGroupSource interface {
+	DutiesAndTaxesGroup() string
+	DutyLedgersByGroup() []tally.DutyLedger
+}
+
 // dutyLedgerLookup returns the duty-ledger book the invoice normaliser uses,
-// fetched once per company before any voucher is normalised. A failed or
-// empty fetch is recorded and the run continues with no book: legs named
-// after a GST head are then uncertain and every row says the masters were
-// missing. The failure is logged and sent to GST Reco's sync health with the
-// run's batches (QA v21 G-A).
+// fetched once per company before any voucher is normalised.
+//
+// The request names the Duties & Taxes group as the company's group tree
+// spells it, so a company that renamed the reserved group still gets its
+// duty ledgers (QA v27 L1). When the masters still fail or come back empty,
+// the book is built from the ledgers the group tree places under Duties &
+// Taxes; GST heads then come from their names and every row says so. Either
+// way the failure is logged and sent to GST Reco's sync health with the
+// run's batches (QA v21 G-A). With neither, the run continues with no book:
+// legs named after a GST head are uncertain, flagged tax_legs_uncertain, and
+// held for review by the server.
 func dutyLedgerLookup(
 	ctx context.Context,
 	tallyClient TallyPoster,
 	req Request,
 	vouchers []tally.RawVoucher,
+	directory tally.LedgerDirectory,
 	res *Result,
 	emit emitFn,
 ) *tally.DutyLedgerBook {
 	if !hasLiveVoucher(vouchers) {
 		return nil
 	}
-	book, err := dutyLedgersFor(ctx, tallyClient, req)
+	groups, _ := directory.(dutyGroupSource)
+	group := "Duties & Taxes"
+	if groups != nil {
+		group = groups.DutiesAndTaxesGroup()
+	}
+	book, err := dutyLedgersFor(ctx, tallyClient, req, group)
+	if err == nil && book != nil {
+		emit("duty_ledgers", fmt.Sprintf("%d Duties & Taxes ledgers", book.Len()))
+		return book
+	}
+	problem := "came back empty"
+	if err != nil {
+		problem = fmt.Sprintf("unavailable (%v)", err)
+	}
+	if groups != nil {
+		if fallback := tally.NewDutyLedgerBookFromGroups(groups.DutyLedgersByGroup()); fallback != nil {
+			dutyLedgersUnavailable(req, vouchers, res, emit,
+				fmt.Sprintf("duty ledger masters %s; %d duty ledgers taken from the group tree (%q), GST heads from their names", problem, fallback.Len(), group))
+			return fallback
+		}
+	}
 	if err != nil {
 		dutyLedgersUnavailable(req, vouchers, res, emit,
 			fmt.Sprintf("duty ledger masters unavailable; GST taken from the GST class alone and GST-named legs left uncertain: %v", err))
 		return nil
 	}
-	if book == nil {
-		dutyLedgersUnavailable(req, vouchers, res, emit,
-			"duty ledger masters came back empty; GST taken from the GST class alone and GST-named legs left uncertain")
-		return nil
-	}
-	emit("duty_ledgers", fmt.Sprintf("%d Duties & Taxes ledgers", book.Len()))
-	return book
+	dutyLedgersUnavailable(req, vouchers, res, emit,
+		"duty ledger masters came back empty; GST taken from the GST class alone and GST-named legs left uncertain")
+	return nil
 }
 
 // dutyLedgersUnavailable logs the missing masters locally and records them for

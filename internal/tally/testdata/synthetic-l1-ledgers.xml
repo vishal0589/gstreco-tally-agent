@@ -1,0 +1,18 @@
+<!--
+  SYNTHETIC TEST DATA - NOT REAL CLIENT DATA (QA v27 L1).
+  Every ledger of a company whose GST ledgers are plainly named ("SGST INPUT",
+  "CGST INPUT", "IGST INPUT") and sit under the renamed Duties & Taxes group,
+  plus one GST-named ledger kept under Current Assets (never a duty ledger).
+-->
+<ENVELOPE>
+  <HEADER><VERSION>1</VERSION><STATUS>1</STATUS></HEADER>
+  <BODY><DATA><COLLECTION>
+    <LEDGER NAME="Synthetic Steel Supplier"><NAME>Synthetic Steel Supplier</NAME><PARENT>Sundry Creditors</PARENT><PARTYGSTIN>27AAAAA0000A1Z5</PARTYGSTIN></LEDGER>
+    <LEDGER NAME="Purchase Account"><NAME>Purchase Account</NAME><PARENT>Purchase Accounts</PARENT></LEDGER>
+    <LEDGER NAME="Purchase Return"><NAME>Purchase Return</NAME><PARENT>Purchase Accounts</PARENT></LEDGER>
+    <LEDGER NAME="SGST INPUT"><NAME>SGST INPUT</NAME><PARENT>GST Input</PARENT></LEDGER>
+    <LEDGER NAME="CGST INPUT"><NAME>CGST INPUT</NAME><PARENT>GST Input</PARENT></LEDGER>
+    <LEDGER NAME="IGST INPUT"><NAME>IGST INPUT</NAME><PARENT>Duties and Taxes</PARENT></LEDGER>
+    <LEDGER NAME="IGST Advance Deposit"><NAME>IGST Advance Deposit</NAME><PARENT>Current Assets</PARENT></LEDGER>
+  </COLLECTION></DATA></BODY>
+</ENVELOPE>
