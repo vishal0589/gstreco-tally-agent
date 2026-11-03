@@ -110,6 +110,7 @@ func runInvoiceSync(
 	// batch fails still records them; the server de-duplicates (QA v21 G-A).
 	for i := range batches {
 		batches[i].SyncWarnings = res.SyncWarnings
+		batches[i].SyncRequestID = req.SyncRequestID
 	}
 
 	for i, body := range batches {
@@ -223,6 +224,7 @@ func runJournalSync(
 	batches := buildJournalBatches(req.RunID, req.RunID, req.TallyCompany, tallyEndpoint, rows, req.BatchSize)
 	for i := range batches {
 		batches[i].SyncWarnings = res.SyncWarnings
+		batches[i].SyncRequestID = req.SyncRequestID
 	}
 	for i, body := range batches {
 		if err := ctx.Err(); err != nil {
@@ -324,6 +326,7 @@ func runPaymentSync(
 	batches := buildPaymentBatches(req.RunID, req.RunID, req.TallyCompany, tallyEndpoint, rows, req.BatchSize)
 	for i := range batches {
 		batches[i].SyncWarnings = res.SyncWarnings
+		batches[i].SyncRequestID = req.SyncRequestID
 	}
 	for i, body := range batches {
 		if err := ctx.Err(); err != nil {
@@ -410,6 +413,7 @@ func runTaxLedgerSync(
 	batches := buildTaxLedgerBatches(req.RunID, req.RunID, req.TallyCompany, tallyEndpoint, rows, req.BatchSize)
 	for i := range batches {
 		batches[i].SyncWarnings = res.SyncWarnings
+		batches[i].SyncRequestID = req.SyncRequestID
 	}
 	for i, body := range batches {
 		if err := ctx.Err(); err != nil {

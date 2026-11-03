@@ -86,6 +86,7 @@ type JournalIngestRequestBody struct {
 	RequestID     string              `json:"request_id,omitempty"`
 	Batch         []JournalVoucherRow `json:"batch"`
 	SyncWarnings  []SyncWarning       `json:"sync_warnings,omitempty"`
+	SyncRequestID string              `json:"sync_request_id,omitempty"`
 }
 
 type PaymentIngestRequestBody struct {
@@ -96,6 +97,7 @@ type PaymentIngestRequestBody struct {
 	RequestID     string              `json:"request_id,omitempty"`
 	Batch         []PaymentVoucherRow `json:"batch"`
 	SyncWarnings  []SyncWarning       `json:"sync_warnings,omitempty"`
+	SyncRequestID string              `json:"sync_request_id,omitempty"`
 }
 
 type TaxLedgerIngestRequestBody struct {
@@ -106,6 +108,7 @@ type TaxLedgerIngestRequestBody struct {
 	RequestID     string                `json:"request_id,omitempty"`
 	Batch         []TaxLedgerMonthlyRow `json:"batch"`
 	SyncWarnings  []SyncWarning         `json:"sync_warnings,omitempty"`
+	SyncRequestID string                `json:"sync_request_id,omitempty"`
 }
 
 // AccountingAcceptedResponse is the 2xx response body from the journal/payment

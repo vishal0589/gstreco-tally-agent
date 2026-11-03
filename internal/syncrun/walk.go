@@ -58,6 +58,10 @@ type WalkOptions struct {
 	// RunKind is "manual" | "incremental" | "full". Server stamps it
 	// on the first batch of a run.
 	RunKind string
+	// SyncRequestID is the server sync request this walk serves, copied
+	// onto every (mapping, kind) run and each of its batches. Empty for
+	// scheduled ticks: they serve no request.
+	SyncRequestID string
 	// PerRunTimeout caps each (mapping, kind) RunOne call. Zero = 10
 	// minutes (matches CLI default).
 	PerRunTimeout time.Duration
@@ -165,6 +169,7 @@ func WalkAll(ctx context.Context, opts WalkOptions) WalkResult {
 				RunID:         runID,
 				RunKind:       opts.RunKind,
 				BatchSize:     opts.BatchSize,
+				SyncRequestID: opts.SyncRequestID,
 			}, progress)
 			cancelRun()
 
