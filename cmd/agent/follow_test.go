@@ -47,7 +47,7 @@ func TestResolveMappingsForTick_ReadsACompanyWhereItIsOpen(t *testing.T) {
 		{MappingID: "m-hah", TallyCompanyName: hah, TallyEndpoint: open.URL},
 		{MappingID: "m-gone", TallyCompanyName: "Closed Company Ltd", TallyEndpoint: closedURL},
 	}
-	resolved, err := resolveMappingsForTick(context.Background(), mappings, zerolog.Nop())
+	resolved, _, err := resolveMappingsForTick(context.Background(), mappings, zerolog.Nop())
 
 	got := map[string]string{}
 	for _, m := range resolved {

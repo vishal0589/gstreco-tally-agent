@@ -23,6 +23,16 @@ type FollowedMapping struct {
 type SkippedMapping struct {
 	Mapping ingest.ActiveMapping
 	Reason  string
+	// Result classifies the skip with the connection_status result
+	// names: ingest.ConnStatusWrongCompanyOpen,
+	// ingest.ConnStatusEndpointUnreachable or
+	// ingest.ConnStatusMappingMismatch.
+	Result string
+	// Endpoint is the mapped endpoint the decision was made for.
+	Endpoint string
+	// OpenCompanies is what the Tally at Endpoint reported open (nil
+	// when it did not answer).
+	OpenCompanies []tally.TallyCompany
 }
 
 // ResolveMappingEndpoints decides which Tally port to read for each mapping
@@ -74,15 +84,31 @@ func ResolveMappingEndpoints(mappings []ingest.ActiveMapping, probes []tally.Pro
 	for _, m := range mappings {
 		name := strings.TrimSpace(m.TallyCompanyName)
 		mapped := normalizeEndpoint(m.TallyEndpoint)
+		if name == "" || mapped == "" {
+			skipped = append(skipped, SkippedMapping{
+				Mapping:  m,
+				Reason:   fmt.Sprintf("mapping %s has no Tally company name or endpoint; fix it in /settings/tally", m.MappingID),
+				Result:   ingest.ConnStatusMappingMismatch,
+				Endpoint: m.TallyEndpoint,
+			})
+			continue
+		}
+		wantGUID := strings.TrimSpace(m.TallyCompanyGUID)
 		var where []string
 		onMapped := false
+		guidMismatchOnMapped := false
 		for _, oc := range openOn[name] {
+			// Same name but a different Tally company GUID is another
+			// company — on the mapped port as much as anywhere else.
+			if wantGUID != "" && oc.guid != "" && !strings.EqualFold(oc.guid, wantGUID) {
+				if oc.endpoint == mapped {
+					guidMismatchOnMapped = true
+				}
+				continue
+			}
 			if oc.endpoint == mapped {
 				onMapped = true
 				break
-			}
-			if m.TallyCompanyGUID != "" && oc.guid != "" && !strings.EqualFold(oc.guid, strings.TrimSpace(m.TallyCompanyGUID)) {
-				continue // same name, different company
 			}
 			where = append(where, oc.endpoint)
 		}
@@ -98,12 +124,30 @@ func ResolveMappingEndpoints(mappings []ingest.ActiveMapping, probes []tally.Pro
 			resolved = append(resolved, moved)
 			followed = append(followed, FollowedMapping{Mapping: m, From: m.TallyEndpoint, To: where[0]})
 		case 0:
-			skipped = append(skipped, SkippedMapping{Mapping: m, Reason: notOpenReason(name, mapped, byEndpoint)})
+			sk := SkippedMapping{Mapping: m, Endpoint: m.TallyEndpoint, Reason: notOpenReason(name, mapped, byEndpoint)}
+			p, probed := byEndpoint[mapped]
+			switch {
+			case probed && p.Err == nil:
+				sk.Result = ingest.ConnStatusWrongCompanyOpen
+				sk.OpenCompanies = append([]tally.TallyCompany{}, p.Companies...)
+				if guidMismatchOnMapped {
+					sk.Reason = fmt.Sprintf("%q on %s has a different Tally company GUID than the mapping (another company with the same name); not reading it", name, mapped)
+				}
+			default:
+				sk.Result = ingest.ConnStatusEndpointUnreachable
+			}
+			skipped = append(skipped, sk)
 		default:
-			skipped = append(skipped, SkippedMapping{
-				Mapping: m,
-				Reason:  fmt.Sprintf("%q is open on several Tally ports (%s), none of them its mapped %s; not guessing which copy holds the books", name, strings.Join(where, ", "), mapped),
-			})
+			sk := SkippedMapping{
+				Mapping:  m,
+				Endpoint: m.TallyEndpoint,
+				Result:   ingest.ConnStatusWrongCompanyOpen,
+				Reason:   fmt.Sprintf("%q is open on several Tally ports (%s), none of them its mapped %s; not guessing which copy holds the books", name, strings.Join(where, ", "), mapped),
+			}
+			if p, ok := byEndpoint[mapped]; ok && p.Err == nil {
+				sk.OpenCompanies = append([]tally.TallyCompany{}, p.Companies...)
+			}
+			skipped = append(skipped, sk)
 		}
 	}
 	return resolved, followed, skipped

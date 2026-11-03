@@ -27,6 +27,10 @@ type HeartbeatRequest struct {
 	AgentVersion   string `json:"agent_version,omitempty"`
 	LastTickAt     string `json:"last_tick_at,omitempty"`
 	LastTickStatus string `json:"last_tick_status,omitempty"`
+	// ConnectionStatus is this connection's own last result (QA v29
+	// L19). LastTickStatus above stays agent-wide for older servers;
+	// servers that know connection_status should prefer it.
+	ConnectionStatus *ConnectionStatus `json:"connection_status,omitempty"`
 }
 
 // HeartbeatResponse is what the daemon picks up on each poll. The

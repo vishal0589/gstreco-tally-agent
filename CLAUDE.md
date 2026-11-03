@@ -36,6 +36,10 @@ The Windows side of GST Reco's Tally sync. The server side lives at `~/GST_Reco`
 - All outbound HTTP requests to the server are HMAC-signed per the scheme in the master plan's "HMAC scheme" section.
 - Logs rotate via lumberjack, 10 MB × 5 files, stored under `%ProgramData%\GST Reco\agent\logs\`.
 
+## Per-connection state
+
+One agent process serves every paired connection on the machine. Anything a connection reports to the server (heartbeat `connection_status`, its sync result) must come from that connection's own `daemonConnectionRuntime` (`cmd/agent/connection_status.go`), never from shared state. The agent-wide `tickState` only feeds the legacy `last_tick_status` field.
+
 ## Server coordination
 
 Every agent PR that changes the wire protocol must reference the paired server PR (or note that the server already exposes the endpoint). Breaking wire changes need a server migration first.
