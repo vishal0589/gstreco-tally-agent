@@ -107,6 +107,14 @@ type Options struct {
 	// the heartbeat body. The daemon wires this up to its scheduler
 	// state.
 	LastTickReporter func() (time.Time, string)
+	// ConnectionStatusReporter, when non-nil, returns this connection's
+	// own connection_status for the heartbeat body. One Poller serves
+	// one connection, so this must read that connection's state only.
+	ConnectionStatusReporter func() *ingest.ConnectionStatus
+	// OnHeartbeatResult, when non-nil, is told the outcome of every
+	// heartbeat POST (nil on 2xx), so a 401 on this connection's
+	// heartbeat shows on this connection's next connection_status.
+	OnHeartbeatResult func(err error)
 }
 
 // Poller runs the heartbeat loop. Start() launches the goroutine;
@@ -217,7 +225,14 @@ func (p *Poller) poll(parent context.Context) {
 		}
 	}
 
+	if p.opts.ConnectionStatusReporter != nil {
+		body.ConnectionStatus = p.opts.ConnectionStatusReporter()
+	}
+
 	resp, err := p.opts.Client.Heartbeat(pollCtx, body)
+	if p.opts.OnHeartbeatResult != nil {
+		p.opts.OnHeartbeatResult(err)
+	}
 	if err != nil {
 		p.opts.Logger.Warn().Err(err).Msg("heartbeat failed")
 		return

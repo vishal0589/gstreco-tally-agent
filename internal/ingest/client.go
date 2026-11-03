@@ -76,8 +76,8 @@ type AcceptedResponse struct {
 func (r AcceptedResponse) AllFindings() []ValidationFinding {
 	total :=
 		len(r.Findings.MissingGSTIN) +
-		len(r.Findings.Purchase) +
-		len(r.Findings.Sales)
+			len(r.Findings.Purchase) +
+			len(r.Findings.Sales)
 	if total == 0 {
 		return nil
 	}
@@ -250,7 +250,7 @@ func (c *Client) signedRequest(ctx context.Context, method, path string, body []
 	snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 	e := &SendError{
 		Status:  resp.StatusCode,
-		Snippet: strings.TrimSpace(string(snippet)),
+		Snippet: RedactSecrets(strings.TrimSpace(string(snippet)), c.bearer),
 	}
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:

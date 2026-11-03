@@ -319,3 +319,39 @@ func TestStartStopIdempotent(t *testing.T) {
 	p.Stop()
 	p.Stop() // second Stop should no-op
 }
+
+func TestPoll_ConnectionStatusReporterFillsBodyAndResultHookFires(t *testing.T) {
+	client := &fakeHeartbeatClient{}
+	var mu sync.Mutex
+	var results []error
+	p, _ := New(Options{
+		Client: client, Handler: &recordingHandler{},
+		Interval: time.Hour,
+		Logger:   quietLogger(),
+		ConnectionStatusReporter: func() *ingest.ConnectionStatus {
+			return &ingest.ConnectionStatus{Result: ingest.ConnStatusSuccess, CheckedAt: "2026-11-03T10:00:00Z"}
+		},
+		OnHeartbeatResult: func(err error) {
+			mu.Lock()
+			results = append(results, err)
+			mu.Unlock()
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	p.Start(ctx)
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	p.Stop()
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.requests) < 1 || client.requests[0].ConnectionStatus == nil ||
+		client.requests[0].ConnectionStatus.Result != ingest.ConnStatusSuccess {
+		t.Fatalf("requests = %+v, want connection_status success", client.requests)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(results) < 1 || results[0] != nil {
+		t.Fatalf("OnHeartbeatResult calls = %v, want one nil", results)
+	}
+}
