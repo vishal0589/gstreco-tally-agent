@@ -302,12 +302,12 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 	pollers := make([]*heartbeat.Poller, 0, len(runtimes))
 	for _, runtime := range runtimes {
 		runtime := runtime
-		periodSyncFnTracked := wrapPeriodSyncWithState(
+		periodSyncFnTracked := wrapSyncNowWithState(
 			makePeriodSyncFunc(runtime, tally.NewClient, logger),
 			tickState,
 		)
-		currentMonthSyncFnTracked := wrapTickWithState(
-			makeSingleConnectionTickFunc(runtime, tally.NewClient, logger),
+		currentMonthSyncFnTracked := wrapSyncNowWithState(
+			makeSingleConnectionSyncNowFunc(runtime, tally.NewClient, logger),
 			tickState,
 		)
 		hbHandler := &daemonHeartbeatHandler{
@@ -459,32 +459,41 @@ func loadConnectionRuntimes(conns []config.PairedConnection, ks secretGetter, lo
 type daemonHeartbeatHandler struct {
 	runtime         *daemonConnectionRuntime
 	logger          zerolog.Logger
-	runCurrentSync  func(ctx context.Context) error
-	runPeriodSync   func(ctx context.Context, period string) error
+	runCurrentSync  func(ctx context.Context, req heartbeat.SyncNow) error
+	runPeriodSync   func(ctx context.Context, req heartbeat.SyncNow) error
 	cancelIfLastOne func()
 }
 
-func (h *daemonHeartbeatHandler) OnSyncNow(ctx context.Context, syncPeriod string) error {
+// OnSyncNow runs the sync a delivered sync_now asks for. The request id
+// travels by value into that one run (QA v29 P3): the poller dispatches
+// sync_now actions one at a time, so a second sync_now starts its own run
+// with its own id after this one returns and never re-stamps it.
+func (h *daemonHeartbeatHandler) OnSyncNow(ctx context.Context, req heartbeat.SyncNow) error {
 	if h.runtime == nil || !h.runtime.Enabled() {
 		return fmt.Errorf("heartbeat sync_now: connection is disabled")
 	}
-	if strings.TrimSpace(syncPeriod) == "" {
+	req.Period = strings.TrimSpace(req.Period)
+	if req.Period == "" {
 		h.logger.Info().
 			Str("connection_id", h.runtime.info.ConnectionID).
+			Str("sync_request_id", req.RequestID).
+			Strs("kinds", req.Kinds).
 			Msg("heartbeat sync_now: firing current-month sync for this connection")
 		if h.runCurrentSync == nil {
 			return fmt.Errorf("heartbeat sync_now: current-month sync is unavailable")
 		}
-		return h.runCurrentSync(ctx)
+		return h.runCurrentSync(ctx, req)
 	}
 	h.logger.Info().
 		Str("connection_id", h.runtime.info.ConnectionID).
-		Str("period", syncPeriod).
+		Str("period", req.Period).
+		Str("sync_request_id", req.RequestID).
+		Strs("kinds", req.Kinds).
 		Msg("heartbeat sync_now: running explicit month window")
 	if h.runPeriodSync == nil {
 		return fmt.Errorf("heartbeat sync_now: explicit month sync is unavailable")
 	}
-	return h.runPeriodSync(ctx, syncPeriod)
+	return h.runPeriodSync(ctx, req)
 }
 
 func (h *daemonHeartbeatHandler) OnPause(_ context.Context) error {
@@ -560,12 +569,12 @@ func wrapTickWithState(fn scheduler.TickFunc, state *tickState) scheduler.TickFu
 	}
 }
 
-func wrapPeriodSyncWithState(
-	fn func(ctx context.Context, period string) error,
+func wrapSyncNowWithState(
+	fn func(ctx context.Context, req heartbeat.SyncNow) error,
 	state *tickState,
-) func(ctx context.Context, period string) error {
-	return func(ctx context.Context, period string) error {
-		err := fn(ctx, period)
+) func(ctx context.Context, req heartbeat.SyncNow) error {
+	return func(ctx context.Context, req heartbeat.SyncNow) error {
+		err := fn(ctx, req)
 		state.record(time.Now().UTC(), tickStatusForError(err))
 		return err
 	}
@@ -601,12 +610,54 @@ func makeTickFunc(
 	}
 }
 
+// syncScope is what one sync run serves: the server request id (empty
+// for scheduled ticks) and the voucher kinds to walk.
+type syncScope struct {
+	requestID string
+	kinds     []syncrun.KindPair
+}
+
+// scheduledScope is a scheduled tick: no request, every kind.
+var scheduledScope = syncScope{kinds: syncrun.DefaultKinds}
+
+// syncScopeFor turns a delivered sync_now into the run's scope. Kinds the
+// agent does not know are logged and skipped; when none resolve (or the
+// server sent none, as older servers do) every kind runs, as before.
+func syncScopeFor(req heartbeat.SyncNow, logger zerolog.Logger) syncScope {
+	scope := syncScope{requestID: strings.TrimSpace(req.RequestID), kinds: syncrun.DefaultKinds}
+	if len(req.Kinds) == 0 {
+		return scope
+	}
+	asked := make(map[string]bool, len(req.Kinds))
+	for _, name := range req.Kinds {
+		kp, err := syncrun.MapKindByName(name)
+		if err != nil {
+			logger.Warn().Str("kind", name).Str("sync_request_id", scope.requestID).
+				Msg("sync_now asked for a kind this agent does not know; skipping it")
+			continue
+		}
+		asked[kp.Name] = true
+	}
+	if len(asked) == 0 {
+		return scope
+	}
+	kinds := make([]syncrun.KindPair, 0, len(asked))
+	for _, kp := range syncrun.DefaultKinds {
+		if asked[kp.Name] {
+			kinds = append(kinds, kp)
+		}
+	}
+	scope.kinds = kinds
+	return scope
+}
+
 func makePeriodSyncFunc(
 	runtime *daemonConnectionRuntime,
 	newTallyClient func(string, ...tally.ClientOption) *tally.Client,
 	logger zerolog.Logger,
-) func(ctx context.Context, periodCode string) error {
-	return func(ctx context.Context, periodCode string) error {
+) func(ctx context.Context, req heartbeat.SyncNow) error {
+	return func(ctx context.Context, req heartbeat.SyncNow) error {
+		periodCode := req.Period
 		from, to, err := period.ParseMonthCode(periodCode)
 		if err != nil {
 			return fmt.Errorf("sync_now period %q: %w", periodCode, err)
@@ -614,21 +665,21 @@ func makePeriodSyncFunc(
 		if runtime == nil || !runtime.Enabled() {
 			return fmt.Errorf("sync_now period %q: connection is disabled", periodCode)
 		}
-		return runWindowSync(ctx, runtime, newTallyClient, logger, from, to, "manual")
+		return runWindowSync(ctx, runtime, newTallyClient, logger, from, to, "manual", syncScopeFor(req, logger))
 	}
 }
 
-func makeSingleConnectionTickFunc(
+func makeSingleConnectionSyncNowFunc(
 	runtime *daemonConnectionRuntime,
 	newTallyClient func(string, ...tally.ClientOption) *tally.Client,
 	logger zerolog.Logger,
-) scheduler.TickFunc {
-	return func(ctx context.Context) error {
+) func(ctx context.Context, req heartbeat.SyncNow) error {
+	return func(ctx context.Context, req heartbeat.SyncNow) error {
 		if runtime == nil || !runtime.Enabled() {
 			return fmt.Errorf("current-month sync: connection is disabled")
 		}
 		from, to := currentMonthWindow(time.Now().In(time.Local))
-		return runWindowSync(ctx, runtime, newTallyClient, logger, from, to, "incremental")
+		return runWindowSync(ctx, runtime, newTallyClient, logger, from, to, "incremental", syncScopeFor(req, logger))
 	}
 }
 
@@ -650,7 +701,7 @@ func runWindowSyncAllConnections(
 		activeCount++
 		// Each connection records its own result inside runWindowSync;
 		// a failure here never becomes another connection's status.
-		if err := runWindowSync(ctx, runtime, newTallyClient, logger, from, to, runKind); err != nil {
+		if err := runWindowSync(ctx, runtime, newTallyClient, logger, from, to, runKind, scheduledScope); err != nil {
 			logger.Error().
 				Str("connection_id", runtime.info.ConnectionID).
 				Err(err).
@@ -694,6 +745,7 @@ func runWindowSync(
 	from time.Time,
 	to time.Time,
 	runKind string,
+	scope syncScope,
 ) error {
 	if runtime == nil || runtime.client == nil {
 		return fmt.Errorf("window sync: connection is not initialised")
@@ -701,7 +753,14 @@ func runWindowSync(
 	client := runtime.client
 	logger = logger.With().Str("connection_id", runtime.info.ConnectionID).Logger()
 	var outcome syncOutcome
-	defer func() { runtime.status.recordSync(outcome.status()) }()
+	defer func() {
+		status := outcome.status()
+		// QA v29 P3 x L19: the connection's status names the request it served.
+		if scope.requestID != "" {
+			status.SyncRequestID = ingest.OptString(scope.requestID)
+		}
+		runtime.status.recordSync(status)
+	}()
 
 	mappings, err := client.FetchActiveMappings(ctx)
 	if err != nil {
@@ -721,6 +780,7 @@ func runWindowSync(
 		Time("from", from).
 		Time("to", to).
 		Str("run_kind", runKind).
+		Str("sync_request_id", scope.requestID).
 		Msg("walking mappings")
 
 	// Sync vendor + customer masters BEFORE walking vouchers so
@@ -745,22 +805,66 @@ func runWindowSync(
 
 	runIDPrefix := fmt.Sprintf("%s-%d", runKind, time.Now().Unix())
 
-	res := syncrun.WalkAll(ctx, syncrun.WalkOptions{
+	opts := walkOptionsFor(active, from, to, runIDPrefix, runKind, scope, client, newTallyClient, logger)
+	logKindResult := opts.PerKindResultHook
+	opts.PerKindResultHook = func(m ingest.ActiveMapping, k syncrun.KindPair, r syncrun.Result, fatalErr error) {
+		// A 401/403 on this connection's ingest is this connection's auth result.
+		if authErr := walkAuthError(r, fatalErr); authErr != nil {
+			outcome.noteAuth(authErr, "ingest "+k.Name)
+		}
+		logKindResult(m, k, r, fatalErr)
+	}
+	res := syncrun.WalkAll(ctx, opts)
+
+	logger.Info().
+		Int("mappings_run", res.MappingsRun).
+		Int("rows", res.TotalRows).
+		Int("batches_sent", res.TotalBatchesSent).
+		Int("batches_failed", res.TotalBatchesFailed).
+		Int("server_skipped", res.TotalServerSkipped).
+		Int("server_errors", res.TotalServerErrors).
+		Int("fatal_errors", res.FatalErrors).
+		Str("run_kind", runKind).
+		Str("sync_request_id", scope.requestID).
+		Msg("tick complete")
+
+	walkErr := errorFromWalkResult(res)
+	outcome.otherErr = walkErr
+	// Both reach the heartbeat: a walk failure must not hide which
+	// companies could not be read at all.
+	return errors.Join(walkErr, unreadable)
+}
+
+// walkOptionsFor builds the walk for one window sync. The scope's request
+// id goes on WalkOptions, so every (mapping, kind) run and each of its
+// batches carries it; a scheduled tick's scope has none.
+func walkOptionsFor(
+	active []ingest.ActiveMapping,
+	from, to time.Time,
+	runIDPrefix, runKind string,
+	scope syncScope,
+	sender syncrun.IngestSender,
+	newTallyClient func(string, ...tally.ClientOption) *tally.Client,
+	logger zerolog.Logger,
+) syncrun.WalkOptions {
+	kinds := scope.kinds
+	if len(kinds) == 0 {
+		kinds = syncrun.DefaultKinds
+	}
+	return syncrun.WalkOptions{
 		Mappings:        active,
-		Kinds:           syncrun.DefaultKinds,
+		Kinds:           kinds,
 		From:            from,
 		To:              to,
 		RunIDPrefix:     runIDPrefix,
 		RunKind:         runKind,
+		SyncRequestID:   scope.requestID,
 		ContinueOnError: true,
 		NewTallyClient: func(endpoint string) syncrun.TallyPoster {
 			return newTallyClient(endpoint)
 		},
-		Sender: client,
+		Sender: sender,
 		PerKindResultHook: func(m ingest.ActiveMapping, k syncrun.KindPair, r syncrun.Result, fatalErr error) {
-			if authErr := walkAuthError(r, fatalErr); authErr != nil {
-				outcome.noteAuth(authErr, "ingest "+k.Name)
-			}
 			if fatalErr != nil {
 				logger.Error().
 					Str("mapping", m.TallyCompanyName).
@@ -780,26 +884,10 @@ func runWindowSync(
 				Int("landed", r.ServerInserted+r.ServerAmended).
 				Int("skipped", r.ServerSkipped).
 				Int("server_errors", r.ServerErrors).
+				Str("sync_request_id", scope.requestID).
 				Msg("per-kind result")
 		},
-	})
-
-	logger.Info().
-		Int("mappings_run", res.MappingsRun).
-		Int("rows", res.TotalRows).
-		Int("batches_sent", res.TotalBatchesSent).
-		Int("batches_failed", res.TotalBatchesFailed).
-		Int("server_skipped", res.TotalServerSkipped).
-		Int("server_errors", res.TotalServerErrors).
-		Int("fatal_errors", res.FatalErrors).
-		Str("run_kind", runKind).
-		Msg("tick complete")
-
-	walkErr := errorFromWalkResult(res)
-	outcome.otherErr = walkErr
-	// Both reach the heartbeat: a walk failure must not hide which
-	// companies could not be read at all.
-	return errors.Join(walkErr, unreadable)
+	}
 }
 
 // followProbeTimeout bounds each port probe before a tick. A Tally that

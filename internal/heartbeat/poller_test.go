@@ -49,6 +49,7 @@ type recordingHandler struct {
 	mu          sync.Mutex
 	actions     []string
 	syncPeriods []string
+	syncNows    []SyncNow
 	syncErr     error
 }
 
@@ -58,9 +59,10 @@ func (h *recordingHandler) record(name string) {
 	h.mu.Unlock()
 }
 
-func (h *recordingHandler) OnSyncNow(_ context.Context, period string) error {
+func (h *recordingHandler) OnSyncNow(_ context.Context, req SyncNow) error {
 	h.mu.Lock()
-	h.syncPeriods = append(h.syncPeriods, period)
+	h.syncPeriods = append(h.syncPeriods, req.Period)
+	h.syncNows = append(h.syncNows, req)
 	h.mu.Unlock()
 	h.record("sync_now")
 	return h.syncErr

@@ -9,6 +9,7 @@ package heartbeat
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +23,33 @@ import (
 // the 60 req/min rate limit and add noise to tally_ingest_log.
 const DefaultInterval = 60 * time.Second
 
+// SyncNow is one delivered sync_now: what the server asked for and the
+// request it is serving (QA v29 P3). It is a value, built fresh from each
+// heartbeat response, so a later sync_now can never change the id of a
+// run already started for an earlier one.
+type SyncNow struct {
+	// Period is the MMYYYY month code; empty = current-month window.
+	Period string
+	// RequestID is the server's sync request id. Empty on older servers;
+	// the run then carries no id, as before.
+	RequestID string
+	// Kinds are the voucher kinds the request asked for. Empty = every kind.
+	Kinds []string
+}
+
+func syncNowFromResponse(resp *ingest.HeartbeatResponse) SyncNow {
+	out := SyncNow{
+		Period:    resp.SyncNowPeriod(),
+		RequestID: strings.TrimSpace(resp.SyncRequestID),
+	}
+	for _, k := range resp.SyncRequestKinds {
+		if k = strings.TrimSpace(k); k != "" {
+			out.Kinds = append(out.Kinds, k)
+		}
+	}
+	return out
+}
+
 // Handler is the agent-side dispatch table. Each method corresponds
 // to one HeartbeatAction. Methods are called serially per poll; if a
 // poll returns three actions, OnSyncNow → OnPause → OnRevoke fire in
@@ -31,7 +59,7 @@ type Handler interface {
 	// OnSyncNow fires when the operator clicked "Sync now". The
 	// daemon's scheduler.RunNow is the obvious implementation — kick
 	// off an immediate sync without waiting for the next cron tick.
-	OnSyncNow(ctx context.Context, period string) error
+	OnSyncNow(ctx context.Context, req SyncNow) error
 	// OnPause fires when the operator paused the agent. Daemon
 	// stops the scheduler. (Server-side `tally_connections.status`
 	// also flips to 'paused'; the agent could rely on the next
@@ -210,8 +238,9 @@ func (p *Poller) poll(parent context.Context) {
 		return
 	}
 
+	syncNow := syncNowFromResponse(resp)
 	for _, action := range resp.PendingActions {
-		p.dispatch(parent, action, resp.PendingSyncPeriod)
+		p.dispatch(parent, action, syncNow)
 	}
 
 	// Schedule change detection. Skipped on the first poll (we don't
@@ -228,7 +257,7 @@ func (p *Poller) poll(parent context.Context) {
 
 // dispatch routes one action to its Handler method. Each call gets a
 // fresh ctx so a slow OnSyncNow doesn't block subsequent actions.
-func (p *Poller) dispatch(parent context.Context, action ingest.HeartbeatAction, syncPeriod string) {
+func (p *Poller) dispatch(parent context.Context, action ingest.HeartbeatAction, syncNow SyncNow) {
 	dispatchCtx, cancel := context.WithTimeout(parent, 30*time.Minute)
 	defer cancel()
 	logger := p.opts.Logger.With().Str("action", string(action)).Logger()
@@ -237,7 +266,10 @@ func (p *Poller) dispatch(parent context.Context, action ingest.HeartbeatAction,
 	var err error
 	switch action {
 	case ingest.HeartbeatActionSyncNow:
-		err = p.opts.Handler.OnSyncNow(dispatchCtx, syncPeriod)
+		if syncNow.RequestID != "" {
+			logger = logger.With().Str("sync_request_id", syncNow.RequestID).Logger()
+		}
+		err = p.opts.Handler.OnSyncNow(dispatchCtx, syncNow)
 	case ingest.HeartbeatActionPause:
 		err = p.opts.Handler.OnPause(dispatchCtx)
 	case ingest.HeartbeatActionRevoke:

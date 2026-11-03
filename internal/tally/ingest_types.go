@@ -182,4 +182,9 @@ type IngestRequestBody struct {
 	// SyncWarnings carries the run's masters fetch/parse failures to sync
 	// health. Omitted when there are none.
 	SyncWarnings []SyncWarning `json:"sync_warnings,omitempty"`
+	// SyncRequestID is the server's sync request this run serves, echoed
+	// from the heartbeat that delivered the sync_now (QA v29 P3). Empty
+	// (and omitted) for scheduled runs and on older servers. It is part of
+	// the body, so an outbox-replayed batch keeps its original id.
+	SyncRequestID string `json:"sync_request_id,omitempty"`
 }

@@ -235,8 +235,8 @@ func TestTwoConnections_401OnOneNeverBecomesTheOthersStatus(t *testing.T) {
 	}
 
 	// Now B's own sync_now runs; A's earlier failure must not touch it.
-	single := makeSingleConnectionTickFunc(b, tally.NewClient, zerolog.Nop())
-	_ = single(context.Background())
+	single := makeSingleConnectionSyncNowFunc(b, tally.NewClient, zerolog.Nop())
+	_ = single(context.Background(), heartbeat.SyncNow{})
 	if got := b.status.snapshot().Result; got != sb.Result {
 		t.Fatalf("B status after its own sync = %s, want %s", got, sb.Result)
 	}
@@ -336,7 +336,7 @@ func TestWrongCompanyOpen_SkipsTheFetch(t *testing.T) {
 	}}
 	rt := newTestRuntime(t, srv.srv.URL, "conn-kss", fakeBearerB, fakeSecretB)
 	from, to := syncWindow()
-	err := runWindowSync(context.Background(), rt, tally.NewClient, zerolog.Nop(), from, to, "manual")
+	err := runWindowSync(context.Background(), rt, tally.NewClient, zerolog.Nop(), from, to, "manual", scheduledScope)
 	if err == nil {
 		t.Fatal("want an error naming the unreadable company")
 	}
@@ -377,7 +377,7 @@ func TestSameNameDifferentGUID_SkipsTheFetch(t *testing.T) {
 	}}
 	rt := newTestRuntime(t, srv.srv.URL, "conn-kbs", fakeBearerA, fakeSecretA)
 	from, to := syncWindow()
-	_ = runWindowSync(context.Background(), rt, tally.NewClient, zerolog.Nop(), from, to, "manual")
+	_ = runWindowSync(context.Background(), rt, tally.NewClient, zerolog.Nop(), from, to, "manual", scheduledScope)
 	if v, o := tl.fetches(); v != 0 || o != 0 {
 		t.Fatalf("fetched from a same-name company with a different GUID (%d/%d)", v, o)
 	}
@@ -396,7 +396,7 @@ func TestEndpointRefused_IsEndpointUnreachable(t *testing.T) {
 	srv.mappings["conn-kbs"] = []ingest.ActiveMapping{{MappingID: "map-kbs", TallyEndpoint: closedURL, TallyCompanyName: "KBS Exports"}}
 	rt := newTestRuntime(t, srv.srv.URL, "conn-kbs", fakeBearerA, fakeSecretA)
 	from, to := syncWindow()
-	_ = runWindowSync(context.Background(), rt, tally.NewClient, zerolog.Nop(), from, to, "manual")
+	_ = runWindowSync(context.Background(), rt, tally.NewClient, zerolog.Nop(), from, to, "manual", scheduledScope)
 	st := rt.status.snapshot()
 	if st.Result != ingest.ConnStatusEndpointUnreachable {
 		t.Fatalf("result = %s (%s), want endpoint_unreachable", st.Result, deref(st.Detail))
@@ -414,7 +414,7 @@ func TestNoActiveMapping_IsMappingMismatch(t *testing.T) {
 	srv.validBearer["conn-x"] = fakeBearerA
 	rt := newTestRuntime(t, srv.srv.URL, "conn-x", fakeBearerA, fakeSecretA)
 	from, to := syncWindow()
-	_ = runWindowSync(context.Background(), rt, tally.NewClient, zerolog.Nop(), from, to, "manual")
+	_ = runWindowSync(context.Background(), rt, tally.NewClient, zerolog.Nop(), from, to, "manual", scheduledScope)
 	if st := rt.status.snapshot(); st.Result != ingest.ConnStatusMappingMismatch {
 		t.Fatalf("result = %s, want mapping_mismatch", st.Result)
 	}
@@ -477,11 +477,11 @@ func TestHeartbeatAuthClearsOnNextAcceptedHeartbeat(t *testing.T) {
 
 type noopHandler struct{}
 
-func (noopHandler) OnSyncNow(context.Context, string) error         { return nil }
-func (noopHandler) OnPause(context.Context) error                   { return nil }
-func (noopHandler) OnRevoke(context.Context) error                  { return nil }
-func (noopHandler) OnRefetchMappings(context.Context) error         { return nil }
-func (noopHandler) OnScheduleChanged(context.Context, string) error { return nil }
+func (noopHandler) OnSyncNow(context.Context, heartbeat.SyncNow) error { return nil }
+func (noopHandler) OnPause(context.Context) error                      { return nil }
+func (noopHandler) OnRevoke(context.Context) error                     { return nil }
+func (noopHandler) OnRefetchMappings(context.Context) error            { return nil }
+func (noopHandler) OnScheduleChanged(context.Context, string) error    { return nil }
 
 func deref(s *string) string {
 	if s == nil {

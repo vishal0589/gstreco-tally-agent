@@ -1,6 +1,9 @@
 package ingest
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 // HeartbeatPath is the daemon's recurring poll endpoint. Mirrors the
 // server route at src/app/api/tally/heartbeat/route.ts (S10 / B3).
@@ -43,6 +46,19 @@ type HeartbeatResponse struct {
 	// Optional MMYYYY month code attached to a queued sync_now.
 	// Empty means "run the daemon's current-month window".
 	PendingSyncPeriod string `json:"pending_sync_period,omitempty"`
+	// SyncRequestID, SyncRequestPeriod and SyncRequestKinds are set when
+	// a sync_now is delivered (QA v29 P3). The agent echoes the id on the
+	// run and every batch it starts for that sync_now, so the server links
+	// the run to the request instead of inferring it from connection +
+	// period. Older servers omit all three: the agent then behaves as
+	// before (no id, period from pending_sync_period, every kind).
+	SyncRequestID string `json:"sync_request_id,omitempty"`
+	// SyncRequestPeriod is an MMYYYY month code, or null for the current
+	// month window.
+	SyncRequestPeriod *string `json:"sync_request_period,omitempty"`
+	// SyncRequestKinds names the voucher kinds the request asked for
+	// ("purchase", "journal", ...). Empty means every kind.
+	SyncRequestKinds []string `json:"sync_request_kinds,omitempty"`
 	// Authoritative cron expression. When the daemon's local
 	// schedule disagrees, it should re-schedule to match.
 	ScheduleCron string `json:"schedule_cron"`
@@ -59,4 +75,16 @@ func (c *Client) Heartbeat(ctx context.Context, body HeartbeatRequest) (*Heartbe
 		return nil, err
 	}
 	return &resp, nil
+}
+
+// SyncNowPeriod returns the month code a delivered sync_now asks for:
+// sync_request_period when the server sent one, else the older
+// pending_sync_period. Empty means the current-month window.
+func (r *HeartbeatResponse) SyncNowPeriod() string {
+	if r.SyncRequestPeriod != nil {
+		if p := strings.TrimSpace(*r.SyncRequestPeriod); p != "" {
+			return p
+		}
+	}
+	return strings.TrimSpace(r.PendingSyncPeriod)
 }

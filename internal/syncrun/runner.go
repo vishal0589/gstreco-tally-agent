@@ -65,6 +65,10 @@ type Request struct {
 	RunKind string
 	// BatchSize caps rows per ingest request. Zero = ingest.DefaultBatchSize.
 	BatchSize int
+	// SyncRequestID is the server sync request this run serves (QA v29
+	// P3). Every batch of the run carries it, the first (run creation) and
+	// the is_final one included. Empty for scheduled and CLI runs.
+	SyncRequestID string
 }
 
 // Result reports what happened. Always populated even when err is
