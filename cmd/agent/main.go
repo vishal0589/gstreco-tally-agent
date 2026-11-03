@@ -77,6 +77,13 @@ type daemonConnectionRuntime struct {
 	info     config.PairedConnection
 	client   *ingest.Client
 	disabled atomic.Bool
+	// status is this connection's own last result, reported as
+	// connection_status on this connection's heartbeat only.
+	status *connStatusTracker
+}
+
+func newDaemonConnectionRuntime(info config.PairedConnection, client *ingest.Client) *daemonConnectionRuntime {
+	return &daemonConnectionRuntime{info: info, client: client, status: newConnStatusTracker()}
 }
 
 func (r *daemonConnectionRuntime) Enabled() bool {
@@ -195,38 +202,7 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 		secretstore.DefaultDir(filepath.Dir(cfgPath)),
 		secretstore.ReadMachineID,
 	)
-	runtimes := make([]*daemonConnectionRuntime, 0, len(cfg.PairedConnections()))
-	for _, conn := range cfg.PairedConnections() {
-		hmacKey, bearerKey := keyring.ConnectionKeys(conn.ConnectionID)
-		secret, secretErr := ks.Get(keyring.ServiceName, hmacKey)
-		if secretErr != nil {
-			logger.Error().
-				Str("connection_id", conn.ConnectionID).
-				Err(secretErr).
-				Msg("read hmac secret from keyring failed; skipping connection")
-			continue
-		}
-		bearer, bearerErr := ks.Get(keyring.ServiceName, bearerKey)
-		if bearerErr != nil {
-			logger.Error().
-				Str("connection_id", conn.ConnectionID).
-				Err(bearerErr).
-				Msg("read bearer token from keyring failed; skipping connection")
-			continue
-		}
-		client, clientErr := ingest.NewClient(conn.Server, conn.ConnectionID, bearer, secret)
-		if clientErr != nil {
-			logger.Error().
-				Str("connection_id", conn.ConnectionID).
-				Err(clientErr).
-				Msg("build ingest client failed; skipping connection")
-			continue
-		}
-		runtimes = append(runtimes, &daemonConnectionRuntime{
-			info:   conn,
-			client: client,
-		})
-	}
+	runtimes := loadConnectionRuntimes(cfg.PairedConnections(), ks, logger)
 	if len(runtimes) == 0 {
 		logger.Error().Msg("no usable paired connections could be initialized")
 		return 1
@@ -347,6 +323,9 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 			Logger:           logger,
 			AgentVersion:     version.Version,
 			LastTickReporter: tickState.report,
+			// Per-connection: this connection's own result only.
+			ConnectionStatusReporter: runtime.status.snapshot,
+			OnHeartbeatResult:        runtime.status.recordHeartbeat,
 		})
 		if pollerErr != nil {
 			logger.Error().
@@ -425,6 +404,54 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 	<-runCtx.Done()
 	logger.Info().Msg("daemon stopping (ctx done)")
 	return 0
+}
+
+// secretGetter is the read side of the secret store.
+type secretGetter interface {
+	Get(service, key string) (string, error)
+}
+
+// loadConnectionRuntimes builds one runtime (ingest client + status) per
+// paired connection, each from that connection's OWN keyring entries
+// (keyring.ConnectionKeys(connection_id)). Logs key names, never values.
+func loadConnectionRuntimes(conns []config.PairedConnection, ks secretGetter, logger zerolog.Logger, opts ...ingest.Option) []*daemonConnectionRuntime {
+	runtimes := make([]*daemonConnectionRuntime, 0, len(conns))
+	for _, conn := range conns {
+		hmacKey, bearerKey := keyring.ConnectionKeys(conn.ConnectionID)
+		secret, secretErr := ks.Get(keyring.ServiceName, hmacKey)
+		if secretErr != nil {
+			logger.Error().
+				Str("connection_id", conn.ConnectionID).
+				Err(secretErr).
+				Msg("read hmac secret from keyring failed; skipping connection")
+			continue
+		}
+		bearer, bearerErr := ks.Get(keyring.ServiceName, bearerKey)
+		if bearerErr != nil {
+			logger.Error().
+				Str("connection_id", conn.ConnectionID).
+				Err(bearerErr).
+				Msg("read bearer token from keyring failed; skipping connection")
+			continue
+		}
+		client, clientErr := ingest.NewClient(conn.Server, conn.ConnectionID, bearer, secret, opts...)
+		if clientErr != nil {
+			logger.Error().
+				Str("connection_id", conn.ConnectionID).
+				Err(clientErr).
+				Msg("build ingest client failed; skipping connection")
+			continue
+		}
+		// Key names (never values) so a mixed-up pairing is visible
+		// in the log: each connection must read its own entries.
+		logger.Info().
+			Str("connection_id", conn.ConnectionID).
+			Str("hmac_key", hmacKey).
+			Str("bearer_key", bearerKey).
+			Msg("connection credentials loaded")
+		runtimes = append(runtimes, newDaemonConnectionRuntime(conn, client))
+	}
+	return runtimes
 }
 
 // daemonHeartbeatHandler implements heartbeat.Handler by routing each
@@ -587,7 +614,7 @@ func makePeriodSyncFunc(
 		if runtime == nil || !runtime.Enabled() {
 			return fmt.Errorf("sync_now period %q: connection is disabled", periodCode)
 		}
-		return runWindowSync(ctx, runtime.client, newTallyClient, logger, from, to, "manual")
+		return runWindowSync(ctx, runtime, newTallyClient, logger, from, to, "manual")
 	}
 }
 
@@ -601,7 +628,7 @@ func makeSingleConnectionTickFunc(
 			return fmt.Errorf("current-month sync: connection is disabled")
 		}
 		from, to := currentMonthWindow(time.Now().In(time.Local))
-		return runWindowSync(ctx, runtime.client, newTallyClient, logger, from, to, "incremental")
+		return runWindowSync(ctx, runtime, newTallyClient, logger, from, to, "incremental")
 	}
 }
 
@@ -621,7 +648,9 @@ func runWindowSyncAllConnections(
 			continue
 		}
 		activeCount++
-		if err := runWindowSync(ctx, runtime.client, newTallyClient, logger, from, to, runKind); err != nil {
+		// Each connection records its own result inside runWindowSync;
+		// a failure here never becomes another connection's status.
+		if err := runWindowSync(ctx, runtime, newTallyClient, logger, from, to, runKind); err != nil {
 			logger.Error().
 				Str("connection_id", runtime.info.ConnectionID).
 				Err(err).
@@ -655,20 +684,35 @@ func currentMonthWindow(now time.Time) (time.Time, time.Time) {
 	return from, from.AddDate(0, 1, -1)
 }
 
+// runWindowSync syncs one connection and records that connection's own
+// result in runtime.status (connection_status on its heartbeat only).
 func runWindowSync(
 	ctx context.Context,
-	client *ingest.Client,
+	runtime *daemonConnectionRuntime,
 	newTallyClient func(string, ...tally.ClientOption) *tally.Client,
 	logger zerolog.Logger,
 	from time.Time,
 	to time.Time,
 	runKind string,
 ) error {
+	if runtime == nil || runtime.client == nil {
+		return fmt.Errorf("window sync: connection is not initialised")
+	}
+	client := runtime.client
+	logger = logger.With().Str("connection_id", runtime.info.ConnectionID).Logger()
+	var outcome syncOutcome
+	defer func() { runtime.status.recordSync(outcome.status()) }()
+
 	mappings, err := client.FetchActiveMappings(ctx)
 	if err != nil {
+		if !outcome.noteAuth(err, "fetch active mappings") {
+			outcome.fetchErr = err
+		}
 		return fmt.Errorf("fetch active mappings: %w", err)
 	}
+	outcome.mappings = mappings.Mappings
 	if len(mappings.Mappings) == 0 {
+		outcome.noMapping = true
 		logger.Warn().Msg("no active mappings — open /settings/tally and map the auto-discovered companies to GSTINs")
 		return nil
 	}
@@ -685,12 +729,19 @@ func runWindowSync(
 	// kind) failures log warn and the voucher walk still runs.
 	// Reusing the same Tally client per endpoint keeps connection
 	// pooling sensible (Tally HTTP is single-process anyway).
-	active, unreadable := resolveMappingsForTick(ctx, mappings.Mappings, logger)
+	//
+	// Before any master or voucher fetch, each mapped company (name +
+	// GUID) must be the one Tally has open on the endpoint we would read.
+	// A mismatch is skipped and reported on THIS connection only.
+	active, skipped, unreadable := resolveMappingsForTick(ctx, mappings.Mappings, logger)
+	outcome.active, outcome.skipped = active, skipped
 	if len(active) == 0 {
 		return unreadable
 	}
 
-	syncMastersForMappings(ctx, client, newTallyClient, active, logger)
+	if authErr := syncMastersForMappings(ctx, client, newTallyClient, active, logger); authErr != nil {
+		outcome.noteAuth(authErr, "masters push")
+	}
 
 	runIDPrefix := fmt.Sprintf("%s-%d", runKind, time.Now().Unix())
 
@@ -707,6 +758,9 @@ func runWindowSync(
 		},
 		Sender: client,
 		PerKindResultHook: func(m ingest.ActiveMapping, k syncrun.KindPair, r syncrun.Result, fatalErr error) {
+			if authErr := walkAuthError(r, fatalErr); authErr != nil {
+				outcome.noteAuth(authErr, "ingest "+k.Name)
+			}
 			if fatalErr != nil {
 				logger.Error().
 					Str("mapping", m.TallyCompanyName).
@@ -741,9 +795,11 @@ func runWindowSync(
 		Str("run_kind", runKind).
 		Msg("tick complete")
 
+	walkErr := errorFromWalkResult(res)
+	outcome.otherErr = walkErr
 	// Both reach the heartbeat: a walk failure must not hide which
 	// companies could not be read at all.
-	return errors.Join(errorFromWalkResult(res), unreadable)
+	return errors.Join(walkErr, unreadable)
 }
 
 // followProbeTimeout bounds each port probe before a tick. A Tally that
@@ -754,21 +810,37 @@ const followProbeTimeout = 8 * time.Second
 // resolveMappingsForTick reads each mapped company from the Tally port it is
 // open on right now (syncrun.ResolveMappingEndpoints): it probes the mapped
 // ports plus every port a tally.exe is listening on. Returns the mappings to
-// read and, when some company can't be read, an error naming each one. If
-// the probe itself can't run, the mappings are read as mapped, as before.
-func resolveMappingsForTick(ctx context.Context, mappings []ingest.ActiveMapping, logger zerolog.Logger) ([]ingest.ActiveMapping, error) {
+// read, the ones skipped (each with a connection_status result), and, when
+// some company can't be read, an error naming each one. If the probe itself
+// can't run nothing is read: vouchers are never fetched for a company the
+// agent could not confirm is the one open (QA v29 L19).
+func resolveMappingsForTick(ctx context.Context, mappings []ingest.ActiveMapping, logger zerolog.Logger) ([]ingest.ActiveMapping, []syncrun.SkippedMapping, error) {
 	ports, err := tally.TallyListeningPorts()
 	if err != nil {
 		logger.Warn().Err(err).Msg("could not list Tally ports; probing mapped ports only")
 	}
-	probes, err := tally.Discover(ctx, tally.DiscoverOptions{
-		Endpoints:   syncrun.CandidateEndpoints(mappings, ports),
-		Timeout:     followProbeTimeout,
-		Concurrency: 8,
-	})
-	if err != nil {
-		logger.Warn().Err(err).Msg("Tally port probe failed; reading mapped ports as before")
-		return mappings, nil
+	var probes []tally.ProbeResult
+	// No candidate endpoint means every mapping lacks one; Discover would
+	// then fall back to a port-range sweep, which is not what we want.
+	if candidates := syncrun.CandidateEndpoints(mappings, ports); len(candidates) > 0 {
+		probes, err = tally.Discover(ctx, tally.DiscoverOptions{
+			Endpoints:   candidates,
+			Timeout:     followProbeTimeout,
+			Concurrency: 8,
+		})
+		if err != nil {
+			logger.Warn().Err(err).Msg("Tally port probe failed; not reading any mapped company this tick")
+			skipped := make([]syncrun.SkippedMapping, 0, len(mappings))
+			for _, m := range mappings {
+				skipped = append(skipped, syncrun.SkippedMapping{
+					Mapping:  m,
+					Endpoint: m.TallyEndpoint,
+					Result:   ingest.ConnStatusEndpointUnreachable,
+					Reason:   fmt.Sprintf("could not probe Tally for %q: %v", m.TallyCompanyName, err),
+				})
+			}
+			return nil, skipped, fmt.Errorf("tally port probe failed: %w", err)
+		}
 	}
 	resolved, followed, skipped := syncrun.ResolveMappingEndpoints(mappings, probes)
 	for _, f := range followed {
@@ -779,17 +851,19 @@ func resolveMappingsForTick(ctx context.Context, mappings []ingest.ActiveMapping
 			Msg("company is open on another Tally port; reading it there")
 	}
 	if len(skipped) == 0 {
-		return resolved, nil
+		return resolved, nil, nil
 	}
 	reasons := make([]string, 0, len(skipped))
 	for _, sk := range skipped {
 		logger.Error().
 			Str("mapping", sk.Mapping.TallyCompanyName).
+			Str("mapping_id", sk.Mapping.MappingID).
 			Str("endpoint", sk.Mapping.TallyEndpoint).
+			Str("result", sk.Result).
 			Msg(sk.Reason)
 		reasons = append(reasons, sk.Reason)
 	}
-	return resolved, fmt.Errorf("%d of %d mapped companies not readable: %s", len(skipped), len(mappings), strings.Join(reasons, "; "))
+	return resolved, skipped, fmt.Errorf("%d of %d mapped companies not readable: %s", len(skipped), len(mappings), strings.Join(reasons, "; "))
 }
 
 func errorFromWalkResult(res syncrun.WalkResult) error {
@@ -831,7 +905,7 @@ func syncMastersForMappings(
 	newTallyClient func(string, ...tally.ClientOption) *tally.Client,
 	mappings []ingest.ActiveMapping,
 	logger zerolog.Logger,
-) {
+) (authErr error) {
 	for _, m := range mappings {
 		tc := newTallyClient(m.ReadEndpoint())
 		for _, kind := range []tally.MasterKind{tally.MasterVendor, tally.MasterCustomer} {
@@ -883,6 +957,9 @@ func syncMastersForMappings(
 			})
 			pushCancel()
 			if err != nil {
+				if _, _, isAuth := ingest.AuthFailure(err); isAuth && authErr == nil {
+					authErr = err
+				}
 				logger.Warn().
 					Str("mapping", m.TallyCompanyName).
 					Str("kind", string(kind)).
@@ -898,6 +975,7 @@ func syncMastersForMappings(
 				Msg("masters pushed")
 		}
 	}
+	return authErr
 }
 
 // signalContext returns a context that cancels on SIGINT/SIGTERM.

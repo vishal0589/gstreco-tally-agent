@@ -168,3 +168,45 @@ func TestWalkAll_ReadsTheFollowedPortButReportsTheMappedOne(t *testing.T) {
 		t.Fatalf("ingest must report the mapped endpoint; sent=%+v", snd.sent)
 	}
 }
+
+func TestResolve_SameNameDifferentGUIDOnTheMappedPortIsNotRead(t *testing.T) {
+	m := mapping(aam, "http://127.0.0.1:9000")
+	m.TallyCompanyGUID = "guid-books"
+	p := probe("http://127.0.0.1:9000")
+	p.Companies = []tally.TallyCompany{{Name: aam, GUID: "guid-other"}}
+	resolved, _, skipped := ResolveMappingEndpoints([]ingest.ActiveMapping{m}, []tally.ProbeResult{p})
+	if len(resolved) != 0 || len(skipped) != 1 || skipped[0].Result != ingest.ConnStatusWrongCompanyOpen ||
+		!strings.Contains(skipped[0].Reason, "GUID") {
+		t.Fatalf("resolved=%v skipped=%+v, want a wrong_company_open skip naming the GUID", resolved, skipped)
+	}
+}
+
+func TestResolve_ClassifiesEachSkip(t *testing.T) {
+	refused := tally.ProbeResult{Endpoint: "http://127.0.0.1:9001", Err: errors.New("connection refused")}
+	other := probe("http://127.0.0.1:9002", hah)
+	ms := []ingest.ActiveMapping{
+		mapping("KBS Exports", "http://127.0.0.1:9001"),
+		mapping("KSS Textiles", "http://127.0.0.1:9002"),
+		{MappingID: "broken"},
+	}
+	_, _, skipped := ResolveMappingEndpoints(ms, []tally.ProbeResult{refused, other})
+	got := map[string]string{}
+	for _, sk := range skipped {
+		got[sk.Mapping.MappingID] = sk.Result
+	}
+	want := map[string]string{
+		"KBS Exports":  ingest.ConnStatusEndpointUnreachable,
+		"KSS Textiles": ingest.ConnStatusWrongCompanyOpen,
+		"broken":       ingest.ConnStatusMappingMismatch,
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s: result %q, want %q", k, got[k], v)
+		}
+	}
+	for _, sk := range skipped {
+		if sk.Mapping.MappingID == "KSS Textiles" && (len(sk.OpenCompanies) != 1 || sk.OpenCompanies[0].Name != hah) {
+			t.Errorf("KSS open companies = %+v, want the company actually open", sk.OpenCompanies)
+		}
+	}
+}
