@@ -355,3 +355,48 @@ func TestPoll_ConnectionStatusReporterFillsBodyAndResultHookFires(t *testing.T) 
 		t.Fatalf("OnHeartbeatResult calls = %v, want one nil", results)
 	}
 }
+
+// QA 04-Nov N3: the heartbeat body carries the effective schedule, and the
+// server's schedule_cron in the response ("0 2 * * *" from the fake) does
+// not change what is reported.
+func TestPoll_ScheduleReportedInBody(t *testing.T) {
+	client := &fakeHeartbeatClient{}
+	sch := &ingest.ScheduleReport{Cron: "0 11,13,15,17 * * *", Source: ingest.ScheduleSourceDefault}
+	p, _ := New(Options{
+		Client: client, Handler: &recordingHandler{},
+		Interval: 20 * time.Millisecond,
+		Logger:   quietLogger(),
+		Schedule: sch,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	p.Start(ctx)
+	time.Sleep(120 * time.Millisecond)
+	cancel()
+	p.Stop()
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.requests) < 2 {
+		t.Fatalf("want at least two polls, got %d", len(client.requests))
+	}
+	for i, r := range client.requests {
+		if r.Schedule == nil || *r.Schedule != *sch {
+			t.Fatalf("request %d schedule = %+v, want %+v", i, r.Schedule, sch)
+		}
+	}
+}
+
+func TestPoll_NoScheduleOptionOmitsKey(t *testing.T) {
+	client := &fakeHeartbeatClient{}
+	p, _ := New(Options{Client: client, Handler: &recordingHandler{}, Interval: time.Hour, Logger: quietLogger()})
+	ctx, cancel := context.WithCancel(context.Background())
+	p.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	p.Stop()
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.requests) < 1 || client.requests[0].Schedule != nil {
+		t.Fatalf("requests = %+v, want no schedule", client.requests)
+	}
+}

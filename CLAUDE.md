@@ -40,6 +40,10 @@ The Windows side of GST Reco's Tally sync. The server side lives at `~/GST_Reco`
 
 One agent process serves every paired connection on the machine. Anything a connection reports to the server (heartbeat `connection_status`, its sync result) must come from that connection's own `daemonConnectionRuntime` (`cmd/agent/connection_status.go`), never from shared state. The agent-wide `tickState` only feeds the legacy `last_tick_status` field.
 
+## Schedule
+
+The daemon's cron spec is `--schedule`, else `config.yaml` `schedule_cron`, else `scheduler.DefaultSpec`; the server's `schedule_cron` is not applied. Each heartbeat reports what is in use as `schedule: {cron, source}` (`config` / `default` / `override`, `cmd/agent/main.go` `scheduleSource`). If the selection ever changes, change `scheduleSource` with it.
+
 ## Server coordination
 
 Every agent PR that changes the wire protocol must reference the paired server PR (or note that the server already exposes the endpoint). Breaking wire changes need a server migration first.

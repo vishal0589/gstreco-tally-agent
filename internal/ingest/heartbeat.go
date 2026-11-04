@@ -34,6 +34,29 @@ type HeartbeatRequest struct {
 	// L19). LastTickStatus above stays agent-wide for older servers;
 	// servers that know connection_status should prefer it.
 	ConnectionStatus *ConnectionStatus `json:"connection_status,omitempty"`
+	// Schedule is the cron spec the daemon's scheduler actually runs
+	// and where it came from (QA 04-Nov N3). The server's
+	// schedule_cron is not applied by this agent, so this is what the
+	// dashboard should show. Omitted by callers without a scheduler
+	// (agentctl).
+	Schedule *ScheduleReport `json:"schedule,omitempty"`
+}
+
+// Schedule sources for ScheduleReport.Source (QA 04-Nov N3 wire contract).
+const (
+	// ScheduleSourceConfig: config.yaml schedule_cron.
+	ScheduleSourceConfig = "config"
+	// ScheduleSourceDefault: scheduler.DefaultSpec (config empty).
+	ScheduleSourceDefault = "default"
+	// ScheduleSourceOverride: the daemon's --schedule command-line flag.
+	ScheduleSourceOverride = "override"
+)
+
+// ScheduleReport is the heartbeat's `schedule` object:
+// {"cron": "<spec actually in use>", "source": "config"|"default"|"override"}.
+type ScheduleReport struct {
+	Cron   string `json:"cron"`
+	Source string `json:"source"`
 }
 
 // HeartbeatResponse is what the daemon picks up on each poll. The
