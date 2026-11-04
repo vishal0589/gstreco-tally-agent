@@ -70,6 +70,21 @@ type DiscoverOptions struct {
 	// NewClient injects a *Client constructor for tests. Production
 	// passes nil and gets the default tally.NewClient.
 	NewClient func(endpoint string) *Client
+	// IdentityProbe also runs the Type:Company NAME+GUID probe
+	// (BuildCompanyIdentityXML) on every endpoint whose List of
+	// Companies answered, recording it in ProbeResult.Identity. It
+	// never changes Companies, Reachable or IsTally.
+	IdentityProbe bool
+}
+
+// IdentityProbe is the Type:Company NAME+GUID probe's result for one
+// endpoint (QA 04-Nov N1). Companies are exactly what the collection
+// enumerated; Err is set when the request failed or Tally did not
+// understand it.
+type IdentityProbe struct {
+	Companies []TallyCompany
+	Warnings  []string
+	Err       error
 }
 
 // ProbeResult is what Discover returns for one endpoint. Either the
@@ -104,6 +119,10 @@ type ProbeResult struct {
 	// at all (TCP refused, timeout, non-Tally response). Reachable
 	// is false when Err is set.
 	Err error
+	// Identity is the Type:Company NAME+GUID probe, nil unless
+	// DiscoverOptions.IdentityProbe was set and List of Companies
+	// answered. Companies above stays the List-of-Companies answer.
+	Identity *IdentityProbe
 	// LatencyMs is the wall-clock time the probe spent. Useful for
 	// diagnostics ("Tally answered in 30 ms but the discover sweep
 	// took 5 s — something's blocking").
@@ -159,7 +178,7 @@ func Discover(ctx context.Context, opts DiscoverOptions) ([]ProbeResult, error) 
 			defer wg.Done()
 			for idx := range work {
 				probeCtx, cancel := context.WithTimeout(ctx, timeout)
-				results[idx] = probeOne(probeCtx, endpoints[idx], newClient(endpoints[idx]))
+				results[idx] = probeOne(probeCtx, endpoints[idx], newClient(endpoints[idx]), opts.IdentityProbe)
 				cancel()
 			}
 		}()
@@ -202,7 +221,7 @@ func Discover(ctx context.Context, opts DiscoverOptions) ([]ProbeResult, error) 
 // Manual2AI adapter doesn't bother with a version probe at all —
 // it just sends the actual data queries. We follow that pattern: try
 // version for nice diagnostics, ignore failure, trust company-list.
-func probeOne(ctx context.Context, endpoint string, client *Client) ProbeResult {
+func probeOne(ctx context.Context, endpoint string, client *Client, identity bool) ProbeResult {
 	start := time.Now()
 	r := ProbeResult{Endpoint: endpoint}
 
@@ -284,7 +303,61 @@ func probeOne(ctx context.Context, endpoint string, client *Client) ProbeResult 
 		r.Warnings = append(r.Warnings,
 			"Tally responded but no company is loaded — open a company in Tally and re-run discover.")
 	}
+	if identity {
+		r.Identity = ProbeCompanyIdentity(ctx, client)
+	}
 	return r
+}
+
+// IdentityGUID is the one GUID this port's Type:Company probe returns for
+// name, or "" when it returns none, a blank one or several (or did not
+// run).
+func (p ProbeResult) IdentityGUID(name string) string {
+	if p.Identity == nil || p.Identity.Err != nil {
+		return ""
+	}
+	name = strings.TrimSpace(name)
+	guid := ""
+	for _, c := range p.Identity.Companies {
+		if strings.TrimSpace(c.Name) != name {
+			continue
+		}
+		g := strings.TrimSpace(c.GUID)
+		if g == "" || (guid != "" && !strings.EqualFold(guid, g)) {
+			return ""
+		}
+		guid = g
+	}
+	return guid
+}
+
+// CompaniesWithGUID is the List-of-Companies answer (Companies) with each
+// company's blank GUID filled in from the Type:Company probe when that
+// probe returns exactly one GUID for the name. Same companies, same
+// order: the GUID probe never adds or removes one here.
+func (p ProbeResult) CompaniesWithGUID() []TallyCompany {
+	out := make([]TallyCompany, 0, len(p.Companies))
+	for _, c := range p.Companies {
+		if c.GUID == "" {
+			c.GUID = p.IdentityGUID(c.Name)
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// ProbeCompanyIdentity runs the Type:Company NAME+GUID probe against one
+// Tally. Never returns nil.
+func ProbeCompanyIdentity(ctx context.Context, client *Client) *IdentityProbe {
+	resp, err := client.PostXML(ctx, BuildCompanyIdentityXML())
+	if err != nil {
+		return &IdentityProbe{Err: fmt.Errorf("company-identity probe: %w", err)}
+	}
+	res, err := ParseCompanyIdentity(resp)
+	if err != nil {
+		return &IdentityProbe{Err: err}
+	}
+	return &IdentityProbe{Companies: res.Companies, Warnings: res.Warnings}
 }
 
 // resolveEndpoints merges DiscoverOptions into a sorted, deduped

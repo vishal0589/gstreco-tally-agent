@@ -48,6 +48,8 @@ func main() {
 		os.Exit(discoverCmd(os.Args[2:]))
 	case "sync-all":
 		os.Exit(syncAllCmd(os.Args[2:]))
+	case "identity-probe":
+		os.Exit(identityProbeCmd(os.Args[2:]))
 	case "version", "--version", "-v":
 		fmt.Println("agentctl " + version.String())
 	case "help", "--help", "-h":
@@ -212,6 +214,15 @@ Usage:
       selected connection), run the fetch → parse → ingest pipeline
       per (endpoint, company, kind), report a per-mapping + grand-total
       summary. The pre-A5 daemon driver for multi-port pilots.
+
+  agentctl identity-probe [--endpoint URL]... [--connection-id <UUID>]
+                          [--no-mappings] [--json] [--timeout DURATION]
+                          [--server <URL>] [--config <PATH>]
+      read-only: run both company probes (List of Companies and the
+      Type:Company NAME+GUID collection) on every configured, mapped and
+      listening Tally port; print each probe's companies and, per mapped
+      company, whether each probe has it, its stored GUID and the
+      identity verdict. Prints no secret.
 
   agentctl version
       print version and exit

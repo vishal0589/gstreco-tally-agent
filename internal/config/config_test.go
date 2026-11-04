@@ -198,3 +198,29 @@ func TestUpsertPairedConnection_AppendsAndReplacesByConnectionID(t *testing.T) {
 		t.Fatalf("second connection changed unexpectedly: %+v", got[1])
 	}
 }
+
+func TestCompanyIdentityEnforce_DefaultOffAndRoundTrips(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := Save(path, &Config{Server: "https://s", ConnectionID: "c"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CompanyIdentityEnforce {
+		t.Fatal("company_identity_enforce must default to off")
+	}
+	got.CompanyIdentityEnforce = true
+	if err := Save(path, got); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := os.ReadFile(path)
+	if !strings.Contains(string(body), "company_identity_enforce: true") {
+		t.Fatalf("yaml = %s", body)
+	}
+	again, err := Load(path)
+	if err != nil || !again.CompanyIdentityEnforce {
+		t.Fatalf("reload = %+v, %v", again, err)
+	}
+}

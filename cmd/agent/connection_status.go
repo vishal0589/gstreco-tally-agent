@@ -118,6 +118,44 @@ type syncOutcome struct {
 	otherErr  error  // non-auth, non-routing failure (walk, fetch)
 	fetchErr  error  // FetchActiveMappings failure
 	noMapping bool
+	// identity is the company identity check per mapping (QA 04-Nov
+	// N1), reported in detail and open_companies.
+	identity        []syncrun.MappingIdentity
+	identityEnforce bool
+}
+
+// identityNote is the identity checks as one detail clause, "" when none.
+func (o *syncOutcome) identityNote() string {
+	if len(o.identity) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(o.identity))
+	for _, c := range o.identity {
+		parts = append(parts, c.Summary())
+	}
+	return "identity[" + identityModeName(o.identityEnforce) + "]: " + strings.Join(parts, "; ")
+}
+
+// withIdentity appends the identity note to a detail string.
+func (o *syncOutcome) withIdentity(detail string) string {
+	note := o.identityNote()
+	switch {
+	case note == "":
+		return detail
+	case detail == "":
+		return note
+	default:
+		return detail + " | " + note
+	}
+}
+
+// identityOpenCompanies is the probed port's companies (with GUIDs from
+// the Type:Company probe) when the connection reads exactly one mapping.
+func (o *syncOutcome) identityOpenCompanies() []ingest.StatusCompany {
+	if len(o.identity) != 1 || o.identity[0].Open == nil {
+		return nil
+	}
+	return statusCompanies(o.identity[0].Open)
 }
 
 func (o *syncOutcome) noteAuth(err error, what string) bool {
@@ -197,22 +235,31 @@ func (o *syncOutcome) status() ingest.ConnectionStatus {
 		if len(o.skipped) > 1 {
 			detail = fmt.Sprintf("%d of %d mapped companies not read: %s", len(o.skipped), len(o.mappings), detail)
 		}
+		if !o.identityEnforce {
+			// Enforced skips already say why; observe adds what the
+			// GUID probe saw.
+			detail = o.withIdentity(detail)
+		}
 		out.Detail = ingest.OptString(ingest.RedactDetail(detail))
 		return out
 	case o.otherErr != nil:
 		out := ingest.ConnectionStatus{
 			Result:     ingest.ConnStatusAcceptedTick,
 			HTTPStatus: intPtr(200),
-			Detail:     ingest.OptString(ingest.RedactDetail(o.otherErr.Error())),
+			Detail:     ingest.OptString(ingest.RedactDetail(o.withIdentity(o.otherErr.Error()))),
 		}
 		o.fillSingleMapping(&out)
+		out.OpenCompanies = o.identityOpenCompanies()
 		return out
 	default:
 		out := ingest.ConnectionStatus{Result: ingest.ConnStatusSuccess, HTTPStatus: intPtr(200)}
 		o.fillSingleMapping(&out)
+		detail := ""
 		if len(o.active) > 1 {
-			out.Detail = ingest.OptString(fmt.Sprintf("%d mapped companies read", len(o.active)))
+			detail = fmt.Sprintf("%d mapped companies read", len(o.active))
 		}
+		out.Detail = ingest.OptString(ingest.RedactDetail(o.withIdentity(detail)))
+		out.OpenCompanies = o.identityOpenCompanies()
 		return out
 	}
 }
