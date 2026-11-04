@@ -129,7 +129,7 @@ func ResolveMappingEndpoints(mappings []ingest.ActiveMapping, probes []tally.Pro
 			switch {
 			case probed && p.Err == nil:
 				sk.Result = ingest.ConnStatusWrongCompanyOpen
-				sk.OpenCompanies = append([]tally.TallyCompany{}, p.Companies...)
+				sk.OpenCompanies = p.CompaniesWithGUID()
 				if guidMismatchOnMapped {
 					sk.Reason = fmt.Sprintf("%q on %s has a different Tally company GUID than the mapping (another company with the same name); not reading it", name, mapped)
 				}
@@ -145,7 +145,7 @@ func ResolveMappingEndpoints(mappings []ingest.ActiveMapping, probes []tally.Pro
 				Reason:   fmt.Sprintf("%q is open on several Tally ports (%s), none of them its mapped %s; not guessing which copy holds the books", name, strings.Join(where, ", "), mapped),
 			}
 			if p, ok := byEndpoint[mapped]; ok && p.Err == nil {
-				sk.OpenCompanies = append([]tally.TallyCompany{}, p.Companies...)
+				sk.OpenCompanies = p.CompaniesWithGUID()
 			}
 			skipped = append(skipped, sk)
 		}
@@ -190,6 +190,10 @@ func normalizeEndpoint(ep string) string {
 	}
 	return u.String()
 }
+
+// NormalizeEndpoint is normalizeEndpoint for callers outside the package
+// (agentctl identity-probe matches mappings to probed ports with it).
+func NormalizeEndpoint(ep string) string { return normalizeEndpoint(ep) }
 
 func isLocalHost(host string) bool {
 	switch host {

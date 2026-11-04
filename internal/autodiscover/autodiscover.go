@@ -132,7 +132,9 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	// non-default ports and a port-range scan would miss them.
 	// Empty endpoint list falls back to the default port-range
 	// scan from tally.DiscoverOptions's zero value.
-	discoverOpts := tally.DiscoverOptions{}
+	// IdentityProbe: the catalog carries each company's Tally GUID from
+	// the Type:Company probe (QA 04-Nov N1); List of Companies has none.
+	discoverOpts := tally.DiscoverOptions{IdentityProbe: true}
 	if explicit := opts.Cfg.ResolveTallyEndpoints(""); len(explicit) > 0 {
 		discoverOpts.Endpoints = explicit
 	}
@@ -308,7 +310,11 @@ func buildCatalogItems(results []tally.ProbeResult) []ingest.CatalogItem {
 	out := make([]ingest.CatalogItem, 0)
 	for _, r := range results {
 		endpoint := r.Endpoint
-		for _, c := range r.Companies {
+		// Names come from List of Companies, as before; the GUID from
+		// the Type:Company probe when it returns exactly one for the
+		// name, so mappings gain a GUID at setup/repair. No GUID is
+		// sent (never a guess) when the probe failed or is ambiguous.
+		for _, c := range r.CompaniesWithGUID() {
 			item := ingest.CatalogItem{
 				TallyCompanyName: c.Name,
 				TallyEndpoint:    &endpoint,

@@ -88,6 +88,16 @@ type Config struct {
 	// heartbeat once B3 ships, but for V1 the local override here is
 	// the only knob.
 	ScheduleCron string `yaml:"schedule_cron,omitempty"`
+	// CompanyIdentityEnforce turns the company GUID probe (Type:Company
+	// NAME+GUID, QA 04-Nov N1) into the sync gate. Off (the default) =
+	// observe: the gate stays List-of-Companies name matching exactly as
+	// before and both probes are only reported in connection_status. On =
+	// a mapping is read only where both probes agree and the GUID probe
+	// returns the mapping's stored GUID; any identity doubt (probes
+	// disagree, GUID not returned, same name with another GUID, no stored
+	// GUID) blocks it with a visible reason. Turn on per host only after
+	// `agentctl identity-probe` shows both probes agree there.
+	CompanyIdentityEnforce bool `yaml:"company_identity_enforce,omitempty"`
 }
 
 // ResolveTallyEndpoints returns the effective list of Tally HTTP
