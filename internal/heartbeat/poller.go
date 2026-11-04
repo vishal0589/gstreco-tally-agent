@@ -115,6 +115,10 @@ type Options struct {
 	// heartbeat POST (nil on 2xx), so a 401 on this connection's
 	// heartbeat shows on this connection's next connection_status.
 	OnHeartbeatResult func(err error)
+	// Schedule, when non-nil, is sent as the heartbeat's `schedule`
+	// (the effective cron spec and its source, QA 04-Nov N3). Reporting
+	// only: the poller never changes the schedule.
+	Schedule *ingest.ScheduleReport
 }
 
 // Poller runs the heartbeat loop. Start() launches the goroutine;
@@ -227,6 +231,10 @@ func (p *Poller) poll(parent context.Context) {
 
 	if p.opts.ConnectionStatusReporter != nil {
 		body.ConnectionStatus = p.opts.ConnectionStatusReporter()
+	}
+	if p.opts.Schedule != nil {
+		sch := *p.opts.Schedule
+		body.Schedule = &sch
 	}
 
 	resp, err := p.opts.Client.Heartbeat(pollCtx, body)

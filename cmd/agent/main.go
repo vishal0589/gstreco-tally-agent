@@ -253,6 +253,7 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 	if scheduleSpec == "" {
 		scheduleSpec = cfg.ScheduleCron
 	}
+	scheduleFrom := scheduleSource(opts.scheduleOverride, cfg.ScheduleCron)
 
 	tickFn := makeTickFunc(runtimes, tally.NewClient, logger)
 
@@ -295,6 +296,12 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 	}
 	sched.Start()
 	defer sched.Stop()
+	// QA 04-Nov N3: every heartbeat reports the spec the scheduler
+	// actually runs (sched.Spec(), DefaultSpec already applied) and its
+	// source, so the server stops showing its own schedule_cron as if
+	// it were in use.
+	effectiveSchedule := &ingest.ScheduleReport{Cron: sched.Spec(), Source: scheduleFrom}
+	logger.Info().Str("cron", effectiveSchedule.Cron).Str("source", effectiveSchedule.Source).Msg("effective sync schedule")
 
 	// Periodic re-discovery in a background goroutine. Picks up new
 	// Tally instances added after the daemon started — common when
@@ -335,6 +342,7 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 			// Per-connection: this connection's own result only.
 			ConnectionStatusReporter: runtime.status.snapshot,
 			OnHeartbeatResult:        runtime.status.recordHeartbeat,
+			Schedule:                 effectiveSchedule,
 		})
 		if pollerErr != nil {
 			logger.Error().
@@ -603,6 +611,21 @@ func tickStatusForError(err error) string {
 		return status[:maxStatusLen]
 	}
 	return status
+}
+
+// scheduleSource names where the scheduler's spec came from, following
+// the selection in runWithCtx exactly: the --schedule override when set,
+// else config.yaml schedule_cron when set, else scheduler.DefaultSpec
+// (scheduler.New applies it for an empty spec). Reporting only.
+func scheduleSource(override, configCron string) string {
+	switch {
+	case override != "":
+		return ingest.ScheduleSourceOverride
+	case configCron != "":
+		return ingest.ScheduleSourceConfig
+	default:
+		return ingest.ScheduleSourceDefault
+	}
 }
 
 // makeTickFunc returns the closure the scheduler fires on each tick.

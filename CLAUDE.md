@@ -44,6 +44,10 @@ One agent process serves every paired connection on the machine. Anything a conn
 
 Two company probes run on every port before a sync: List of Companies (names only) and the Type:Company NAME+GUID collection (`internal/tally/company_identity.go`). By default the gate is List-of-Companies name matching (`syncrun.ResolveMappingEndpoints`) and the GUID probe is only reported. `config.yaml` `company_identity_enforce: true` switches to `syncrun.ResolveMappingEndpointsEnforced`, which must stay fail-closed: any identity doubt blocks the mapping with a reason; never add a name-only fallback there. Never merge Type:Company GUIDs into `ProbeResult.Companies` (that would silently activate the GUID refusal in observe mode); use `ProbeResult.CompaniesWithGUID()` for reporting and the catalog.
 
+## Schedule
+
+The daemon's cron spec is `--schedule`, else `config.yaml` `schedule_cron`, else `scheduler.DefaultSpec`; the server's `schedule_cron` is not applied. Each heartbeat reports what is in use as `schedule: {cron, source}` (`config` / `default` / `override`, `cmd/agent/main.go` `scheduleSource`). If the selection ever changes, change `scheduleSource` with it.
+
 ## Server coordination
 
 Every agent PR that changes the wire protocol must reference the paired server PR (or note that the server already exposes the endpoint). Breaking wire changes need a server migration first.
