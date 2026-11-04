@@ -161,10 +161,13 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		mapped = opts.MappedEndpoints(ctx)
 	}
 	sweep := SweepEndpoints(opts.Cfg.ResolveTallyEndpoints(""), mapped, tally.DefaultScanEndpoints())
+	// IdentityProbe: the catalog carries each company's Tally GUID from
+	// the Type:Company probe (QA 04-Nov N1); List of Companies has none.
 	probes, err := discover(ctx, tally.DiscoverOptions{
-		Endpoints:   sweep,
-		Timeout:     SweepProbeTimeout,
-		Concurrency: SweepConcurrency,
+		Endpoints:     sweep,
+		Timeout:       SweepProbeTimeout,
+		Concurrency:   SweepConcurrency,
+		IdentityProbe: true,
 	})
 	if err != nil {
 		return Result{}, fmt.Errorf("autodiscover: probe sweep: %w", err)
@@ -367,7 +370,11 @@ func buildCatalogItems(results []tally.ProbeResult) []ingest.CatalogItem {
 	out := make([]ingest.CatalogItem, 0)
 	for _, r := range results {
 		endpoint := r.Endpoint
-		for _, c := range r.Companies {
+		// Names come from List of Companies, as before; the GUID from
+		// the Type:Company probe when it returns exactly one for the
+		// name, so mappings gain a GUID at setup/repair. No GUID is
+		// sent (never a guess) when the probe failed or is ambiguous.
+		for _, c := range r.CompaniesWithGUID() {
 			item := ingest.CatalogItem{
 				TallyCompanyName: c.Name,
 				TallyEndpoint:    &endpoint,
