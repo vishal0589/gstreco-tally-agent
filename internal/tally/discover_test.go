@@ -292,3 +292,27 @@ func TestDiscover_ContextCancellation(t *testing.T) {
 		t.Errorf("expected cancellation error, got %v", results[0].Err)
 	}
 }
+
+func TestCanonicalEndpoint(t *testing.T) {
+	for in, want := range map[string]string{
+		"http://localhost:3036":   "http://127.0.0.1:3036",
+		" HTTP://LocalHost:9559/": "http://127.0.0.1:9559",
+		"http://[::1]:9000":       "http://127.0.0.1:9000",
+		"http://0.0.0.0:9001":     "http://127.0.0.1:9001",
+		"127.0.0.1:3037":          "http://127.0.0.1:3037",
+		"http://tally.lan:9000":   "http://tally.lan:9000",
+		"":                        "",
+	} {
+		if got := CanonicalEndpoint(in); got != want {
+			t.Errorf("CanonicalEndpoint(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestDefaultScanEndpoints_RangePlusAlternates(t *testing.T) {
+	eps := DefaultScanEndpoints()
+	want := DefaultDiscoverPortRange[1] - DefaultDiscoverPortRange[0] + 1 + len(DefaultDiscoverAlternates)
+	if len(eps) != want || eps[0] != "http://127.0.0.1:9000" {
+		t.Fatalf("DefaultScanEndpoints = %v", eps)
+	}
+}

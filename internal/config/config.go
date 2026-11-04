@@ -11,10 +11,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/vishal0589/gstreco-tally-agent/internal/tally"
 )
 
 // FileName is the config filename within the config directory. Kept short so
@@ -125,6 +128,47 @@ func (c *Config) ResolveTallyEndpoints(fallback string) []string {
 	}
 	return []string{fallback}
 }
+
+// MergeEndpoints is prev ∪ add: every entry of prev kept as written, plus
+// each entry of add not already present (compared case-insensitively,
+// trailing slash ignored, localhost/::1/0.0.0.0 = 127.0.0.1), sorted.
+// Autodiscover and `agentctl discover` save this, so an endpoint that
+// misses one sweep is never dropped from config (QA 04-Nov).
+func MergeEndpoints(prev, add []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, list := range [][]string{prev, add} {
+		for _, e := range list {
+			e = strings.TrimSpace(e)
+			key := endpointKey(e)
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, e)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// RemoveEndpoints is list minus every entry matching one in remove (same
+// comparison as MergeEndpoints). The only way an endpoint leaves config.
+func RemoveEndpoints(list, remove []string) []string {
+	drop := map[string]bool{}
+	for _, e := range remove {
+		drop[endpointKey(e)] = true
+	}
+	out := make([]string, 0, len(list))
+	for _, e := range list {
+		if !drop[endpointKey(e)] {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func endpointKey(e string) string { return tally.CanonicalEndpoint(e) }
 
 // PairedConnections returns the effective list of paired connections.
 // Preference order:

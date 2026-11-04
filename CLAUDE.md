@@ -40,6 +40,10 @@ The Windows side of GST Reco's Tally sync. The server side lives at `~/GST_Reco`
 
 One agent process serves every paired connection on the machine. Anything a connection reports to the server (heartbeat `connection_status`, its sync result) must come from that connection's own `daemonConnectionRuntime` (`cmd/agent/connection_status.go`), never from shared state. The agent-wide `tickState` only feeds the legacy `last_tick_status` field.
 
+## Autodiscover endpoints
+
+Each sweep probes the saved `tally_endpoints`, every active mapping's endpoint and the default range plus alternates, and saves saved ∪ answered (`config.MergeEndpoints`). Never make a sweep drop an endpoint that missed: only `agentctl discover --forget/--replace` removes one.
+
 ## Server coordination
 
 Every agent PR that changes the wire protocol must reference the paired server PR (or note that the server already exposes the endpoint). Breaking wire changes need a server migration first.

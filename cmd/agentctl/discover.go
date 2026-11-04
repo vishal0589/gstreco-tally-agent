@@ -82,6 +82,9 @@ func runDiscover(stdout, stderr io.Writer, args []string, deps discoverDeps) int
 	noPush := fs.Bool("no-push", false, "do NOT POST catalog to the server (just probe + persist locally)")
 	noSave := fs.Bool("no-save", false, "do NOT update config.tally_endpoints (just probe + push)")
 	dryRun := fs.Bool("dry-run", false, "probe and print only — implies --no-push and --no-save")
+	var forgetFlag stringSlice
+	fs.Var(&forgetFlag, "forget", "remove this endpoint from config.tally_endpoints (repeatable); the only way besides --replace an endpoint leaves config")
+	replace := fs.Bool("replace", false, "save exactly the endpoints that answered this scan, dropping saved ones that did not (default: keep saved ∪ answered)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -134,6 +137,17 @@ func runDiscover(stdout, stderr io.Writer, args []string, deps discoverDeps) int
 	printSummary(stdout, results)
 
 	v3Reachable := filterReachableTally(results)
+	// --forget is an explicit operator action and applies even when no
+	// Tally answered this scan.
+	if len(forgetFlag) > 0 && !*noSave {
+		before := len(cfg.TallyEndpoints)
+		cfg.TallyEndpoints = config.RemoveEndpoints(cfg.TallyEndpoints, forgetFlag)
+		if err := deps.saveConfig(cfgPath, cfg); err != nil {
+			fmt.Fprintf(stderr, "agentctl discover: save config: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "\n✓ forgot %d endpoint(s)\n", before-len(cfg.TallyEndpoints))
+	}
 	if len(v3Reachable) == 0 {
 		fmt.Fprintln(stderr, "\nagentctl discover: no Tally Prime 3.x instances found.")
 		fmt.Fprintln(stderr, "Check that Tally is running, that ODBC HTTP server is enabled (F1 → Settings → Connectivity → Client/Server),")
@@ -142,13 +156,19 @@ func runDiscover(stdout, stderr io.Writer, args []string, deps discoverDeps) int
 	}
 
 	// Save discovered endpoints to config so the daemon can find them
-	// without re-running discover. Sorted for deterministic YAML diffs.
+	// without re-running discover. Saved ∪ answered (QA 04-Nov): a port
+	// closed during this scan stays saved; --replace / --forget are the
+	// explicit ways to drop one. Sorted for deterministic YAML diffs.
 	if !*noSave {
-		endpoints := make([]string, 0, len(v3Reachable))
+		found := make([]string, 0, len(v3Reachable))
 		for _, r := range v3Reachable {
-			endpoints = append(endpoints, r.Endpoint)
+			found = append(found, r.Endpoint)
 		}
-		sort.Strings(endpoints)
+		sort.Strings(found)
+		endpoints := found
+		if !*replace {
+			endpoints = config.MergeEndpoints(config.RemoveEndpoints(cfg.TallyEndpoints, forgetFlag), found)
+		}
 		cfg.TallyEndpoints = endpoints
 		if err := deps.saveConfig(cfgPath, cfg); err != nil {
 			fmt.Fprintf(stderr, "agentctl discover: save config: %v\n", err)

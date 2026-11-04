@@ -462,3 +462,43 @@ func TestBuildCatalogItems_FlattensAcrossEndpoints(t *testing.T) {
 		t.Errorf("item B GUID = %v", items[1].TallyCompanyGUID)
 	}
 }
+
+// QA 04-Nov: a saved endpoint that does not answer stays saved; --forget
+// and --replace are the explicit ways to drop one.
+func TestRunDiscover_SavedEndpointsKeptForgetAndReplace(t *testing.T) {
+	results := []tally.ProbeResult{{Endpoint: "http://127.0.0.1:9000", Reachable: true, IsTally: true,
+		Companies: []tally.TallyCompany{{Name: "Co"}}}}
+	run := func(saved []string, args ...string) []string {
+		t.Helper()
+		cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+		if err := config.Save(cfgPath, &config.Config{Server: "https://s", ConnectionID: "conn-1", TallyEndpoints: saved}); err != nil {
+			t.Fatal(err)
+		}
+		deps := discoverDeps{
+			now:          func() time.Time { return time.Unix(1700000000, 0) },
+			newOSKeyring: func() keyring.Store { return keyring.NewMemoryStore() },
+			discover:     stubDiscover(results),
+			loadConfig:   config.Load,
+			saveConfig:   config.Save,
+		}
+		var out, errb bytes.Buffer
+		if code := runDiscover(&out, &errb, append([]string{"--config", cfgPath, "--no-push"}, args...), deps); code != 0 {
+			t.Fatalf("exit %d: %s", code, errb.String())
+		}
+		cfg, err := config.Load(cfgPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg.TallyEndpoints
+	}
+	saved := []string{"http://127.0.0.1:3036", "http://127.0.0.1:9553"}
+	if got := run(saved); !reflect.DeepEqual(got, []string{"http://127.0.0.1:3036", "http://127.0.0.1:9000", "http://127.0.0.1:9553"}) {
+		t.Fatalf("default = %v, want saved ∪ answered", got)
+	}
+	if got := run(saved, "--forget", "http://localhost:9553"); !reflect.DeepEqual(got, []string{"http://127.0.0.1:3036", "http://127.0.0.1:9000"}) {
+		t.Fatalf("--forget = %v", got)
+	}
+	if got := run(saved, "--replace"); !reflect.DeepEqual(got, []string{"http://127.0.0.1:9000"}) {
+		t.Fatalf("--replace = %v", got)
+	}
+}

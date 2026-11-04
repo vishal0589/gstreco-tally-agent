@@ -332,15 +332,17 @@ func TestRun_HonoursCfgTallyEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run err = %v", err)
 	}
-	if !equalSlices(gotOpts.Endpoints, []string{"http://127.0.0.1:2026"}) {
-		t.Errorf("DiscoverOptions.Endpoints = %v, want [http://127.0.0.1:2026]", gotOpts.Endpoints)
+	// QA 04-Nov: config endpoints come first, then the default scan.
+	want := append([]string{"http://127.0.0.1:2026"}, defaultScanWithout("http://127.0.0.1:2026")...)
+	if !equalSlices(gotOpts.Endpoints, want) {
+		t.Errorf("DiscoverOptions.Endpoints = %v, want %v", gotOpts.Endpoints, want)
 	}
 }
 
 func TestRun_EmptyCfgEndpoints_FallsBackToDefaultRange(t *testing.T) {
-	// With cfg.TallyEndpoints empty, Run must NOT pre-set Endpoints
-	// on tally.DiscoverOptions — leaving it zero-valued lets the
-	// resolver use DefaultDiscoverPortRange + alternates.
+	// With cfg.TallyEndpoints empty, Run still scans
+	// DefaultDiscoverPortRange + alternates (now passed explicitly, so it
+	// can be unioned with config and mapped endpoints).
 	cfg := &config.Config{}
 	var gotOpts tally.DiscoverOptions
 	_, err := Run(context.Background(), Options{
@@ -355,8 +357,8 @@ func TestRun_EmptyCfgEndpoints_FallsBackToDefaultRange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run err = %v", err)
 	}
-	if len(gotOpts.Endpoints) != 0 {
-		t.Errorf("expected empty Endpoints (falls back to range scan), got %v", gotOpts.Endpoints)
+	if !equalSlices(gotOpts.Endpoints, tally.DefaultScanEndpoints()) {
+		t.Errorf("Endpoints = %v, want the default scan %v", gotOpts.Endpoints, tally.DefaultScanEndpoints())
 	}
 }
 
@@ -483,4 +485,204 @@ func equalSlices(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func defaultScanWithout(skip ...string) []string {
+	drop := map[string]bool{}
+	for _, s := range skip {
+		drop[s] = true
+	}
+	var out []string
+	for _, e := range tally.DefaultScanEndpoints() {
+		if !drop[e] {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// fakeHost answers as Tally on the ports in up, refused elsewhere, and
+// records what each sweep probed.
+type fakeHost struct {
+	up     map[string][]string // endpoint -> companies
+	probed [][]string
+}
+
+func (h *fakeHost) discover(_ context.Context, opts tally.DiscoverOptions) ([]tally.ProbeResult, error) {
+	h.probed = append(h.probed, append([]string(nil), opts.Endpoints...))
+	out := make([]tally.ProbeResult, 0, len(opts.Endpoints))
+	for _, ep := range opts.Endpoints {
+		cos, ok := h.up[ep]
+		if !ok {
+			out = append(out, tally.ProbeResult{Endpoint: ep, Err: errors.New("connection refused")})
+			continue
+		}
+		r := tally.ProbeResult{Endpoint: ep, Reachable: true, IsTally: true}
+		for _, c := range cos {
+			r.Companies = append(r.Companies, tally.TallyCompany{Name: c})
+		}
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+func contains(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+func catalogEndpoints(req ingest.CatalogRequest) map[string][]string {
+	out := map[string][]string{}
+	for _, it := range req.Items {
+		out[*it.TallyEndpoint] = append(out[*it.TallyEndpoint], it.TallyCompanyName)
+	}
+	return out
+}
+
+const (
+	ep9559 = "http://127.0.0.1:9559"
+	ep9553 = "http://127.0.0.1:9553"
+	ep3036 = "http://127.0.0.1:3036"
+)
+
+// QA 04-Nov: a saved port down for one sweep stays saved, is probed on the
+// next sweep, and is catalogued once it answers again.
+func TestRun_PortDownOneSweep_ProbedAndCataloguedNext(t *testing.T) {
+	cfg := &config.Config{TallyEndpoints: []string{ep9553, ep9559}}
+	host := &fakeHost{up: map[string][]string{ep9559: {"Hall of Heritage"}}}
+	sender := &recordingSender{}
+	var saved [][]string
+	opts := Options{
+		Cfg: cfg, CfgPath: "cfg.yaml", Sender: sender, Logger: quietLogger(), Now: fixedNow,
+		DiscoverFn: host.discover,
+		SaveFn: func(_ string, c *config.Config) error {
+			saved = append(saved, append([]string(nil), c.TallyEndpoints...))
+			return nil
+		},
+	}
+
+	r, err := Run(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !equalSlices(cfg.TallyEndpoints, []string{ep9553, ep9559}) || len(saved) != 0 {
+		t.Fatalf("after a miss: config = %v, saves = %v; want 9553 kept, nothing rewritten", cfg.TallyEndpoints, saved)
+	}
+	if !equalSlices(r.EndpointsGone, []string{ep9553}) || r.Reachable != 1 || r.Unreachable != r.Probed-1 {
+		t.Fatalf("result = %+v", r)
+	}
+
+	host.up[ep9553] = []string{"AAM Exports"}
+	if _, err := Run(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	if !contains(host.probed[1], ep9553) {
+		t.Fatalf("second sweep did not probe 9553: %v", host.probed[1])
+	}
+	got := catalogEndpoints(sender.seen()[1])
+	if len(got[ep9553]) != 1 || len(got[ep9559]) != 1 {
+		t.Fatalf("second catalog = %v, want both ports", got)
+	}
+}
+
+// QA 04-Nov: a mapped endpoint missing from config is probed, catalogued
+// and added to config.
+func TestRun_MappedEndpointMissingFromConfig_IsProbed(t *testing.T) {
+	cfg := &config.Config{TallyEndpoints: []string{ep9559}}
+	host := &fakeHost{up: map[string][]string{ep9559: {"HaH"}, ep3036: {"KBS"}}}
+	sender := &recordingSender{}
+	r, err := Run(context.Background(), Options{
+		Cfg: cfg, CfgPath: "cfg.yaml", Sender: sender, Logger: quietLogger(), Now: fixedNow,
+		DiscoverFn:      host.discover,
+		SaveFn:          func(string, *config.Config) error { return nil },
+		MappedEndpoints: func(context.Context) []string { return []string{"http://localhost:3036/", ep9559} },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := host.probed[0]
+	if !contains(p, ep3036) {
+		t.Fatalf("mapped 3036 not probed: %v", p)
+	}
+	n := 0
+	for _, e := range p {
+		if e == ep9559 {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("9559 probed %d times (config + mapping must dedupe)", n)
+	}
+	if !equalSlices(cfg.TallyEndpoints, []string{ep3036, ep9559}) || !r.ConfigSaved {
+		t.Fatalf("config = %v saved=%v", cfg.TallyEndpoints, r.ConfigSaved)
+	}
+	if got := catalogEndpoints(sender.seen()[0]); len(got) != 2 {
+		t.Fatalf("catalog = %v, want companies from both ports", got)
+	}
+}
+
+// QA 04-Nov: empty config still scans the default range, and finds
+// what answers there.
+func TestRun_EmptyConfig_ScansDefaultRange(t *testing.T) {
+	cfg := &config.Config{}
+	host := &fakeHost{up: map[string][]string{"http://127.0.0.1:9000": {"Co"}}}
+	if _, err := Run(context.Background(), Options{Cfg: cfg, CfgPath: "c", Logger: quietLogger(), Now: fixedNow,
+		DiscoverFn: host.discover, SaveFn: func(string, *config.Config) error { return nil }}); err != nil {
+		t.Fatal(err)
+	}
+	if !equalSlices(host.probed[0], tally.DefaultScanEndpoints()) {
+		t.Fatalf("probed = %v", host.probed[0])
+	}
+	if !equalSlices(cfg.TallyEndpoints, []string{"http://127.0.0.1:9000"}) {
+		t.Fatalf("config = %v", cfg.TallyEndpoints)
+	}
+}
+
+// QA 04-Nov: across sweeps with ports coming and going, the saved list
+// never loses an entry, including when nothing answers at all.
+func TestRun_SavedListNeverShrinks(t *testing.T) {
+	cfg := &config.Config{TallyEndpoints: []string{ep3036, ep9553, ep9559}}
+	host := &fakeHost{up: map[string][]string{}}
+	opts := Options{Cfg: cfg, CfgPath: "c", Logger: quietLogger(), Now: fixedNow, DiscoverFn: host.discover,
+		SaveFn: func(string, *config.Config) error { return nil }}
+	for _, up := range []map[string][]string{
+		{}, // nothing answers
+		{ep9559: {"A"}},
+		{"http://127.0.0.1:9001": {"B"}},
+		{ep3036: {"C"}},
+	} {
+		host.up = up
+		before := append([]string(nil), cfg.TallyEndpoints...)
+		if _, err := Run(context.Background(), opts); err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range before {
+			if !contains(cfg.TallyEndpoints, e) {
+				t.Fatalf("%s dropped from config after a sweep with %v up: %v", e, up, cfg.TallyEndpoints)
+			}
+		}
+	}
+	if !contains(cfg.TallyEndpoints, "http://127.0.0.1:9001") {
+		t.Fatalf("found port not added: %v", cfg.TallyEndpoints)
+	}
+}
+
+func TestSweepEndpoints_UnionDedupe(t *testing.T) {
+	got := SweepEndpoints([]string{"http://LOCALHOST:9559/", ""}, []string{"http://127.0.0.1:9559", "127.0.0.1:3037"}, []string{"http://127.0.0.1:9000"})
+	want := []string{"http://127.0.0.1:9559", "http://127.0.0.1:3037", "http://127.0.0.1:9000"}
+	if !equalSlices(got, want) {
+		t.Fatalf("SweepEndpoints = %v, want %v", got, want)
+	}
+}
+
+func TestSweepSizing_WorstCaseUnderBootBudget(t *testing.T) {
+	n := len(tally.DefaultScanEndpoints()) + 7 // shared host: 9553-9559, 3036, 3037 minus overlap
+	rounds := (n + SweepConcurrency - 1) / SweepConcurrency
+	if worst := time.Duration(rounds) * SweepProbeTimeout; worst > 30*time.Second {
+		t.Fatalf("worst-case sweep %v for %d endpoints; keep it well under the 90 s boot budget", worst, n)
+	}
 }

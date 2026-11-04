@@ -197,10 +197,15 @@ Usage:
   agentctl discover [--ports START-END] [--host HOST] [--endpoint URL]...
                     [--timeout DURATION] [--concurrency N]
                     [--no-push] [--no-save] [--dry-run]
+                    [--forget URL]... [--replace]
                     [--server <URL>] [--config <PATH>]
-      probe localhost (or --host) for Tally instances, persist the
-      discovered endpoints to config, and push the company catalog
-      to the server's mapping list. Default port range: 9000-9020.
+      probe localhost (or --host) for Tally instances, add the
+      endpoints that answered to config (saved endpoints that did not
+      answer are kept), and push the company catalog to the server's
+      mapping list. Default port range: 9000-9020.
+      --forget URL (repeatable) removes a saved endpoint; --replace saves
+      exactly what answered this scan. Nothing else removes one: the
+      daemon's hourly sweep only ever adds.
 
   agentctl sync-all (--period MMYYYY | --from YYYY-MM-DD --to YYYY-MM-DD)
                     [--kinds purchase,sales,credit_note,debit_note,journal,payment,tax_ledger]
