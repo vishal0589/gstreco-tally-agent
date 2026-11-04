@@ -484,3 +484,50 @@ func equalSlices(a, b []string) bool {
 	}
 	return true
 }
+
+// QA 04-Nov N1: the catalog carries the GUID the Type:Company probe
+// returns; never one it is unsure of.
+func TestRun_CatalogCarriesIdentityProbeGUID(t *testing.T) {
+	sender := &recordingSender{}
+	var asked tally.DiscoverOptions
+	_, err := Run(context.Background(), Options{
+		Cfg:    &config.Config{},
+		Sender: sender,
+		Logger: quietLogger(),
+		Now:    fixedNow,
+		DiscoverFn: func(_ context.Context, opts tally.DiscoverOptions) ([]tally.ProbeResult, error) {
+			asked = opts
+			return []tally.ProbeResult{{
+				Endpoint: "http://127.0.0.1:9558", IsTally: true, Reachable: true,
+				Companies: []tally.TallyCompany{{Name: "KBS Exports"}, {Name: "KSS Textiles"}, {Name: "Twin"}},
+				Identity: &tally.IdentityProbe{Companies: []tally.TallyCompany{
+					{Name: "KBS Exports", GUID: "g-kbs"},
+					{Name: "KSS Textiles"},
+					{Name: "Twin", GUID: "g-1"}, {Name: "Twin", GUID: "g-2"},
+					{Name: "Not In List", GUID: "g-x"},
+				}},
+			}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !asked.IdentityProbe {
+		t.Fatal("autodiscover did not request the identity probe")
+	}
+	p := sender.seen()
+	if len(p) != 1 || len(p[0].Items) != 3 {
+		t.Fatalf("payloads = %+v", p)
+	}
+	guids := map[string]string{}
+	for _, it := range p[0].Items {
+		g := "<nil>"
+		if it.TallyCompanyGUID != nil {
+			g = *it.TallyCompanyGUID
+		}
+		guids[it.TallyCompanyName] = g
+	}
+	if guids["KBS Exports"] != "g-kbs" || guids["KSS Textiles"] != "<nil>" || guids["Twin"] != "<nil>" {
+		t.Fatalf("catalog guids = %v", guids)
+	}
+}

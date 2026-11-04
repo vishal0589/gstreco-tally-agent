@@ -1,0 +1,31 @@
+<ENVELOPE>
+ <HEADER>
+  <VERSION>1</VERSION>
+  <STATUS>1</STATUS>
+ </HEADER>
+ <BODY>
+  <DESC>
+  </DESC>
+  <DATA>
+   <COLLECTION>
+    <COMPANY NAME="Acme Retail Pvt Ltd" RESERVEDNAME="">
+     <GUID TYPE="String">5f0c1a2b-3c4d-4e5f-8a9b-0c1d2e3f4a5b</GUID>
+     <NAME TYPE="String">Acme Retail Pvt Ltd</NAME>
+    </COMPANY>
+    <COMPANY NAME="Acme Manufacturing Ltd" RESERVEDNAME="">
+     <GUID TYPE="String">9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d</GUID>
+     <NAME.LIST TYPE="String">
+      <NAME>Acme Manufacturing Ltd</NAME>
+     </NAME.LIST>
+    </COMPANY>
+    <COMPANY NAME="Acme Retail Pvt Ltd" RESERVEDNAME="">
+     <GUID TYPE="String">5f0c1a2b-3c4d-4e5f-8a9b-0c1d2e3f4a5b</GUID>
+     <NAME TYPE="String">Acme Retail Pvt Ltd</NAME>
+    </COMPANY>
+    <COMPANY NAME="Acme &amp; Sons (Trading)" RESERVEDNAME="">
+     <GUID TYPE="String">11112222-3333-4444-5555-666677778888</GUID>
+    </COMPANY>
+   </COLLECTION>
+  </DATA>
+ </BODY>
+</ENVELOPE>

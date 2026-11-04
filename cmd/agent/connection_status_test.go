@@ -45,6 +45,15 @@ type fakeTallyServer struct {
 
 func newFakeTally(t *testing.T, companies ...tallyCo) *fakeTallyServer {
 	t.Helper()
+	return newFakeTallySplit(t, companies, companies)
+}
+
+// newFakeTallySplit answers List of Companies with list and the
+// Type:Company NAME+GUID probe with identity; identity nil = that probe
+// is refused (LINEERROR), as an older Tally might.
+func newFakeTallySplit(t *testing.T, list, identity []tallyCo) *fakeTallyServer {
+	t.Helper()
+	companies := list
 	ft := &fakeTallyServer{}
 	ft.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -60,6 +69,20 @@ func newFakeTally(t *testing.T, companies ...tallyCo) *fakeTallyServer {
 				b.WriteString("</COMPANY>")
 			}
 			b.WriteString("</DATA></BODY></ENVELOPE>")
+			_, _ = w.Write([]byte(b.String()))
+		case bytes.Contains(body, []byte("GstrecoCompanyIdentity")):
+			// Type:Company NAME+GUID probe (QA 04-Nov N1): same
+			// companies, Tally's collection-object shape.
+			if identity == nil {
+				_, _ = w.Write([]byte("<ENVELOPE><LINEERROR>Could not find Collection</LINEERROR></ENVELOPE>"))
+				return
+			}
+			var b strings.Builder
+			b.WriteString("<ENVELOPE><HEADER><STATUS>1</STATUS></HEADER><BODY><DATA><COLLECTION>")
+			for _, c := range identity {
+				b.WriteString(`<COMPANY NAME="` + c.name + `"><NAME>` + c.name + "</NAME><GUID>" + c.guid + "</GUID></COMPANY>")
+			}
+			b.WriteString("</COLLECTION></DATA></BODY></ENVELOPE>")
 			_, _ = w.Write([]byte(b.String()))
 		case bytes.Contains(body, []byte("$$Version")):
 			_, _ = w.Write([]byte("<RESPONSE>Could not find: $$Version</RESPONSE>"))

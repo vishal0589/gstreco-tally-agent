@@ -80,6 +80,10 @@ type daemonConnectionRuntime struct {
 	// status is this connection's own last result, reported as
 	// connection_status on this connection's heartbeat only.
 	status *connStatusTracker
+	// identityEnforce is config company_identity_enforce: the company
+	// GUID probe gates this connection's sync (QA 04-Nov N1). Off =
+	// observe only.
+	identityEnforce bool
 }
 
 func newDaemonConnectionRuntime(info config.PairedConnection, client *ingest.Client) *daemonConnectionRuntime {
@@ -207,6 +211,11 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 		logger.Error().Msg("no usable paired connections could be initialized")
 		return 1
 	}
+	for _, rt := range runtimes {
+		rt.identityEnforce = cfg.CompanyIdentityEnforce
+	}
+	logger.Info().Bool("company_identity_enforce", cfg.CompanyIdentityEnforce).
+		Msg("company identity gate: " + identityModeName(cfg.CompanyIdentityEnforce))
 
 	// Boot-time auto-discovery. Runs synchronously before the
 	// scheduler starts so the first scheduled tick sees mappings.
@@ -816,8 +825,9 @@ func runWindowSync(
 	// Before any master or voucher fetch, each mapped company (name +
 	// GUID) must be the one Tally has open on the endpoint we would read.
 	// A mismatch is skipped and reported on THIS connection only.
-	active, skipped, unreadable := resolveMappingsForTick(ctx, mappings.Mappings, logger)
+	active, skipped, identity, unreadable := resolveMappingsForTick(ctx, mappings.Mappings, runtime.identityEnforce, logger)
 	outcome.active, outcome.skipped = active, skipped
+	outcome.identity, outcome.identityEnforce = identity, runtime.identityEnforce
 	if len(active) == 0 {
 		return unreadable
 	}
@@ -918,14 +928,29 @@ func walkOptionsFor(
 // tick instead of holding every voucher kind for minutes.
 const followProbeTimeout = 8 * time.Second
 
+// identityModeName names the company identity gate mode for logs and
+// connection_status detail.
+func identityModeName(enforce bool) string {
+	if enforce {
+		return "enforce"
+	}
+	return "observe"
+}
+
 // resolveMappingsForTick reads each mapped company from the Tally port it is
 // open on right now (syncrun.ResolveMappingEndpoints): it probes the mapped
 // ports plus every port a tally.exe is listening on. Returns the mappings to
-// read, the ones skipped (each with a connection_status result), and, when
-// some company can't be read, an error naming each one. If the probe itself
-// can't run nothing is read: vouchers are never fetched for a company the
-// agent could not confirm is the one open (QA v29 L19).
-func resolveMappingsForTick(ctx context.Context, mappings []ingest.ActiveMapping, logger zerolog.Logger) ([]ingest.ActiveMapping, []syncrun.SkippedMapping, error) {
+// read, the ones skipped (each with a connection_status result), the
+// company identity check per mapping, and, when some company can't be
+// read, an error naming each one. If the probe itself can't run nothing is
+// read: vouchers are never fetched for a company the agent could not
+// confirm is the one open (QA v29 L19).
+//
+// Every port gets both company probes (List of Companies and the
+// Type:Company NAME+GUID collection, QA 04-Nov N1). With enforce off the
+// gate is List of Companies exactly as before and the GUID probe is only
+// observed; with enforce on it is syncrun.ResolveMappingEndpointsEnforced.
+func resolveMappingsForTick(ctx context.Context, mappings []ingest.ActiveMapping, enforce bool, logger zerolog.Logger) ([]ingest.ActiveMapping, []syncrun.SkippedMapping, []syncrun.MappingIdentity, error) {
 	ports, err := tally.TallyListeningPorts()
 	if err != nil {
 		logger.Warn().Err(err).Msg("could not list Tally ports; probing mapped ports only")
@@ -935,9 +960,10 @@ func resolveMappingsForTick(ctx context.Context, mappings []ingest.ActiveMapping
 	// then fall back to a port-range sweep, which is not what we want.
 	if candidates := syncrun.CandidateEndpoints(mappings, ports); len(candidates) > 0 {
 		probes, err = tally.Discover(ctx, tally.DiscoverOptions{
-			Endpoints:   candidates,
-			Timeout:     followProbeTimeout,
-			Concurrency: 8,
+			Endpoints:     candidates,
+			Timeout:       followProbeTimeout,
+			Concurrency:   8,
+			IdentityProbe: true,
 		})
 		if err != nil {
 			logger.Warn().Err(err).Msg("Tally port probe failed; not reading any mapped company this tick")
@@ -950,10 +976,35 @@ func resolveMappingsForTick(ctx context.Context, mappings []ingest.ActiveMapping
 					Reason:   fmt.Sprintf("could not probe Tally for %q: %v", m.TallyCompanyName, err),
 				})
 			}
-			return nil, skipped, fmt.Errorf("tally port probe failed: %w", err)
+			return nil, skipped, nil, fmt.Errorf("tally port probe failed: %w", err)
 		}
 	}
-	resolved, followed, skipped := syncrun.ResolveMappingEndpoints(mappings, probes)
+	var (
+		resolved []ingest.ActiveMapping
+		followed []syncrun.FollowedMapping
+		skipped  []syncrun.SkippedMapping
+		identity []syncrun.MappingIdentity
+	)
+	if enforce {
+		resolved, followed, skipped, identity = syncrun.ResolveMappingEndpointsEnforced(mappings, probes)
+	} else {
+		resolved, followed, skipped = syncrun.ResolveMappingEndpoints(mappings, probes)
+		// Checked against where each mapping was read (or, if skipped,
+		// its mapped port). Reported only.
+		identity = syncrun.ObserveIdentity(append(append([]ingest.ActiveMapping(nil), resolved...), skippedMappings(skipped)...), probes)
+	}
+	for _, c := range identity {
+		logger.Info().
+			Str("mode", identityModeName(enforce)).
+			Str("mapping_id", c.MappingID).
+			Str("mapping", c.Company).
+			Str("endpoint", c.Endpoint).
+			Bool("in_list_of_companies", c.InList).
+			Strs("guid_probe_guids", c.GUIDs).
+			Str("stored_guid", c.StoredGUID).
+			Str("verdict", string(c.Verdict)).
+			Msg("company identity check")
+	}
 	for _, f := range followed {
 		logger.Warn().
 			Str("mapping", f.Mapping.TallyCompanyName).
@@ -962,7 +1013,7 @@ func resolveMappingsForTick(ctx context.Context, mappings []ingest.ActiveMapping
 			Msg("company is open on another Tally port; reading it there")
 	}
 	if len(skipped) == 0 {
-		return resolved, nil, nil
+		return resolved, nil, identity, nil
 	}
 	reasons := make([]string, 0, len(skipped))
 	for _, sk := range skipped {
@@ -974,7 +1025,15 @@ func resolveMappingsForTick(ctx context.Context, mappings []ingest.ActiveMapping
 			Msg(sk.Reason)
 		reasons = append(reasons, sk.Reason)
 	}
-	return resolved, skipped, fmt.Errorf("%d of %d mapped companies not readable: %s", len(skipped), len(mappings), strings.Join(reasons, "; "))
+	return resolved, skipped, identity, fmt.Errorf("%d of %d mapped companies not readable: %s", len(skipped), len(mappings), strings.Join(reasons, "; "))
+}
+
+func skippedMappings(sk []syncrun.SkippedMapping) []ingest.ActiveMapping {
+	out := make([]ingest.ActiveMapping, 0, len(sk))
+	for _, s := range sk {
+		out = append(out, s.Mapping)
+	}
+	return out
 }
 
 func errorFromWalkResult(res syncrun.WalkResult) error {
