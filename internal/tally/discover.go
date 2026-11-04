@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -307,6 +308,42 @@ func probeOne(ctx context.Context, endpoint string, client *Client, identity boo
 		r.Identity = ProbeCompanyIdentity(ctx, client)
 	}
 	return r
+}
+
+// DefaultScanEndpoints is the default loopback sweep — DefaultDiscoverPortRange
+// plus DefaultDiscoverAlternates — as explicit endpoint URLs, so a caller can
+// union it with other endpoints (autodiscover probes config + mapped + this).
+func DefaultScanEndpoints() []string {
+	eps, _ := resolveEndpoints(DiscoverOptions{})
+	return eps
+}
+
+// CanonicalEndpoint is the comparison key for a Tally endpoint: trimmed,
+// lower case, no trailing slash, http:// added when there is no scheme,
+// and loopback names (localhost, ::1, 0.0.0.0) as 127.0.0.1. Two spellings
+// of one local Tally share a key, so a sweep never probes it twice and a
+// saved list never holds it twice.
+func CanonicalEndpoint(ep string) string {
+	ep = strings.TrimRight(strings.ToLower(strings.TrimSpace(ep)), "/")
+	if ep == "" {
+		return ""
+	}
+	if !strings.Contains(ep, "://") {
+		ep = "http://" + ep
+	}
+	u, err := url.Parse(ep)
+	if err != nil || u.Host == "" {
+		return ep
+	}
+	switch u.Hostname() {
+	case "localhost", "::1", "0.0.0.0":
+		port := u.Port() // read before Host is replaced
+		u.Host = "127.0.0.1"
+		if port != "" {
+			u.Host += ":" + port
+		}
+	}
+	return u.String()
 }
 
 // IdentityGUID is the one GUID this port's Type:Company probe returns for

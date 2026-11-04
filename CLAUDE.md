@@ -48,6 +48,10 @@ Two company probes run on every port before a sync: List of Companies (names onl
 
 The daemon's cron spec is `--schedule`, else `config.yaml` `schedule_cron`, else `scheduler.DefaultSpec`; the server's `schedule_cron` is not applied. Each heartbeat reports what is in use as `schedule: {cron, source}` (`config` / `default` / `override`, `cmd/agent/main.go` `scheduleSource`). If the selection ever changes, change `scheduleSource` with it.
 
+## Autodiscover endpoints
+
+Each sweep probes the saved `tally_endpoints`, every active mapping's endpoint and the default range plus alternates, and saves saved ∪ answered (`config.MergeEndpoints`). Never make a sweep drop an endpoint that missed: only `agentctl discover --forget/--replace` removes one.
+
 ## Server coordination
 
 Every agent PR that changes the wire protocol must reference the paired server PR (or note that the server already exposes the endpoint). Breaking wire changes need a server migration first.

@@ -41,6 +41,19 @@ import (
 // Override via Options.PeriodicInterval.
 const DefaultPeriodicInterval = 1 * time.Hour
 
+// Sweep sizing (QA 04-Nov). Every sweep probes the saved config endpoints,
+// every active mapping's endpoint and the default range + alternates
+// (about 30 endpoints on a shared host). A closed loopback port refuses in
+// well under a millisecond; only a port that accepts and then hangs costs
+// SweepProbeTimeout. Worst case, every endpoint hanging:
+// ceil(N / SweepConcurrency) × SweepProbeTimeout — 4 × 5 s = 20 s for 30
+// endpoints, inside the daemon's 90 s boot budget and far below the hourly
+// interval.
+const (
+	SweepProbeTimeout = tally.DefaultDiscoverTimeout
+	SweepConcurrency  = 8
+)
+
 // CatalogSender is the narrow surface autodiscover needs from
 // ingest.Client. Defined as an interface so tests can substitute a
 // recorder without spinning up an HTTP server.
@@ -68,6 +81,13 @@ type Options struct {
 	// logger.
 	Logger zerolog.Logger
 
+	// MappedEndpoints, when non-nil, returns the Tally endpoint of every
+	// active mapping across this host's paired connections. They are
+	// probed every sweep even when config does not list them (a company
+	// on 9559 whose port fell out of config is still catalogued).
+	// Errors are the caller's to log; return what was fetched.
+	MappedEndpoints func(context.Context) []string
+
 	// Test seams.
 	DiscoverFn func(context.Context, tally.DiscoverOptions) ([]tally.ProbeResult, error)
 	SaveFn     func(string, *config.Config) error
@@ -82,9 +102,14 @@ type Result struct {
 	// EndpointsAdded are the new endpoints (in Endpoints, not in
 	// the previous TallyEndpoints).
 	EndpointsAdded []string
-	// EndpointsGone are endpoints that disappeared (in the previous
-	// TallyEndpoints, not in Endpoints).
+	// EndpointsGone are saved endpoints that did not answer this sweep.
+	// They are KEPT in config (a miss never removes an endpoint; only
+	// `agentctl discover --forget/--replace` does) and probed again on
+	// the next sweep.
 	EndpointsGone []string
+	// Probed, Reachable and Unreachable count this sweep's endpoints:
+	// all probed, those that answered as Tally, and the rest.
+	Probed, Reachable, Unreachable int
 	// CompaniesPushed is the number of (endpoint, company) tuples
 	// the catalog push uploaded. 0 when Tally responded but no
 	// company is loaded.
@@ -126,19 +151,24 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		now = time.Now
 	}
 
-	// If config has explicit endpoints (set by `agentctl discover`
-	// previously, or by the install.ps1 GSTRECO_TALLY_PORTS hook),
-	// honour them — most customer Tally installs are on
-	// non-default ports and a port-range scan would miss them.
-	// Empty endpoint list falls back to the default port-range
-	// scan from tally.DiscoverOptions's zero value.
+	// QA 04-Nov: the sweep is the union of the saved config endpoints,
+	// every active mapping's endpoint and the default range + alternates.
+	// Probing only the saved list (as before) meant a port missed once was
+	// never probed again, and ports outside 9000-9020 were never found
+	// unless configured.
+	var mapped []string
+	if opts.MappedEndpoints != nil {
+		mapped = opts.MappedEndpoints(ctx)
+	}
+	sweep := SweepEndpoints(opts.Cfg.ResolveTallyEndpoints(""), mapped, tally.DefaultScanEndpoints())
 	// IdentityProbe: the catalog carries each company's Tally GUID from
 	// the Type:Company probe (QA 04-Nov N1); List of Companies has none.
-	discoverOpts := tally.DiscoverOptions{IdentityProbe: true}
-	if explicit := opts.Cfg.ResolveTallyEndpoints(""); len(explicit) > 0 {
-		discoverOpts.Endpoints = explicit
-	}
-	probes, err := discover(ctx, discoverOpts)
+	probes, err := discover(ctx, tally.DiscoverOptions{
+		Endpoints:     sweep,
+		Timeout:       SweepProbeTimeout,
+		Concurrency:   SweepConcurrency,
+		IdentityProbe: true,
+	})
 	if err != nil {
 		return Result{}, fmt.Errorf("autodiscover: probe sweep: %w", err)
 	}
@@ -147,12 +177,6 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	v3 := filterReachableTally(probes)
-	if len(v3) == 0 {
-		return Result{
-			SkippedReason: "no Tally Prime 3.x instances reachable on default port range",
-		}, nil
-	}
-
 	foundEndpoints := make([]string, 0, len(v3))
 	for _, p := range v3 {
 		foundEndpoints = append(foundEndpoints, p.Endpoint)
@@ -166,12 +190,30 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		Endpoints:      foundEndpoints,
 		EndpointsAdded: added,
 		EndpointsGone:  gone,
+		Probed:         len(probes),
+		Reachable:      len(v3),
+		Unreachable:    len(probes) - len(v3),
+	}
+	opts.Logger.Info().
+		Int("probed", result.Probed).
+		Int("reachable", result.Reachable).
+		Int("unreachable", result.Unreachable).
+		Int("mapped_endpoints", len(mapped)).
+		Strs("reachable_endpoints", foundEndpoints).
+		Strs("saved_not_answering", gone).
+		Msg("autodiscover: sweep")
+
+	if len(v3) == 0 {
+		result.SkippedReason = "no Tally instance answered on any probed endpoint"
+		return result, nil
 	}
 
-	// Persist on any change. Save failure is non-fatal — the daemon
-	// can run with the in-memory list and re-discover next tick.
-	if !slicesEqual(previous, foundEndpoints) && opts.CfgPath != "" {
-		opts.Cfg.TallyEndpoints = foundEndpoints
+	// Persist previous ∪ found. A miss never removes an endpoint: a Tally
+	// closed during one sweep is probed again next time. Save failure is
+	// non-fatal — the daemon can run with the in-memory list.
+	next := config.MergeEndpoints(previous, foundEndpoints)
+	if !slicesEqual(previous, next) && opts.CfgPath != "" {
+		opts.Cfg.TallyEndpoints = next
 		if err := save(opts.CfgPath, opts.Cfg); err != nil {
 			result.Warnings = append(result.Warnings,
 				fmt.Sprintf("save config: %v", err))
@@ -179,9 +221,8 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		} else {
 			result.ConfigSaved = true
 			opts.Logger.Info().
-				Strs("endpoints", foundEndpoints).
+				Strs("endpoints", next).
 				Strs("added", added).
-				Strs("gone", gone).
 				Msg("autodiscover: persisted endpoint list")
 		}
 	}
@@ -268,24 +309,43 @@ func filterReachableTally(probes []tally.ProbeResult) []tally.ProbeResult {
 	return out
 }
 
+// SweepEndpoints is the union of the given endpoint lists, deduplicated by
+// tally.CanonicalEndpoint, in first-seen order (config first, then mapped,
+// then the default scan). Blank entries are dropped.
+func SweepEndpoints(lists ...[]string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, list := range lists {
+		for _, ep := range list {
+			key := tally.CanonicalEndpoint(ep)
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, key)
+		}
+	}
+	return out
+}
+
 // diffEndpoints returns sorted (added, gone). Nil slices when no diff
 // — caller can check len() rather than nil-vs-empty.
 func diffEndpoints(prev, next []string) (added, gone []string) {
 	prevSet := make(map[string]struct{}, len(prev))
 	for _, e := range prev {
-		prevSet[e] = struct{}{}
+		prevSet[tally.CanonicalEndpoint(e)] = struct{}{}
 	}
 	nextSet := make(map[string]struct{}, len(next))
 	for _, e := range next {
-		nextSet[e] = struct{}{}
+		nextSet[tally.CanonicalEndpoint(e)] = struct{}{}
 	}
 	for _, e := range next {
-		if _, ok := prevSet[e]; !ok {
+		if _, ok := prevSet[tally.CanonicalEndpoint(e)]; !ok {
 			added = append(added, e)
 		}
 	}
 	for _, e := range prev {
-		if _, ok := nextSet[e]; !ok {
+		if _, ok := nextSet[tally.CanonicalEndpoint(e)]; !ok {
 			gone = append(gone, e)
 		}
 	}

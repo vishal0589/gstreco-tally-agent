@@ -100,6 +100,35 @@ func (r *daemonConnectionRuntime) Disable() {
 	}
 }
 
+// mappedEndpointsFor returns autodiscover's MappedEndpoints: the Tally
+// endpoint of every active mapping of every enabled connection on this
+// host. A connection whose mapping list can't be fetched is logged and
+// skipped; the sweep still covers config and the default range.
+func mappedEndpointsFor(runtimes []*daemonConnectionRuntime, logger zerolog.Logger) func(context.Context) []string {
+	return func(ctx context.Context) []string {
+		var out []string
+		for _, rt := range runtimes {
+			if rt == nil || rt.client == nil || !rt.Enabled() {
+				continue
+			}
+			fetchCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			resp, err := rt.client.FetchActiveMappings(fetchCtx)
+			cancel()
+			if err != nil {
+				logger.Warn().Str("connection_id", rt.info.ConnectionID).Err(err).
+					Msg("autodiscover: could not fetch active mappings; sweeping without this connection's mapped ports")
+				continue
+			}
+			for _, m := range resp.Mappings {
+				if ep := strings.TrimSpace(m.TallyEndpoint); ep != "" {
+					out = append(out, ep)
+				}
+			}
+		}
+		return out
+	}
+}
+
 type multiCatalogSender struct {
 	runtimes []*daemonConnectionRuntime
 }
@@ -234,6 +263,8 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 		CfgPath: cfgPath,
 		Sender:  multiCatalogSender{runtimes: runtimes},
 		Logger:  logger,
+		// Every mapped port is probed even when config lacks it.
+		MappedEndpoints: mappedEndpointsFor(runtimes, logger),
 	})
 	bootCancel()
 	if bootErr != nil {
@@ -309,10 +340,11 @@ func runWithCtx(ctx context.Context, opts daemonOptions, logger zerolog.Logger) 
 	// loop does NOT fire immediately; we already ran one synchronous
 	// sweep above before scheduler.Start.
 	go autodiscover.Loop(runCtx, autodiscover.DefaultPeriodicInterval, autodiscover.Options{
-		Cfg:     cfg,
-		CfgPath: cfgPath,
-		Sender:  multiCatalogSender{runtimes: runtimes},
-		Logger:  logger,
+		Cfg:             cfg,
+		CfgPath:         cfgPath,
+		Sender:          multiCatalogSender{runtimes: runtimes},
+		Logger:          logger,
+		MappedEndpoints: mappedEndpointsFor(runtimes, logger),
 	})
 
 	pollers := make([]*heartbeat.Poller, 0, len(runtimes))

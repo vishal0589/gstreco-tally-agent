@@ -3,6 +3,7 @@ package config
 import (
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -80,5 +81,23 @@ func TestSaveLoadRoundTrip_WithMultiEndpoints(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.TallyEndpoints, want.TallyEndpoints) {
 		t.Errorf("TallyEndpoints round-trip: got %v, want %v", got.TallyEndpoints, want.TallyEndpoints)
+	}
+}
+
+func TestMergeEndpoints_KeepsPreviousAndDedupes(t *testing.T) {
+	got := MergeEndpoints([]string{"http://localhost:9559", "http://127.0.0.1:3036"}, []string{"http://127.0.0.1:9559/", "http://127.0.0.1:9001"})
+	want := []string{"http://127.0.0.1:3036", "http://127.0.0.1:9001", "http://localhost:9559"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("MergeEndpoints = %v, want %v", got, want)
+	}
+	if got := MergeEndpoints([]string{"http://127.0.0.1:9553"}, nil); len(got) != 1 {
+		t.Fatalf("a miss removed an endpoint: %v", got)
+	}
+}
+
+func TestRemoveEndpoints(t *testing.T) {
+	got := RemoveEndpoints([]string{"http://localhost:9553", "http://127.0.0.1:9559"}, []string{"http://127.0.0.1:9553"})
+	if len(got) != 1 || got[0] != "http://127.0.0.1:9559" {
+		t.Fatalf("RemoveEndpoints = %v", got)
 	}
 }
