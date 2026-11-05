@@ -74,7 +74,7 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 	connectionID := fs.String("connection-id", "", "paired connection id to use when config stores multiple connections")
 	tallyURL := fs.String("tally-url", "", "Tally HTTP endpoint (default: from config or http://localhost:9000)")
 	tallyCompany := fs.String("tally-company", "", "Tally company name as it appears in Tally (required)")
-	kindFlag := fs.String("kind", "", "sync kind: purchase | sales | credit_note | debit_note | journal | payment | tax_ledger (required)")
+	kindFlag := fs.String("kind", "", "sync kind: purchase | sales | credit_note | debit_note | journal | payment | tax_ledger | tax_ledger_voucher (required)")
 	period := fs.String("period", "", "month shorthand MMYYYY (e.g. 042026 for Apr 2026); mutually exclusive with --from/--to")
 	fromFlag := fs.String("from", "", "window start YYYY-MM-DD (use with --to instead of --period)")
 	toFlag := fs.String("to", "", "window end YYYY-MM-DD inclusive")
@@ -89,7 +89,7 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 		return 2
 	}
 	if *kindFlag == "" {
-		fmt.Fprintln(stderr, "agentctl sync: --kind is required (one of: purchase, sales, credit_note, debit_note, journal, payment, tax_ledger)")
+		fmt.Fprintln(stderr, "agentctl sync: --kind is required (one of: purchase, sales, credit_note, debit_note, journal, payment, tax_ledger, tax_ledger_voucher)")
 		return 2
 	}
 
@@ -300,7 +300,7 @@ func formatServerFinding(f ingest.ValidationFinding) string {
 func mapKind(s string) (syncrun.KindPair, error) {
 	k, err := syncrun.MapKindByName(strings.ToLower(strings.TrimSpace(s)))
 	if err != nil {
-		return syncrun.KindPair{}, fmt.Errorf("unknown --kind %q (want one of: purchase, sales, credit_note, debit_note, journal, payment, tax_ledger)", s)
+		return syncrun.KindPair{}, fmt.Errorf("unknown --kind %q (want one of: purchase, sales, credit_note, debit_note, journal, payment, tax_ledger, tax_ledger_voucher)", s)
 	}
 	return k, nil
 }
@@ -358,4 +358,8 @@ func firstNonEmpty(vs ...string) string {
 		}
 	}
 	return ""
+}
+
+func (noopSender) SendTaxLedgerVouchers(_ context.Context, _ tally.TaxLedgerVoucherIngestRequestBody) (tally.AccountingAcceptedResponse, error) {
+	return tally.AccountingAcceptedResponse{}, nil
 }

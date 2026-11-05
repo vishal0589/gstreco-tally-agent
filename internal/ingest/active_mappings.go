@@ -30,6 +30,10 @@ type ActiveMapping struct {
 	// keeps reporting TallyEndpoint: the server finds the mapping (and its
 	// GSTIN) by that endpoint. Never sent or received.
 	FetchEndpoint string `json:"-"`
+	// IdentityGUID, when set, is the company GUID this tick's identity
+	// check confirmed for the company (syncrun.ApplyIdentityGUIDs). Never
+	// sent or received.
+	IdentityGUID string `json:"-"`
 }
 
 // ReadEndpoint is the Tally endpoint to read this tick.

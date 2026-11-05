@@ -34,14 +34,15 @@ func (f *fakeMappingsTallyClient) PostXML(_ context.Context, body []byte) ([]byt
 // matches the syncAllIngestClient interface so we can inject one fake
 // in place of the real ingest.Client.
 type fakeSyncAllIngest struct {
-	mappings    *ingest.ActiveMappingsResponse
-	fetchErr    error
-	sent        []tally.IngestRequestBody
-	journalSent []tally.JournalIngestRequestBody
-	paymentSent []tally.PaymentIngestRequestBody
-	taxSent     []tally.TaxLedgerIngestRequestBody
-	sendErr     error
-	resp        ingest.AcceptedResponse
+	mappings       *ingest.ActiveMappingsResponse
+	fetchErr       error
+	sent           []tally.IngestRequestBody
+	journalSent    []tally.JournalIngestRequestBody
+	paymentSent    []tally.PaymentIngestRequestBody
+	taxSent        []tally.TaxLedgerIngestRequestBody
+	taxVoucherSent []tally.TaxLedgerVoucherIngestRequestBody
+	sendErr        error
+	resp           ingest.AcceptedResponse
 }
 
 func (f *fakeSyncAllIngest) Send(_ context.Context, body tally.IngestRequestBody) (ingest.AcceptedResponse, error) {
@@ -425,4 +426,12 @@ func TestRunSyncAll_FetchMappingsErrorIsInfra(t *testing.T) {
 	if !strings.Contains(stderr.String(), "fetch mappings") {
 		t.Errorf("stderr should explain fetch failure: %s", stderr.String())
 	}
+}
+
+func (f *fakeSyncAllIngest) SendTaxLedgerVouchers(_ context.Context, body tally.TaxLedgerVoucherIngestRequestBody) (tally.AccountingAcceptedResponse, error) {
+	f.taxVoucherSent = append(f.taxVoucherSent, body)
+	if f.sendErr != nil {
+		return tally.AccountingAcceptedResponse{}, f.sendErr
+	}
+	return tally.AccountingAcceptedResponse{Processed: len(body.Batch)}, nil
 }

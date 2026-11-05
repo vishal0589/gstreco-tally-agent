@@ -8,6 +8,9 @@ const (
 	AccountingBatchJournal   AccountingBatchKind = "journal"
 	AccountingBatchPayment   AccountingBatchKind = "payment"
 	AccountingBatchTaxLedger AccountingBatchKind = "tax_ledger"
+	// AccountingBatchTaxLedgerVoucher is the voucher evidence behind the
+	// tax ledgers (QA 05-Nov, POST /api/tally/tax-ledger-vouchers).
+	AccountingBatchTaxLedgerVoucher AccountingBatchKind = "tax_ledger_voucher"
 )
 
 // VoucherBillReference is one bill-wise reference linked to a journal/payment
@@ -130,6 +133,63 @@ type TaxLedgerIngestRequestBody struct {
 	PeriodFrom *string `json:"period_from,omitempty"`
 	PeriodTo   *string `json:"period_to,omitempty"`
 	IsFinal    bool    `json:"is_final,omitempty"`
+}
+
+// TaxLedgerVoucherLeg is one leg of a tax-ledger voucher as Tally returned
+// it: ledger_name untrimmed, amount the trimmed AMOUNT text in Tally sign
+// (debit negative), null when it is not a plain decimal.
+type TaxLedgerVoucherLeg struct {
+	LedgerName string  `json:"ledger_name"`
+	Amount     *string `json:"amount"`
+	GSTClass   *string `json:"gst_class"`
+}
+
+// TaxLedgerVoucherRow is one non-cancelled voucher inside the window with
+// at least one leg on a tax ledger, sent with all its legs.
+type TaxLedgerVoucherRow struct {
+	TallyVoucherGUID *string               `json:"tally_voucher_guid"`
+	MasterID         *string               `json:"master_id"`
+	AlterID          *string               `json:"alter_id"`
+	VoucherDate      *string               `json:"voucher_date"` // YYYY-MM-DD, null when unreadable
+	VoucherDateRaw   string                `json:"voucher_date_raw"`
+	VoucherTypeName  *string               `json:"voucher_type_name"`
+	VoucherNumber    *string               `json:"voucher_number"`
+	Reference        *string               `json:"reference"`
+	PartyLedgerName  *string               `json:"party_ledger_name"`
+	PartyGSTIN       *string               `json:"party_gstin"`
+	IsInvoice        bool                  `json:"is_invoice"`
+	IsOptional       bool                  `json:"is_optional"`
+	IsRCMApplicable  bool                  `json:"is_rcm_applicable"`
+	Legs             []TaxLedgerVoucherLeg `json:"legs"`
+	Problems         []string              `json:"problems"`
+}
+
+// TaxLedgerVoucherSnapshot rides on the final batch of a month: whether the
+// batches are the complete set of the month's tax-ledger vouchers.
+type TaxLedgerVoucherSnapshot struct {
+	Complete          bool `json:"complete"`
+	VouchersReturned  int  `json:"vouchers_returned"`
+	OutsideWindow     int  `json:"outside_window"`
+	CancelledTouching int  `json:"cancelled_touching"`
+	DateUnreadable    int  `json:"date_unreadable"`
+}
+
+type TaxLedgerVoucherIngestRequestBody struct {
+	RunID         string                `json:"run_id,omitempty"`
+	Kind          AccountingBatchKind   `json:"kind"`
+	TallyCompany  string                `json:"tally_company"`
+	TallyEndpoint *string               `json:"tally_endpoint,omitempty"`
+	CompanyGUID   *string               `json:"company_guid,omitempty"`
+	RequestID     string                `json:"request_id,omitempty"`
+	Batch         []TaxLedgerVoucherRow `json:"batch"`
+	SyncWarnings  []SyncWarning         `json:"sync_warnings,omitempty"`
+	SyncRequestID string                `json:"sync_request_id,omitempty"`
+	RunKind       string                `json:"run_kind,omitempty"`
+	PeriodFrom    *string               `json:"period_from,omitempty"`
+	PeriodTo      *string               `json:"period_to,omitempty"`
+	IsFinal       bool                  `json:"is_final,omitempty"`
+	// Snapshot is set on the final batch only.
+	Snapshot *TaxLedgerVoucherSnapshot `json:"snapshot,omitempty"`
 }
 
 // AccountingAcceptedResponse is the 2xx response body from the journal/payment

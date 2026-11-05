@@ -194,7 +194,7 @@ Usage:
                 [--batch-size N] [--dry-run]
       one-shot fetch from a Tally endpoint → parse → ingest a single window.
       KIND is one of: purchase, sales, credit_note, debit_note,
-      journal, payment, tax_ledger.
+      journal, payment, tax_ledger, tax_ledger_voucher.
 
   agentctl discover [--ports START-END] [--host HOST] [--endpoint URL]...
                     [--timeout DURATION] [--concurrency N]
@@ -210,7 +210,7 @@ Usage:
       daemon's hourly sweep only ever adds.
 
   agentctl sync-all (--period MMYYYY | --from YYYY-MM-DD --to YYYY-MM-DD)
-                    [--kinds purchase,sales,credit_note,debit_note,journal,payment,tax_ledger]
+                    [--kinds purchase,sales,credit_note,debit_note,journal,payment,tax_ledger,tax_ledger_voucher]
                     [--connection-id <UUID>]
                     [--batch-size N] [--dry-run]
                     [--continue-on-error]

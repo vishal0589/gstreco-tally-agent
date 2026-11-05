@@ -863,6 +863,9 @@ func runWindowSync(
 	if len(active) == 0 {
 		return unreadable
 	}
+	// The tax_ledger_voucher lane reports the company GUID the identity
+	// check saw (QA 05-Nov).
+	active = syncrun.ApplyIdentityGUIDs(active, identity)
 
 	if authErr := syncMastersForMappings(ctx, client, newTallyClient, active, logger); authErr != nil {
 		outcome.noteAuth(authErr, "masters push")
@@ -949,6 +952,7 @@ func walkOptionsFor(
 				Int("landed", r.ServerInserted+r.ServerAmended).
 				Int("skipped", r.ServerSkipped).
 				Int("server_errors", r.ServerErrors).
+				Bool("lane_unsupported", r.LaneUnsupported).
 				Str("sync_request_id", scope.requestID).
 				Msg("per-kind result")
 		},

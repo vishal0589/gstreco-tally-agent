@@ -29,3 +29,12 @@ func (c *Client) SendTaxLedgers(ctx context.Context, body tally.TaxLedgerIngestR
 	err := c.PostJSONExpect(ctx, TaxLedgerPath, body, &out)
 	return out, err
 }
+
+// TaxLedgerVoucherPath is the tax_ledger_voucher lane's endpoint (QA 05-Nov).
+const TaxLedgerVoucherPath = "/api/tally/tax-ledger-vouchers"
+
+func (c *Client) SendTaxLedgerVouchers(ctx context.Context, body tally.TaxLedgerVoucherIngestRequestBody) (tally.AccountingAcceptedResponse, error) {
+	var out tally.AccountingAcceptedResponse
+	err := c.PostJSONExpect(ctx, TaxLedgerVoucherPath, body, &out)
+	return out, err
+}

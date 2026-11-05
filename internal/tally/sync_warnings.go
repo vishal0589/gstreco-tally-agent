@@ -26,6 +26,10 @@ const (
 	// agent could not read into rows (no party ledger found), so they were
 	// not sent (QA v27 L1).
 	SyncWarningVouchersNotNormalized = "vouchers_not_normalized"
+	// SyncWarningTaxLedgerVouchersIncomplete: the month's tax-ledger voucher
+	// snapshot is not complete (a voucher outside the window, an unreadable
+	// date, a reply the agent could not read, or no tax ledgers listed).
+	SyncWarningTaxLedgerVouchersIncomplete = "tax_ledger_vouchers_incomplete"
 )
 
 // Server-side caps on sync_warnings; the agent applies them before sending.

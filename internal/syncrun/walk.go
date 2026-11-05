@@ -34,6 +34,7 @@ var DefaultKinds = []KindPair{
 	{Name: "journal", Tally: tally.VoucherJournal},
 	{Name: "payment", Tally: tally.VoucherPayment},
 	{Name: "tax_ledger"},
+	{Name: "tax_ledger_voucher"},
 }
 
 // WalkOptions configures one WalkAll invocation. Callers pre-resolve
@@ -170,6 +171,7 @@ func WalkAll(ctx context.Context, opts WalkOptions) WalkResult {
 				RunKind:       opts.RunKind,
 				BatchSize:     opts.BatchSize,
 				SyncRequestID: opts.SyncRequestID,
+				CompanyGUID:   m.IdentityGUID,
 			}, progress)
 			cancelRun()
 
@@ -218,6 +220,8 @@ func MapKindByName(name string) (KindPair, error) {
 		return KindPair{Name: "payment", Tally: tally.VoucherPayment}, nil
 	case "tax_ledger", "tax-ledger", "taxledger":
 		return KindPair{Name: "tax_ledger"}, nil
+	case "tax_ledger_voucher", "tax-ledger-voucher", "taxledgervoucher", "tax_ledger_vouchers", "tax-ledger-vouchers":
+		return KindPair{Name: "tax_ledger_voucher"}, nil
 	default:
 		return KindPair{}, fmt.Errorf("unknown kind %q", name)
 	}

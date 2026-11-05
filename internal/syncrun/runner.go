@@ -30,6 +30,7 @@ type IngestSender interface {
 	SendJournal(ctx context.Context, body tally.JournalIngestRequestBody) (tally.AccountingAcceptedResponse, error)
 	SendPayment(ctx context.Context, body tally.PaymentIngestRequestBody) (tally.AccountingAcceptedResponse, error)
 	SendTaxLedgers(ctx context.Context, body tally.TaxLedgerIngestRequestBody) (tally.AccountingAcceptedResponse, error)
+	SendTaxLedgerVouchers(ctx context.Context, body tally.TaxLedgerVoucherIngestRequestBody) (tally.AccountingAcceptedResponse, error)
 }
 
 // Request describes one fetch-and-ingest cycle: a single (Tally
@@ -69,6 +70,10 @@ type Request struct {
 	// P3). Every batch of the run carries it, the first (run creation) and
 	// the is_final one included. Empty for scheduled and CLI runs.
 	SyncRequestID string
+	// CompanyGUID is the Tally company GUID the identity check saw for this
+	// company this tick ("" when unknown). Only the tax_ledger_voucher lane
+	// sends it.
+	CompanyGUID string
 }
 
 // Result reports what happened. Always populated even when err is
@@ -114,6 +119,10 @@ type Result struct {
 	// the app on 2xx ingest responses (missing GSTIN, rejected purchase
 	// row, rejected sales row, etc).
 	ServerFindings []ingest.ValidationFinding
+	// LaneUnsupported is true when the server answered 404/405 for this
+	// lane's endpoint (an older server). The lane is skipped for the tick;
+	// it is not a failure.
+	LaneUnsupported bool
 }
 
 // BatchError carries detail for one failed ingest batch. Index is
@@ -200,6 +209,8 @@ func RunOne(
 		return runPaymentSync(ctx, tallyClient, sender, req, res, emit, emitBatch)
 	case "tax_ledger":
 		return runTaxLedgerSync(ctx, tallyClient, sender, req, res, emit, emitBatch)
+	case "tax_ledger_voucher":
+		return runTaxLedgerVoucherSync(ctx, tallyClient, sender, req, res, emit, emitBatch)
 	default:
 		return runInvoiceSync(ctx, tallyClient, sender, req, res, emit, emitBatch)
 	}

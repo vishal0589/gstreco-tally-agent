@@ -69,12 +69,18 @@ func TestWalkAll_HappyPath_AllMappingsAllKinds(t *testing.T) {
 	if res.MappingsRun != 2 {
 		t.Errorf("MappingsRun=%d, want 2", res.MappingsRun)
 	}
-	// 2 mappings × 7 kinds × 1 row per stub response = 14 rows total.
+	// 2 mappings × 7 row kinds × 1 row per stub response = 14 rows. The
+	// stub voucher touches no tax ledger of the stub set, so the
+	// tax_ledger_voucher lane sends one empty final (snapshot) batch per
+	// mapping: 14 + 2 = 16 batches.
 	if res.TotalRows != 14 {
 		t.Errorf("TotalRows=%d, want 14", res.TotalRows)
 	}
-	if res.TotalBatchesSent != 14 {
-		t.Errorf("TotalBatchesSent=%d, want 14", res.TotalBatchesSent)
+	if res.TotalBatchesSent != 16 {
+		t.Errorf("TotalBatchesSent=%d, want 16", res.TotalBatchesSent)
+	}
+	if len(snd.taxVoucherSent) != 2 {
+		t.Errorf("tax_ledger_voucher sends=%d, want 2", len(snd.taxVoucherSent))
 	}
 	if res.FatalErrors != 0 {
 		t.Errorf("FatalErrors=%d, want 0", res.FatalErrors)
