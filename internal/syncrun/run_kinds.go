@@ -92,12 +92,18 @@ func runInvoiceSync(
 	emit("normalized", fmt.Sprintf("%d ingest rows (dropped %d on normalize)",
 		len(rows), res.DroppedOnNormalize))
 
-	if len(rows) == 0 {
+	zeroLane := zeroRowLane(req, len(rows), len(parsed.Vouchers))
+	if len(rows) == 0 && !zeroLane {
 		emit("complete", "nothing to send")
 		return res, nil
 	}
 
 	chunks := ingest.SplitRows(rows, req.BatchSize)
+	if zeroLane {
+		// QA 05-Nov D12: one empty final batch says "zero rows" for this lane.
+		chunks = [][]tally.IngestVoucherRow{{}}
+		emit("zero_rows", "no vouchers in the window; sending an empty final batch")
+	}
 	var tallyEndpoint *string
 	if req.TallyEndpoint != "" {
 		tallyEndpoint = &req.TallyEndpoint
@@ -212,7 +218,8 @@ func runJournalSync(
 	res.RowCount = len(rows)
 	emit("normalized", fmt.Sprintf("%d %s rows (dropped %d on normalize)",
 		len(rows), req.KindName, res.DroppedOnNormalize))
-	if len(rows) == 0 {
+	zeroLane := zeroRowLane(req, len(rows), len(parsed.Vouchers))
+	if len(rows) == 0 && !zeroLane {
 		emit("complete", "nothing to send")
 		return res, nil
 	}
@@ -221,10 +228,13 @@ func runJournalSync(
 	if req.TallyEndpoint != "" {
 		tallyEndpoint = &req.TallyEndpoint
 	}
-	batches := buildJournalBatches(req.RunID, req.RunID, req.TallyCompany, tallyEndpoint, rows, req.BatchSize)
+	batches := buildJournalBatches(req.RunID, req.RunID, req.TallyCompany, tallyEndpoint, rows, req.BatchSize, zeroLane)
+	meta := accountingRunMeta(req)
 	for i := range batches {
 		batches[i].SyncWarnings = res.SyncWarnings
 		batches[i].SyncRequestID = req.SyncRequestID
+		batches[i].RunKind, batches[i].PeriodFrom, batches[i].PeriodTo = meta.runKind, meta.from, meta.to
+		batches[i].IsFinal = i == len(batches)-1
 	}
 	for i, body := range batches {
 		if err := ctx.Err(); err != nil {
@@ -314,7 +324,8 @@ func runPaymentSync(
 	res.RowCount = len(rows)
 	emit("normalized", fmt.Sprintf("%d %s rows (dropped %d on normalize)",
 		len(rows), req.KindName, res.DroppedOnNormalize))
-	if len(rows) == 0 {
+	zeroLane := zeroRowLane(req, len(rows), len(parsed.Vouchers))
+	if len(rows) == 0 && !zeroLane {
 		emit("complete", "nothing to send")
 		return res, nil
 	}
@@ -323,10 +334,13 @@ func runPaymentSync(
 	if req.TallyEndpoint != "" {
 		tallyEndpoint = &req.TallyEndpoint
 	}
-	batches := buildPaymentBatches(req.RunID, req.RunID, req.TallyCompany, tallyEndpoint, rows, req.BatchSize)
+	batches := buildPaymentBatches(req.RunID, req.RunID, req.TallyCompany, tallyEndpoint, rows, req.BatchSize, zeroLane)
+	meta := accountingRunMeta(req)
 	for i := range batches {
 		batches[i].SyncWarnings = res.SyncWarnings
 		batches[i].SyncRequestID = req.SyncRequestID
+		batches[i].RunKind, batches[i].PeriodFrom, batches[i].PeriodTo = meta.runKind, meta.from, meta.to
+		batches[i].IsFinal = i == len(batches)-1
 	}
 	for i, body := range batches {
 		if err := ctx.Err(); err != nil {
@@ -401,7 +415,8 @@ func runTaxLedgerSync(
 	rows := tally.NormalizeTaxLedgerRows(parsed.Ledgers, period)
 	res.RowCount = len(rows)
 	emit("normalized", fmt.Sprintf("%d tax-ledger rows prepared", len(rows)))
-	if len(rows) == 0 {
+	zeroLane := zeroRowLane(req, len(rows), len(parsed.Ledgers))
+	if len(rows) == 0 && !zeroLane {
 		emit("complete", "nothing to send")
 		return res, nil
 	}
@@ -410,10 +425,13 @@ func runTaxLedgerSync(
 	if req.TallyEndpoint != "" {
 		tallyEndpoint = &req.TallyEndpoint
 	}
-	batches := buildTaxLedgerBatches(req.RunID, req.RunID, req.TallyCompany, tallyEndpoint, rows, req.BatchSize)
+	batches := buildTaxLedgerBatches(req.RunID, req.RunID, req.TallyCompany, tallyEndpoint, rows, req.BatchSize, zeroLane)
+	meta := accountingRunMeta(req)
 	for i := range batches {
 		batches[i].SyncWarnings = res.SyncWarnings
 		batches[i].SyncRequestID = req.SyncRequestID
+		batches[i].RunKind, batches[i].PeriodFrom, batches[i].PeriodTo = meta.runKind, meta.from, meta.to
+		batches[i].IsFinal = i == len(batches)-1
 	}
 	for i, body := range batches {
 		if err := ctx.Err(); err != nil {
@@ -453,8 +471,9 @@ func buildJournalBatches(
 	tallyEndpoint *string,
 	rows []tally.JournalVoucherRow,
 	size int,
+	emptyFinal bool,
 ) []tally.JournalIngestRequestBody {
-	chunks := splitGenericRows(rows, size)
+	chunks := splitOrEmptyFinal(rows, size, emptyFinal)
 	out := make([]tally.JournalIngestRequestBody, 0, len(chunks))
 	for i, chunk := range chunks {
 		out = append(out, tally.JournalIngestRequestBody{
@@ -474,8 +493,9 @@ func buildPaymentBatches(
 	tallyEndpoint *string,
 	rows []tally.PaymentVoucherRow,
 	size int,
+	emptyFinal bool,
 ) []tally.PaymentIngestRequestBody {
-	chunks := splitGenericRows(rows, size)
+	chunks := splitOrEmptyFinal(rows, size, emptyFinal)
 	out := make([]tally.PaymentIngestRequestBody, 0, len(chunks))
 	for i, chunk := range chunks {
 		out = append(out, tally.PaymentIngestRequestBody{
@@ -495,8 +515,9 @@ func buildTaxLedgerBatches(
 	tallyEndpoint *string,
 	rows []tally.TaxLedgerMonthlyRow,
 	size int,
+	emptyFinal bool,
 ) []tally.TaxLedgerIngestRequestBody {
-	chunks := splitGenericRows(rows, size)
+	chunks := splitOrEmptyFinal(rows, size, emptyFinal)
 	out := make([]tally.TaxLedgerIngestRequestBody, 0, len(chunks))
 	for i, chunk := range chunks {
 		out = append(out, tally.TaxLedgerIngestRequestBody{
@@ -509,6 +530,46 @@ func buildTaxLedgerBatches(
 		})
 	}
 	return out
+}
+
+// zeroRowLane is true when a lane served for a sync request found nothing in
+// Tally for the window (QA 05-Nov D12): the agent then sends one empty final
+// batch so the server records "zero rows" instead of "no batch received".
+// Vouchers Tally returned but the agent could not read are never zero rows;
+// scheduled and CLI runs send nothing, as before.
+func zeroRowLane(req Request, rows, sourceItems int) bool {
+	return req.SyncRequestID != "" && rows == 0 && sourceItems == 0
+}
+
+// splitOrEmptyFinal splits rows into batches; with no rows and emptyFinal it
+// returns one empty (non-nil) batch, so the JSON carries "batch": [].
+func splitOrEmptyFinal[T any](rows []T, size int, emptyFinal bool) [][]T {
+	chunks := splitGenericRows(rows, size)
+	if len(chunks) == 0 && emptyFinal {
+		return [][]T{make([]T, 0)}
+	}
+	return chunks
+}
+
+type accountingMeta struct {
+	runKind string
+	from    *string
+	to      *string
+}
+
+// accountingRunMeta is the run kind and window the accounting batches carry,
+// as the invoice batches always have.
+func accountingRunMeta(req Request) accountingMeta {
+	meta := accountingMeta{runKind: req.RunKind}
+	if !req.From.IsZero() {
+		from := req.From.Format("2006-01-02")
+		meta.from = &from
+	}
+	if !req.To.IsZero() {
+		to := req.To.Format("2006-01-02")
+		meta.to = &to
+	}
+	return meta
 }
 
 func splitGenericRows[T any](rows []T, size int) [][]T {
