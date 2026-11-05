@@ -87,6 +87,13 @@ type JournalIngestRequestBody struct {
 	Batch         []JournalVoucherRow `json:"batch"`
 	SyncWarnings  []SyncWarning       `json:"sync_warnings,omitempty"`
 	SyncRequestID string              `json:"sync_request_id,omitempty"`
+	// QA 05-Nov D12: the run's kind and window, and is_final on its last
+	// batch, so the server closes the run when the lane is done instead of
+	// leaving it "running" until its idle sweep.
+	RunKind    string  `json:"run_kind,omitempty"`
+	PeriodFrom *string `json:"period_from,omitempty"`
+	PeriodTo   *string `json:"period_to,omitempty"`
+	IsFinal    bool    `json:"is_final,omitempty"`
 }
 
 type PaymentIngestRequestBody struct {
@@ -98,6 +105,13 @@ type PaymentIngestRequestBody struct {
 	Batch         []PaymentVoucherRow `json:"batch"`
 	SyncWarnings  []SyncWarning       `json:"sync_warnings,omitempty"`
 	SyncRequestID string              `json:"sync_request_id,omitempty"`
+	// QA 05-Nov D12: the run's kind and window, and is_final on its last
+	// batch, so the server closes the run when the lane is done instead of
+	// leaving it "running" until its idle sweep.
+	RunKind    string  `json:"run_kind,omitempty"`
+	PeriodFrom *string `json:"period_from,omitempty"`
+	PeriodTo   *string `json:"period_to,omitempty"`
+	IsFinal    bool    `json:"is_final,omitempty"`
 }
 
 type TaxLedgerIngestRequestBody struct {
@@ -109,6 +123,13 @@ type TaxLedgerIngestRequestBody struct {
 	Batch         []TaxLedgerMonthlyRow `json:"batch"`
 	SyncWarnings  []SyncWarning         `json:"sync_warnings,omitempty"`
 	SyncRequestID string                `json:"sync_request_id,omitempty"`
+	// QA 05-Nov D12: the run's kind and window, and is_final on its last
+	// batch, so the server closes the run when the lane is done instead of
+	// leaving it "running" until its idle sweep.
+	RunKind    string  `json:"run_kind,omitempty"`
+	PeriodFrom *string `json:"period_from,omitempty"`
+	PeriodTo   *string `json:"period_to,omitempty"`
+	IsFinal    bool    `json:"is_final,omitempty"`
 }
 
 // AccountingAcceptedResponse is the 2xx response body from the journal/payment
