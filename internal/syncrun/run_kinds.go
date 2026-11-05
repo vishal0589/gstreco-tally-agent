@@ -757,6 +757,7 @@ func sendTaxLedgerVoucherBatches(
 		}
 		if body.IsFinal {
 			s := snap
+			s.VouchersSent = len(rows)
 			s.Complete = s.Complete && res.BatchesFailed == 0
 			body.Snapshot = &s
 		}

@@ -78,7 +78,7 @@ func TestTaxLedgerVoucher_KSSMonthOneFinalBatchWithSnapshot(t *testing.T) {
 	if b.Kind != tally.AccountingBatchTaxLedgerVoucher || !b.IsFinal || b.Snapshot == nil {
 		t.Fatalf("kind=%q is_final=%t snapshot=%v", b.Kind, b.IsFinal, b.Snapshot)
 	}
-	want := tally.TaxLedgerVoucherSnapshot{Complete: true, VouchersReturned: 7, CancelledTouching: 1}
+	want := tally.TaxLedgerVoucherSnapshot{Complete: true, VouchersReturned: 7, VouchersSent: 5, CancelledTouching: 1}
 	if *b.Snapshot != want {
 		t.Errorf("snapshot=%+v, want %+v", *b.Snapshot, want)
 	}
@@ -95,7 +95,7 @@ func TestTaxLedgerVoucher_KSSMonthOneFinalBatchWithSnapshot(t *testing.T) {
 		t.Errorf("wire: %s", raw)
 	}
 	snap := wire["snapshot"].(map[string]any)
-	for _, k := range []string{"complete", "vouchers_returned", "outside_window", "cancelled_touching", "date_unreadable"} {
+	for _, k := range []string{"complete", "vouchers_returned", "vouchers_sent", "outside_window", "cancelled_touching", "date_unreadable"} {
 		if _, ok := snap[k]; !ok {
 			t.Errorf("snapshot missing %s: %s", k, raw)
 		}
@@ -150,7 +150,7 @@ func TestTaxLedgerVoucher_ProvenEmptyMonthOnScheduledTick(t *testing.T) {
 		t.Fatalf("sends=%d, want 1", len(snd.taxVoucherSent))
 	}
 	b := snd.taxVoucherSent[0]
-	if !b.IsFinal || b.Snapshot == nil || !b.Snapshot.Complete || len(b.Batch) != 0 {
+	if !b.IsFinal || b.Snapshot == nil || !b.Snapshot.Complete || len(b.Batch) != 0 || b.Snapshot.VouchersSent != 0 {
 		t.Fatalf("batch: %+v", b)
 	}
 	raw, _ := json.Marshal(b)
@@ -238,6 +238,9 @@ func TestTaxLedgerVoucher_BatchesOnlyFinalCarriesSnapshot(t *testing.T) {
 	}
 	if len(snd.taxVoucherSent) != 3 {
 		t.Fatalf("sends=%d, want 3 (5 vouchers / 2)", len(snd.taxVoucherSent))
+	}
+	if s := snd.taxVoucherSent[2].Snapshot; s == nil || s.VouchersSent != 5 || s.VouchersReturned != 7 {
+		t.Errorf("vouchers_sent must sum every batch of the run: %+v", s)
 	}
 	for i, b := range snd.taxVoucherSent {
 		last := i == 2

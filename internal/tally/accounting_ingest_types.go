@@ -167,11 +167,17 @@ type TaxLedgerVoucherRow struct {
 // TaxLedgerVoucherSnapshot rides on the final batch of a month: whether the
 // batches are the complete set of the month's tax-ledger vouchers.
 type TaxLedgerVoucherSnapshot struct {
-	Complete          bool `json:"complete"`
-	VouchersReturned  int  `json:"vouchers_returned"`
-	OutsideWindow     int  `json:"outside_window"`
-	CancelledTouching int  `json:"cancelled_touching"`
-	DateUnreadable    int  `json:"date_unreadable"`
+	Complete bool `json:"complete"`
+	// VouchersReturned is every VOUCHER Tally returned for the window
+	// (any type, cancelled and outside-window ones included).
+	VouchersReturned int `json:"vouchers_returned"`
+	// VouchersSent is the vouchers the run sends across all its batches:
+	// the rows (touching the set, not cancelled, not outside the window;
+	// problem and unreadable-date vouchers included).
+	VouchersSent      int `json:"vouchers_sent"`
+	OutsideWindow     int `json:"outside_window"`
+	CancelledTouching int `json:"cancelled_touching"`
+	DateUnreadable    int `json:"date_unreadable"`
 }
 
 type TaxLedgerVoucherIngestRequestBody struct {
