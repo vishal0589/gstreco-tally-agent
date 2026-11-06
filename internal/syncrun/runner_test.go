@@ -82,6 +82,8 @@ type fakeSender struct {
 	journalSent    []tally.JournalIngestRequestBody
 	paymentSent    []tally.PaymentIngestRequestBody
 	taxLedgerSent  []tally.TaxLedgerIngestRequestBody
+	taxVoucherSent []tally.TaxLedgerVoucherIngestRequestBody
+	taxVoucherErr  error
 	err            error
 	resp           ingest.AcceptedResponse
 	accountingResp tally.AccountingAcceptedResponse
@@ -722,4 +724,19 @@ func equalSlice(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func (f *fakeSender) SendTaxLedgerVouchers(_ context.Context, body tally.TaxLedgerVoucherIngestRequestBody) (tally.AccountingAcceptedResponse, error) {
+	f.taxVoucherSent = append(f.taxVoucherSent, body)
+	if f.taxVoucherErr != nil {
+		return tally.AccountingAcceptedResponse{}, f.taxVoucherErr
+	}
+	if f.err != nil {
+		return tally.AccountingAcceptedResponse{}, f.err
+	}
+	return tally.AccountingAcceptedResponse{Processed: len(body.Batch)}, nil
+}
+
+func (c *cancellingSender) SendTaxLedgerVouchers(_ context.Context, _ tally.TaxLedgerVoucherIngestRequestBody) (tally.AccountingAcceptedResponse, error) {
+	return tally.AccountingAcceptedResponse{}, errors.New("cancellingSender: unexpected SendTaxLedgerVouchers call")
 }

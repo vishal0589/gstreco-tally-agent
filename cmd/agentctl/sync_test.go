@@ -140,12 +140,13 @@ func (f *fakeTallyPoster) PostXML(_ context.Context, body []byte) ([]byte, error
 
 // fakeIngestSender records every batch the command sends.
 type fakeIngestSender struct {
-	sent          []tally.IngestRequestBody
-	journalSent   []tally.JournalIngestRequestBody
-	paymentSent   []tally.PaymentIngestRequestBody
-	taxLedgerSent []tally.TaxLedgerIngestRequestBody
-	err           error
-	resp          ingest.AcceptedResponse
+	sent                 []tally.IngestRequestBody
+	journalSent          []tally.JournalIngestRequestBody
+	paymentSent          []tally.PaymentIngestRequestBody
+	taxLedgerSent        []tally.TaxLedgerIngestRequestBody
+	taxLedgerVoucherSent []tally.TaxLedgerVoucherIngestRequestBody
+	err                  error
+	resp                 ingest.AcceptedResponse
 }
 
 func (f *fakeIngestSender) Send(_ context.Context, body tally.IngestRequestBody) (ingest.AcceptedResponse, error) {
@@ -519,4 +520,12 @@ func TestRunSync_BadFlags(t *testing.T) {
 			t.Errorf("case %d args=%v: exit=%d, want 2 (stderr=%s)", i, args, code, stderr.String())
 		}
 	}
+}
+
+func (f *fakeIngestSender) SendTaxLedgerVouchers(_ context.Context, body tally.TaxLedgerVoucherIngestRequestBody) (tally.AccountingAcceptedResponse, error) {
+	f.taxLedgerVoucherSent = append(f.taxLedgerVoucherSent, body)
+	if f.err != nil {
+		return tally.AccountingAcceptedResponse{}, f.err
+	}
+	return tally.AccountingAcceptedResponse{Processed: len(body.Batch)}, nil
 }

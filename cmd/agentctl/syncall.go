@@ -77,7 +77,7 @@ func runSyncAll(stdout, stderr io.Writer, args []string, deps syncAllDeps) int {
 	period := fs.String("period", "", "month shorthand MMYYYY (e.g. 042026); mutually exclusive with --from/--to")
 	fromFlag := fs.String("from", "", "window start YYYY-MM-DD (use with --to instead of --period)")
 	toFlag := fs.String("to", "", "window end YYYY-MM-DD inclusive")
-	kindsFlag := fs.String("kinds", "purchase,sales,credit_note,debit_note,journal,payment,tax_ledger",
+	kindsFlag := fs.String("kinds", "purchase,sales,credit_note,debit_note,journal,payment,tax_ledger,tax_ledger_voucher",
 		"comma-separated sync kinds to fetch per mapping")
 	batchSize := fs.Int("batch-size", ingest.DefaultBatchSize, "max rows per ingest request")
 	dryRun := fs.Bool("dry-run", false, "fetch + parse only; do not POST ingest")
@@ -320,7 +320,7 @@ func parseKinds(s string) ([]syncrun.KindPair, error) {
 		out = append(out, pair)
 	}
 	if len(out) == 0 {
-		return nil, errors.New("--kinds is empty after parsing (use a comma-separated list of: purchase, sales, credit_note, debit_note, journal, payment, tax_ledger)")
+		return nil, errors.New("--kinds is empty after parsing (use a comma-separated list of: purchase, sales, credit_note, debit_note, journal, payment, tax_ledger, tax_ledger_voucher)")
 	}
 	return out, nil
 }

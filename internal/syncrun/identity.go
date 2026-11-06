@@ -367,3 +367,22 @@ func ResolveMappingEndpointsEnforced(mappings []ingest.ActiveMapping, probes []t
 	}
 	return resolved, followed, skipped, checks
 }
+
+// ApplyIdentityGUIDs copies onto each mapping the company GUID this tick's
+// identity check saw for it, when the check is unambiguous (match, or no
+// stored GUID but both probes agree on one GUID). Lanes that report the
+// company GUID (tax_ledger_voucher) send it; nothing else changes.
+func ApplyIdentityGUIDs(mappings []ingest.ActiveMapping, checks []MappingIdentity) []ingest.ActiveMapping {
+	byID := make(map[string]string, len(checks))
+	for _, c := range checks {
+		if (c.Verdict == IdentityMatch || c.Verdict == IdentityNoStoredGUID) && len(c.GUIDs) == 1 && strings.TrimSpace(c.GUIDs[0]) != "" {
+			byID[c.MappingID] = strings.TrimSpace(c.GUIDs[0])
+		}
+	}
+	for i := range mappings {
+		if g, ok := byID[mappings[i].MappingID]; ok {
+			mappings[i].IdentityGUID = g
+		}
+	}
+	return mappings
+}

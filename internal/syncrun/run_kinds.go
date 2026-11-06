@@ -3,6 +3,7 @@ package syncrun
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/vishal0589/gstreco-tally-agent/internal/ingest"
@@ -602,4 +603,187 @@ func intToStr(n int) string {
 		n /= 10
 	}
 	return string(buf[i:])
+}
+
+// runTaxLedgerVoucherSync is the tax_ledger_voucher lane (QA 05-Nov, probe
+// KSS-Tally-ReadOnly-v13): every non-cancelled voucher of the month, of any
+// voucher type, with a leg on a tax ledger, sent with all its legs as Tally
+// returned them, so the server can tie each ledger's voucher total to the
+// month's closing − opening.
+//
+// The tax ledger set is read in the same run with the tax_ledger lane's own
+// request and parser (BuildTaxLedgerXML / ParseTaxLedgerV3), so the two
+// lanes can never disagree on which ledgers are tax ledgers.
+//
+// Every month is sent as a complete snapshot, scheduled ticks included: the
+// final batch always goes (empty when nothing matched) and carries
+// snapshot{complete,...}, so "proven empty" differs from "not synced".
+// When Tally answers but the agent can't read the answer, one empty final
+// batch with complete=false and a sync warning replaces any earlier
+// snapshot's claim, and the run still fails like the tax_ledger lane.
+func runTaxLedgerVoucherSync(
+	ctx context.Context,
+	tallyClient TallyPoster,
+	sender IngestSender,
+	req Request,
+	res Result,
+	emit emitFn,
+	emitBatch emitBatchFn,
+) (Result, error) {
+	ledgerEnv, err := tally.BuildTaxLedgerXML(tally.TaxLedgerRequest{
+		Company: req.TallyCompany, From: req.From, To: req.To,
+	})
+	if err != nil {
+		return res, fmt.Errorf("build tax-ledger envelope: %w", err)
+	}
+	voucherEnv, err := tally.BuildTaxLedgerVoucherXML(tally.TaxLedgerVoucherRequest{
+		Company: req.TallyCompany, From: req.From, To: req.To,
+	})
+	if err != nil {
+		return res, fmt.Errorf("build tax-ledger voucher envelope: %w", err)
+	}
+	window := fmt.Sprintf("%s..%s", req.From.Format("2006-01-02"), req.To.Format("2006-01-02"))
+
+	// incomplete sends the one empty final batch that says this month's
+	// snapshot is not complete, with the reason as a sync warning.
+	incomplete := func(snap tally.TaxLedgerVoucherSnapshot, why string) Result {
+		res.addSyncWarning(newSyncWarning(tally.SyncWarningTaxLedgerVouchersIncomplete, req.TallyCompany,
+			fmt.Sprintf("tax-ledger vouchers for %s not complete: %s", window, why), syncWarningNow(), nil))
+		snap.Complete = false
+		return sendTaxLedgerVoucherBatches(ctx, sender, req, res, nil, snap, emitBatch)
+	}
+
+	emit("fetching", fmt.Sprintf("fetching tax ledgers for %q (%s)", req.TallyCompany, window))
+	ledgerXML, err := tallyClient.PostXML(ctx, ledgerEnv)
+	if err != nil {
+		return res, fmt.Errorf("tally fetch tax ledgers: %w", err)
+	}
+	ledgers, err := tally.ParseTaxLedgerV3(ledgerXML)
+	if err != nil {
+		res = incomplete(tally.TaxLedgerVoucherSnapshot{}, "the tax ledger list could not be read: "+err.Error())
+		return res, fmt.Errorf("parse tax ledgers: %w", err)
+	}
+	ledgerSet := make(map[string]bool, len(ledgers.Ledgers))
+	for _, l := range ledgers.Ledgers {
+		if key := tally.TaxLedgerKey(l.Name); key != "" {
+			ledgerSet[key] = true
+		}
+	}
+	if len(ledgerSet) == 0 {
+		emit("complete", "no Duties & Taxes ledgers listed; snapshot not complete")
+		return incomplete(tally.TaxLedgerVoucherSnapshot{}, "Tally listed no Duties & Taxes ledgers"), nil
+	}
+
+	emit("fetching", fmt.Sprintf("fetching vouchers touching %d tax ledgers for %q (%s)",
+		len(ledgerSet), req.TallyCompany, window))
+	voucherXML, err := tallyClient.PostXML(ctx, voucherEnv)
+	if err != nil {
+		return res, fmt.Errorf("tally fetch vouchers: %w", err)
+	}
+	reply, err := tally.ParseTaxLedgerVoucherReply(voucherXML)
+	if err != nil {
+		res.ParseWarnings = append(res.ParseWarnings, err.Error())
+		res = incomplete(tally.TaxLedgerVoucherSnapshot{}, "the voucher reply could not be read: "+err.Error())
+		return res, fmt.Errorf("parse response: %w", err)
+	}
+	res.ParseStatus = reply.Status
+
+	sel := tally.SelectTaxLedgerVouchers(reply, ledgerSet, req.From, req.To)
+	snap := sel.Snapshot
+	if snap.OutsideWindow > 0 {
+		res.addSyncWarning(newSyncWarning(tally.SyncWarningTaxLedgerVouchersIncomplete, req.TallyCompany,
+			fmt.Sprintf("tax-ledger vouchers for %s not complete: Tally returned %d vouchers dated outside the window (the date range was not honoured)",
+				window, snap.OutsideWindow), syncWarningNow(), sel.OutsideWindowGUIDs))
+	}
+	if snap.DateUnreadable > 0 {
+		res.addSyncWarning(newSyncWarning(tally.SyncWarningTaxLedgerVouchersIncomplete, req.TallyCompany,
+			fmt.Sprintf("tax-ledger vouchers for %s not complete: %d vouchers have a date the agent cannot read",
+				window, snap.DateUnreadable), syncWarningNow(), sel.DateUnreadableGUIDs))
+	}
+	res.RowCount = len(sel.Rows)
+	emit("normalized", fmt.Sprintf("%d of %d vouchers touch a tax ledger (cancelled %d, outside window %d, date unreadable %d, unbalanced %d)",
+		len(sel.Rows), snap.VouchersReturned, snap.CancelledTouching, snap.OutsideWindow, snap.DateUnreadable, sel.Unbalanced))
+
+	res = sendTaxLedgerVoucherBatches(ctx, sender, req, res, sel.Rows, snap, emitBatch)
+	if err := ctx.Err(); err != nil {
+		return res, err
+	}
+	emit("complete", fmt.Sprintf("sent=%d failed=%d rows=%d unsupported=%t",
+		res.BatchesSent, res.BatchesFailed, res.RowCount, res.LaneUnsupported))
+	return res, nil
+}
+
+// sendTaxLedgerVoucherBatches sends the month's rows; the final batch (an
+// empty one when there are no rows) carries the snapshot. A batch that
+// failed before it turns the snapshot's complete to false. A 404/405 means
+// the server predates the lane: the lane is unsupported this tick, nothing
+// more is sent and nothing counts as failed.
+func sendTaxLedgerVoucherBatches(
+	ctx context.Context,
+	sender IngestSender,
+	req Request,
+	res Result,
+	rows []tally.TaxLedgerVoucherRow,
+	snap tally.TaxLedgerVoucherSnapshot,
+	emitBatch emitBatchFn,
+) Result {
+	chunks := splitOrEmptyFinal(rows, req.BatchSize, true)
+	var tallyEndpoint, companyGUID *string
+	if req.TallyEndpoint != "" {
+		tallyEndpoint = &req.TallyEndpoint
+	}
+	if g := strings.TrimSpace(req.CompanyGUID); g != "" {
+		companyGUID = &g
+	}
+	meta := accountingRunMeta(req)
+	for i, chunk := range chunks {
+		if ctx.Err() != nil {
+			return res
+		}
+		body := tally.TaxLedgerVoucherIngestRequestBody{
+			RunID:         req.RunID,
+			Kind:          tally.AccountingBatchTaxLedgerVoucher,
+			TallyCompany:  req.TallyCompany,
+			TallyEndpoint: tallyEndpoint,
+			CompanyGUID:   companyGUID,
+			RequestID:     req.RunID + "-" + intToStr(i+1),
+			Batch:         chunk,
+			SyncWarnings:  res.SyncWarnings,
+			SyncRequestID: req.SyncRequestID,
+			RunKind:       meta.runKind,
+			PeriodFrom:    meta.from,
+			PeriodTo:      meta.to,
+			IsFinal:       i == len(chunks)-1,
+		}
+		if body.IsFinal {
+			s := snap
+			s.VouchersSent = len(rows)
+			s.Complete = s.Complete && res.BatchesFailed == 0
+			body.Snapshot = &s
+		}
+		emitBatch("batch_sending", i+1, len(chunks),
+			fmt.Sprintf("batch %d/%d (%d vouchers, request_id=%s, is_final=%t)",
+				i+1, len(chunks), len(chunk), body.RequestID, body.IsFinal), nil)
+		accepted, sendErr := sender.SendTaxLedgerVouchers(ctx, body)
+		if sendErr != nil {
+			if se := ingest.IsSendError(sendErr); se != nil &&
+				(se.Status == http.StatusNotFound || se.Status == http.StatusMethodNotAllowed) {
+				res.LaneUnsupported = true
+				emitBatch("lane_unsupported", i+1, len(chunks),
+					fmt.Sprintf("server has no %s endpoint (HTTP %d); lane skipped this tick", ingest.TaxLedgerVoucherPath, se.Status), nil)
+				return res
+			}
+			res.BatchesFailed++
+			res.BatchErrors = append(res.BatchErrors, BatchError{
+				Index: i + 1, Total: len(chunks), RequestID: body.RequestID, Err: sendErr,
+			})
+			emitBatch("batch_failed", i+1, len(chunks), sendErr.Error(), sendErr)
+			continue
+		}
+		res.ServerInserted += accepted.Processed
+		res.BatchesSent++
+		emitBatch("batch_sent", i+1, len(chunks),
+			fmt.Sprintf("accepted (processed=%d)", accepted.Processed), nil)
+	}
+	return res
 }
