@@ -71,6 +71,11 @@ type RawVoucher struct {
 	// IsCancelled means Tally has marked the voucher cancelled. Agent still
 	// forwards these so the server can amend prior batches (pain #9).
 	IsCancelled bool
+	// IsOptional is Tally's ISOPTIONAL: an optional voucher stays out of
+	// Tally's ledger reports. nil when the reply carried no flag. Sent as
+	// is_optional on every lane's rows, labelled by the server, never used
+	// here to drop or alter a voucher (QA 07-Nov D21).
+	IsOptional *bool
 	// ReverseCharge is Tally's own `IsRcmApplicable` flag. When true, the
 	// voucher is an RCM self-invoice; the ingest layer routes it to
 	// IngestKind="rcm_self_invoice".

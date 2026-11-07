@@ -639,6 +639,10 @@ func baseRow(v RawVoucher, kind IngestKind, side IngestSide, invoice, taxable fl
 		rc := true
 		row.ReverseCharge = &rc
 	}
+	if v.IsOptional != nil {
+		o := *v.IsOptional
+		row.IsOptional = &o
+	}
 	if v.Narration != "" {
 		n := v.Narration
 		row.Narration = &n

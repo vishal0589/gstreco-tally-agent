@@ -97,6 +97,9 @@ func NormalizeJournalWith(v RawVoucher, opts AccountingNormalizeOptions) (*Journ
 	if isRCMJournal(v) {
 		row.IsRCM = boolPtr(true)
 	}
+	if v.IsOptional != nil {
+		row.IsOptional = boolPtr(*v.IsOptional)
+	}
 	return row, nil
 }
 
@@ -174,6 +177,9 @@ func NormalizePaymentWith(v RawVoucher, opts AccountingNormalizeOptions) (*Payme
 	}
 	if len(refs) > 0 {
 		row.AgainstInvoiceRefs = refs
+	}
+	if v.IsOptional != nil {
+		row.IsOptional = boolPtr(*v.IsOptional)
 	}
 	return row, nil
 }

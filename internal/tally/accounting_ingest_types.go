@@ -42,6 +42,8 @@ type JournalVoucherRow struct {
 	Entries            []JournalVoucherEntry  `json:"entries"`
 	AgainstInvoiceRefs []VoucherBillReference `json:"against_invoice_refs,omitempty"`
 	IsRCM              *bool                  `json:"is_rcm,omitempty"`
+	// IsOptional: Tally's ISOPTIONAL; omitted when not reported (QA 07-Nov D21).
+	IsOptional *bool `json:"is_optional,omitempty"`
 }
 
 type PaymentVoucherEntry struct {
@@ -62,6 +64,8 @@ type PaymentVoucherRow struct {
 	TotalAmount        *float64               `json:"total_amount,omitempty"`
 	Entries            []PaymentVoucherEntry  `json:"entries"`
 	AgainstInvoiceRefs []VoucherBillReference `json:"against_invoice_refs,omitempty"`
+	// IsOptional: Tally's ISOPTIONAL; omitted when not reported (QA 07-Nov D21).
+	IsOptional *bool `json:"is_optional,omitempty"`
 }
 
 type TaxLedgerMonthlyRow struct {

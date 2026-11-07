@@ -100,6 +100,9 @@ type IngestVoucherRow struct {
 	// is flagged "reference_conflict" (QA v27 L3). Optional: older servers
 	// ignore unknown keys.
 	BillReference *string `json:"bill_reference,omitempty"`
+	// IsOptional is Tally's ISOPTIONAL for the voucher; omitted when Tally
+	// did not report it, so the server stores null, never false (QA 07-Nov D21).
+	IsOptional *bool `json:"is_optional,omitempty"`
 }
 
 // IngestVoucherLeg is one ledger leg of an invoice voucher (GST Reco's

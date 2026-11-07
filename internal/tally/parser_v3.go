@@ -189,6 +189,7 @@ type xmlVoucher struct {
 	PlaceOfSupply    string              `xml:"PLACEOFSUPPLY"`
 	IsInvoice        string              `xml:"ISINVOICE"`
 	IsCancelled      string              `xml:"ISCANCELLED"`
+	IsOptional       string              `xml:"ISOPTIONAL"`
 	IsRcmApplicable  string              `xml:"ISRCMAPPLICABLE"`
 	Narration        string              `xml:"NARRATION"`
 	LedgerEntries    []xmlLedgerEntry    `xml:"ALLLEDGERENTRIES.LIST"`
@@ -233,6 +234,7 @@ func (x xmlVoucher) toRaw() (RawVoucher, []string) {
 		PlaceOfSupply:   strings.TrimSpace(x.PlaceOfSupply),
 		IsInvoice:       parseTallyBool(x.IsInvoice),
 		IsCancelled:     parseTallyBool(x.IsCancelled),
+		IsOptional:      parseTallyOptionalBool(x.IsOptional),
 		ReverseCharge:   parseTallyBool(x.IsRcmApplicable),
 		Narration:       strings.TrimSpace(x.Narration),
 	}
@@ -332,6 +334,22 @@ func parseTallyBool(s string) bool {
 	default:
 		return false
 	}
+}
+
+// parseTallyOptionalBool reads a Yes/No flag that Tally may leave out:
+// nil when the reply carried no value (or one it can't be read as), so
+// "not reported" never turns into "No".
+func parseTallyOptionalBool(s string) *bool {
+	var b bool
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "yes", "true", "1":
+		b = true
+	case "no", "false", "0":
+		b = false
+	default:
+		return nil
+	}
+	return &b
 }
 
 // parseTallyAmount handles signed decimals with optional thousands
