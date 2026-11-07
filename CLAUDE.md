@@ -56,6 +56,10 @@ Each sweep probes the saved `tally_endpoints`, every active mapping's endpoint a
 
 `tax_ledger_voucher` (`syncrun.runTaxLedgerVoucherSync`) must read its ledger set with the tax_ledger lane's own `BuildTaxLedgerXML` / `ParseTaxLedgerV3`, so both lanes agree on the set. Its reply parser (`tally.ParseTaxLedgerVoucherReply`) never repairs: no byte stripping or `prepareXMLForDecode`; refuse instead. Amounts go out as the string Tally returned, in Tally sign. Every month sends a final batch with `snapshot`, scheduled ticks included. A 404/405 from the server is `Result.LaneUnsupported`, never a failure, never in any connection's status.
 
+## Optional vouchers
+
+The day-book FETCH asks for `ISOPTIONAL`, and every invoice, journal and payment row sends `is_optional` from `RawVoucher.IsOptional` (`*bool`). Keep it three-state: nil (Tally sent no flag) omits the key, so the server stores null. Never default it to false, and never drop or alter an optional voucher because of the flag.
+
 ## Server coordination
 
 Every agent PR that changes the wire protocol must reference the paired server PR (or note that the server already exposes the endpoint). Breaking wire changes need a server migration first.
