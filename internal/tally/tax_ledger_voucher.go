@@ -189,6 +189,14 @@ func ParseTaxLedgerVoucherReply(raw []byte) (TaxLedgerVoucherReply, error) {
 				s, _ := readText(dec, ns)
 				return fail("Tally LINEERROR: %s", strings.TrimSpace(s))
 			case "VOUCHER":
+				// CMPINFO counters describe the response, not a financial
+				// voucher. Only the exact envelope metadata path qualifies.
+				if ns.isVoucherCounter() {
+					if err := readVoucherCounter(dec, ns); err != nil {
+						return fail("%v", err)
+					}
+					continue
+				}
 				v, err := readVoucher(dec, ns)
 				if err != nil {
 					return fail("%v", err)
@@ -367,6 +375,7 @@ func restoreControlChars(s string) string {
 // prefix: UDF is read as if declared, anything else is refused.
 type nsScopes struct {
 	stack []map[string]bool // URIs declared at each open element
+	names []xml.Name
 }
 
 func (n *nsScopes) push(t xml.StartElement) error {
@@ -377,6 +386,7 @@ func (n *nsScopes) push(t xml.StartElement) error {
 		}
 	}
 	n.stack = append(n.stack, decl)
+	n.names = append(n.names, t.Name)
 	if err := n.check(t.Name, true); err != nil {
 		return err
 	}
@@ -394,6 +404,44 @@ func (n *nsScopes) push(t xml.StartElement) error {
 func (n *nsScopes) pop() {
 	if len(n.stack) > 0 {
 		n.stack = n.stack[:len(n.stack)-1]
+		n.names = n.names[:len(n.names)-1]
+	}
+}
+
+// Never suppress an unidentifiable real collection voucher.
+func (n *nsScopes) isVoucherCounter() bool {
+	want := []string{"ENVELOPE", "BODY", "DESC", "CMPINFO", "VOUCHER"}
+	if len(n.names) != len(want) {
+		return false
+	}
+	for i, name := range n.names {
+		if name.Space != "" || name.Local != want[i] {
+			return false
+		}
+	}
+	return true
+}
+func readVoucherCounter(dec *xml.Decoder, ns *nsScopes) error {
+	var text strings.Builder
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		switch t := tok.(type) {
+		case xml.CharData:
+			text.Write(t)
+		case xml.Comment:
+		case xml.EndElement:
+			ns.pop()
+			n, err := parseIntStrict(strings.TrimSpace(text.String()))
+			if err != nil || n < 0 {
+				return fmt.Errorf("CMPINFO VOUCHER counter is not a nonnegative integer")
+			}
+			return nil
+		default:
+			return fmt.Errorf("CMPINFO VOUCHER counter contains non-scalar content")
+		}
 	}
 }
 
