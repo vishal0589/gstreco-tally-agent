@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -528,4 +530,46 @@ func (f *fakeIngestSender) SendTaxLedgerVouchers(_ context.Context, body tally.T
 		return tally.AccountingAcceptedResponse{}, f.err
 	}
 	return tally.AccountingAcceptedResponse{Processed: len(body.Batch)}, nil
+}
+
+func TestRunSyncCaptureRequiresDryRun(t *testing.T) {
+	var out, err bytes.Buffer
+	if code := runSync(&out, &err, []string{"--capture-dir", filepath.Join(t.TempDir(), "capture")}, syncDeps{}); code != 2 {
+		t.Fatalf("exit=%d", code)
+	}
+}
+func TestRunSyncCaptureDryRunNoCredentialsOrSend(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "capture")
+	deps := syncDeps{now: time.Now, newTallyClient: func(string) tallyPoster { return captureTallyFake{} }, loadConfig: func(string) (*config.Config, error) {
+		return &config.Config{Server: "https://example.test", ConnectionID: "conn"}, nil
+	}, newOSKeyring: func() keyring.Store { t.Fatal("read secrets"); return nil }, newIngestClient: func(_, _, _, _ string) (ingestSender, error) { t.Fatal("created sender"); return nil, nil }}
+	var out, err bytes.Buffer
+	code := runSync(&out, &err, []string{"--tally-company", "Example Company", "--kind", "sales", "--period", "092026", "--dry-run", "--capture-dir", dir, "--expected-company-guid", "expected-guid"}, deps)
+	if code != 0 {
+		t.Fatalf("exit=%d err=%s", code, err.String())
+	}
+	if _, e := os.Stat(filepath.Join(dir, "manifest.json")); e != nil {
+		t.Fatal(e)
+	}
+	b, e := os.ReadFile(filepath.Join(dir, "0003-response.bin"))
+	if e != nil || !bytes.Equal(b, []byte(stubResponse)) {
+		t.Fatal("response not preserved", e)
+	}
+}
+
+type captureTallyFake struct{}
+
+func (captureTallyFake) PostXML(_ context.Context, req []byte) ([]byte, error) {
+	if bytes.Contains(req, []byte("GstrecoCompanyIdentity")) {
+		return []byte(`<ENVELOPE><BODY><DATA><COLLECTION><COMPANY NAME="Example Company"><NAME>Example Company</NAME><GUID>expected-guid</GUID></COMPANY></COLLECTION></DATA></BODY></ENVELOPE>`), nil
+	}
+	if bytes.Contains(req, []byte("List of Companies")) {
+		return []byte(`<ENVELOPE><COMPANY><NAME>Example Company</NAME></COMPANY></ENVELOPE>`), nil
+	}
+	return []byte(stubResponse), nil
+}
+func TestCaptureIdentityWrongGUIDBlocks(t *testing.T) {
+	if err := verifyCaptureIdentity(context.Background(), captureTallyFake{}, "Example Company", "wrong-guid", "http://localhost:9000"); err == nil {
+		t.Fatal("accepted wrong company GUID")
+	}
 }
