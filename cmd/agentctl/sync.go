@@ -15,6 +15,7 @@ import (
 	"github.com/vishal0589/gstreco-tally-agent/internal/ingest"
 	"github.com/vishal0589/gstreco-tally-agent/internal/keyring"
 	"github.com/vishal0589/gstreco-tally-agent/internal/period"
+	"github.com/vishal0589/gstreco-tally-agent/internal/sourcecapture"
 	"github.com/vishal0589/gstreco-tally-agent/internal/syncrun"
 	"github.com/vishal0589/gstreco-tally-agent/internal/tally"
 )
@@ -38,8 +39,9 @@ func syncCmd(args []string) int {
 		newTallyClient: func(endpoint string) tallyPoster {
 			return tally.NewClient(endpoint)
 		},
-		newIngestClient: defaultNewIngestClient,
-		loadConfig:      config.Load,
+		newCaptureClient: func(endpoint string) tallyPoster { return tally.NewSourceCaptureClient(endpoint) },
+		newIngestClient:  defaultNewIngestClient,
+		loadConfig:       config.Load,
 	})
 }
 
@@ -47,11 +49,12 @@ func syncCmd(args []string) int {
 // passes the production implementations; tests pass fakes that capture
 // requests and stub responses.
 type syncDeps struct {
-	now             func() time.Time
-	newOSKeyring    func() keyring.Store
-	newTallyClient  func(endpoint string) tallyPoster
-	newIngestClient func(baseURL, connectionID, bearer, secretB64 string) (ingestSender, error)
-	loadConfig      func(path string) (*config.Config, error)
+	newCaptureClient func(endpoint string) tallyPoster
+	now              func() time.Time
+	newOSKeyring     func() keyring.Store
+	newTallyClient   func(endpoint string) tallyPoster
+	newIngestClient  func(baseURL, connectionID, bearer, secretB64 string) (ingestSender, error)
+	loadConfig       func(path string) (*config.Config, error)
 }
 
 // tallyPoster + ingestSender alias the syncrun interfaces so tests in
@@ -74,13 +77,25 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 	connectionID := fs.String("connection-id", "", "paired connection id to use when config stores multiple connections")
 	tallyURL := fs.String("tally-url", "", "Tally HTTP endpoint (default: from config or http://localhost:9000)")
 	tallyCompany := fs.String("tally-company", "", "Tally company name as it appears in Tally (required)")
-	kindFlag := fs.String("kind", "", "sync kind: purchase | sales | credit_note | debit_note | journal | payment | tax_ledger | tax_ledger_voucher (required)")
+	kindFlag := fs.String("kind", "", "sync kind: purchase | sales | credit_note | debit_note | journal | payment | tax_ledger | tax_ledger_voucher | source_all (capture-only; required)")
 	period := fs.String("period", "", "month shorthand MMYYYY (e.g. 042026 for Apr 2026); mutually exclusive with --from/--to")
 	fromFlag := fs.String("from", "", "window start YYYY-MM-DD (use with --to instead of --period)")
 	toFlag := fs.String("to", "", "window end YYYY-MM-DD inclusive")
 	batchSize := fs.Int("batch-size", ingest.DefaultBatchSize, "max rows per ingest request (server caps at 1000)")
 	dryRun := fs.Bool("dry-run", false, "fetch + parse only; do not POST to the server")
+	expectedGUID := fs.String("expected-company-guid", "", "with --capture-dir: expected Tally company GUID; both identity probes must match")
+	captureDir := fs.String("capture-dir", "", "with --dry-run only: preserve exact Tally request/response bytes in a NEW private directory")
 	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	if *captureDir != "" && !*dryRun {
+		fmt.Fprintln(stderr, "agentctl sync: --capture-dir requires --dry-run; no server writes are permitted")
+		return 2
+	}
+
+	if *captureDir != "" && strings.TrimSpace(*expectedGUID) == "" {
+		fmt.Fprintln(stderr, "agentctl sync: --capture-dir requires --expected-company-guid")
 		return 2
 	}
 
@@ -93,7 +108,16 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 		return 2
 	}
 
-	kind, err := mapKind(*kindFlag)
+	allSource := *kindFlag == "source_all"
+	if allSource && (*captureDir == "" || !*dryRun) {
+		fmt.Fprintln(stderr, "agentctl sync: source_all requires --dry-run and --capture-dir")
+		return 2
+	}
+	kindName := *kindFlag
+	if allSource {
+		kindName = "purchase"
+	}
+	kind, err := mapKind(kindName)
 	if err != nil {
 		fmt.Fprintf(stderr, "agentctl sync: %v\n", err)
 		return 2
@@ -153,6 +177,19 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 	// access too — useful for verifying the parser on a brand-new
 	// install before pairing.
 	tallyClient := deps.newTallyClient(tallyEndpoint)
+	if *captureDir != "" && deps.newCaptureClient != nil {
+		tallyClient = deps.newCaptureClient(tallyEndpoint)
+	}
+	var capture *sourcecapture.Capture
+	if *captureDir != "" {
+		var captureErr error
+		capture, captureErr = sourcecapture.New(*captureDir, tallyClient, sourcecapture.Manifest{Company: *tallyCompany, CompanyGUID: *expectedGUID, Endpoint: tallyEndpoint, Kind: *kindFlag, From: from.Format("2006-01-02"), To: to.Format("2006-01-02")})
+		if captureErr != nil {
+			fmt.Fprintf(stderr, "agentctl sync: preserve capture: %v\n", captureErr)
+			return 1
+		}
+		tallyClient = capture
+	}
 
 	var sender ingestSender
 	if !*dryRun {
@@ -209,6 +246,24 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 	runCtx, cancelRun := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancelRun()
 
+	if capture != nil {
+		if identityErr := verifyCaptureIdentity(runCtx, tallyClient, *tallyCompany, *expectedGUID, tallyEndpoint); identityErr != nil {
+			finishErr := capture.Finish(identityErr)
+			fmt.Fprintf(stderr, "agentctl sync: identity check: %v; capture finish: %v\n", identityErr, finishErr)
+			return 1
+		}
+	}
+
+	if allSource {
+		captureErr := captureAllSource(runCtx, capture, *tallyCompany, *expectedGUID, tallyEndpoint, from, to)
+		finishErr := capture.Finish(captureErr)
+		if captureErr != nil || finishErr != nil {
+			fmt.Fprintf(stderr, "agentctl sync: source capture: %v; finish: %v\n", captureErr, finishErr)
+			return 1
+		}
+		fmt.Fprintln(stdout, "Source bytes and parsed membership saved. No rows sent; source population remains unverified until independent Tally controls are checked.")
+		return 0
+	}
 	res, runErr := syncrun.RunOne(runCtx, tallyClient, sender, syncrun.Request{
 		KindName:      kind.Name,
 		TallyCompany:  *tallyCompany,
@@ -221,6 +276,12 @@ func runSync(stdout, stderr io.Writer, args []string, deps syncDeps) int {
 		RunKind:       "manual",
 		BatchSize:     *batchSize,
 	}, progress)
+	if capture != nil {
+		if captureErr := capture.Finish(runErr); captureErr != nil {
+			fmt.Fprintf(stderr, "agentctl sync: finish capture: %v\n", captureErr)
+			return 1
+		}
+	}
 	if runErr != nil {
 		fmt.Fprintf(stderr, "agentctl sync: %v\n", runErr)
 		return 1
@@ -362,4 +423,37 @@ func firstNonEmpty(vs ...string) string {
 
 func (noopSender) SendTaxLedgerVouchers(_ context.Context, _ tally.TaxLedgerVoucherIngestRequestBody) (tally.AccountingAcceptedResponse, error) {
 	return tally.AccountingAcceptedResponse{}, nil
+}
+
+// verifyCaptureIdentity preserves both probe responses through the capture
+// wrapper, then refuses all voucher reads unless both probes match the GUID.
+func verifyCaptureIdentity(ctx context.Context, client tallyPoster, name, guid, endpoint string) error {
+	listReq, err := tally.BuildCompanyListXML(tally.CompanyListRequest{})
+	if err != nil {
+		return err
+	}
+	listRaw, err := client.PostXML(ctx, listReq)
+	if err != nil {
+		return err
+	}
+	list, err := tally.ParseCompanyListV3(listRaw)
+	if err != nil {
+		return err
+	}
+	identityRaw, err := client.PostXML(ctx, tally.BuildCompanyIdentityXML())
+	if err != nil {
+		return err
+	}
+	identity, err := tally.ParseCompanyIdentity(identityRaw)
+	if err != nil {
+		return err
+	}
+	if len(list.Warnings) > 0 || len(identity.Warnings) > 0 {
+		return fmt.Errorf("company probes returned warnings; identity unverified")
+	}
+	verdict := syncrun.CheckMappingIdentity(ingest.ActiveMapping{TallyCompanyName: name, TallyCompanyGUID: guid}, tally.ProbeResult{Endpoint: endpoint, Companies: list.Companies, Identity: &tally.IdentityProbe{Companies: identity.Companies}})
+	if verdict.Verdict != syncrun.IdentityMatch {
+		return fmt.Errorf("%s", verdict.Reason)
+	}
+	return nil
 }
