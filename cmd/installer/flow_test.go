@@ -173,7 +173,7 @@ func TestRunInstaller_RerunRepairsServiceWithoutApproval(t *testing.T) {
 
 	ui := &fakeUI{}
 	var commands [][]string
-	deps := defaultInstallerDeps()
+	deps := testInstallerDeps()
 	deps.isAdmin = func() (bool, error) { return true, nil }
 	deps.httpClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -212,6 +212,8 @@ func TestRunInstaller_RerunRepairsServiceWithoutApproval(t *testing.T) {
 		}
 	}
 
+	prepareExistingInstallFixture(t, tmp, &deps)
+
 	exitCode := runInstaller(context.Background(), ui, installerOptions{
 		server:     "https://example.com",
 		configPath: cfgPath,
@@ -235,7 +237,7 @@ func TestRunInstaller_RepairsACLAndRetriesLocalPairState(t *testing.T) {
 	ui := &fakeUI{}
 	var commands [][]string
 	loadCalls := 0
-	deps := defaultInstallerDeps()
+	deps := testInstallerDeps()
 	deps.goos = func() string { return "windows" }
 	deps.isAdmin = func() (bool, error) { return true, nil }
 	deps.httpClient = &http.Client{
@@ -281,6 +283,8 @@ func TestRunInstaller_RepairsACLAndRetriesLocalPairState(t *testing.T) {
 		}
 	}
 
+	prepareExistingInstallFixture(t, tmp, &deps)
+
 	exitCode := runInstaller(context.Background(), ui, installerOptions{
 		server:     "https://example.com",
 		configPath: cfgPath,
@@ -299,7 +303,7 @@ func TestRunInstaller_RepairsACLAndRetriesLocalPairState(t *testing.T) {
 	if strings.Count(joined, "icacls.exe") < 2 {
 		t.Fatalf("expected preflight and retry icacls repair commands, got %v", commands)
 	}
-	if !strings.Contains(joined, "service restart") {
+	if !strings.Contains(joined, "service stop") || !strings.Contains(joined, "service start") {
 		t.Fatalf("expected installer to continue to service repair, got %v", commands)
 	}
 }
@@ -373,7 +377,7 @@ func TestRunInstaller_AddTenantStartsFreshApprovalOnPairedMachine(t *testing.T) 
 	var commands [][]string
 	var persistCalls []pair.PersistOptions
 	loadCalls := 0
-	deps := defaultInstallerDeps()
+	deps := testInstallerDeps()
 	deps.isAdmin = func() (bool, error) { return true, nil }
 	deps.openBrowser = func(string) error { return nil }
 	deps.httpClient = &http.Client{
@@ -446,6 +450,8 @@ func TestRunInstaller_AddTenantStartsFreshApprovalOnPairedMachine(t *testing.T) 
 		}
 	}
 
+	prepareExistingInstallFixture(t, tmp, &deps)
+
 	exitCode := runInstaller(context.Background(), ui, installerOptions{
 		server:     "https://example.com",
 		configPath: cfgPath,
@@ -476,7 +482,7 @@ func TestRunInstaller_ServiceRepairFailureIncludesCommandOutput(t *testing.T) {
 	tmp := t.TempDir()
 	cfgPath := filepath.Join(tmp, "config.yaml")
 	ui := &fakeUI{}
-	deps := defaultInstallerDeps()
+	deps := testInstallerDeps()
 	deps.isAdmin = func() (bool, error) { return true, nil }
 	deps.httpClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -519,7 +525,7 @@ func TestRunInstaller_ServiceRepairFailureIncludesCommandOutput(t *testing.T) {
 	if !ui.sawLog("Access is denied.") {
 		t.Fatalf("expected service failure output in logs: %v", ui.logs)
 	}
-	if !ui.sawLog("Could not install or repair the Windows service") {
+	if !ui.sawLog("Could not install agent binaries") {
 		t.Fatalf("expected installer error log, got %v", ui.logs)
 	}
 }
@@ -650,7 +656,7 @@ func TestDetectLocalPairState_MultiConnectionPairedIfAnyConnectionSecretsExist(t
 }
 
 func TestRunInstallerMain_HelpBypassesWindowsGate(t *testing.T) {
-	deps := defaultInstallerDeps()
+	deps := testInstallerDeps()
 	deps.goos = func() string { return "darwin" }
 
 	exitCode := runInstallerMain(os.Stdout, os.Stderr, os.Stdin, []string{"--help"}, deps)

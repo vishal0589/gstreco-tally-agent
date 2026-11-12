@@ -26,6 +26,7 @@ import (
 )
 
 type installerDeps struct {
+	observeService  func(context.Context, func(context.Context, string, ...string) (commandResult, error), string) (serviceState, error)
 	goos            func() string
 	version         func() string
 	httpClient      *http.Client
@@ -40,10 +41,11 @@ type installerDeps struct {
 
 func defaultInstallerDeps() installerDeps {
 	return installerDeps{
-		goos:       func() string { return runtime.GOOS },
-		version:    version.String,
-		httpClient: &http.Client{Timeout: 120 * time.Second},
-		isAdmin:    isAdministrator,
+		observeService: observePlatformService,
+		goos:           func() string { return runtime.GOOS },
+		version:        version.String,
+		httpClient:     &http.Client{Timeout: 120 * time.Second},
+		isAdmin:        isAdministrator,
 		relaunchAsAdmin: func(args []string) error {
 			return relaunchSelfAsAdmin(args)
 		},
@@ -464,6 +466,8 @@ const (
 	serviceRunning      serviceState = "running"
 	serviceStopped      serviceState = "stopped"
 	serviceUnknown      serviceState = "unknown"
+	servicePending      serviceState = "pending"
+	servicePaused       serviceState = "paused"
 )
 
 type commandResult struct {
@@ -519,6 +523,28 @@ func runInstaller(ctx context.Context, ui installerUI, opts installerOptions, de
 	serverURL := strings.TrimRight(opts.server, "/")
 	api := newInstallerSessionClient(serverURL, deps.httpClient)
 	deviceName := localHostname()
+	versionMeta, err := api.FetchVersion(ctx)
+	if err != nil {
+		ui.Errorf("Could not fetch agent download metadata: %v", err)
+		return 1
+	}
+	agentctlAsset, ok := versionMeta.Platforms["windows-amd64"]
+	if !ok || strings.TrimSpace(agentctlAsset.URL) == "" {
+		ui.Errorf("Windows agentctl asset missing from version metadata.")
+		return 1
+	}
+	daemonAsset, ok := versionMeta.Daemon["windows-amd64"]
+	if !ok || strings.TrimSpace(daemonAsset.URL) == "" {
+		ui.Errorf("Windows daemon asset missing from version metadata.")
+		return 1
+	}
+
+	// Check before ACL repair, approval or credential persistence. A stale
+	// manifest must not partly pair this machine and then downgrade it.
+	if err := checkInstalledVersions(ctx, deps.runCommand, opts.installDir, versionMeta.Latest); err != nil {
+		ui.Errorf("Agent safety check failed: %v", err)
+		return 1
+	}
 	if err := repairLocalAgentAccess(ctx, deps.goos(), deps.runCommand, opts.configPath); err != nil {
 		ui.Warnf("Could not pre-repair local GST Reco permissions: %v", err)
 	}
@@ -585,25 +611,6 @@ func runInstaller(ctx context.Context, ui installerUI, opts installerOptions, de
 		}
 	}
 
-	versionMeta, err := api.FetchVersion(ctx)
-	if err != nil {
-		failSession(ctx, api, activeSession, "metadata_fetch_failed", err.Error())
-		ui.Errorf("Could not fetch agent download metadata: %v", err)
-		return 1
-	}
-	agentctlAsset, ok := versionMeta.Platforms["windows-amd64"]
-	if !ok || strings.TrimSpace(agentctlAsset.URL) == "" {
-		failSession(ctx, api, activeSession, "missing_asset", "windows-amd64 agentctl asset missing from version metadata")
-		ui.Errorf("Windows agentctl asset missing from version metadata.")
-		return 1
-	}
-	daemonAsset, ok := versionMeta.Daemon["windows-amd64"]
-	if !ok || strings.TrimSpace(daemonAsset.URL) == "" {
-		failSession(ctx, api, activeSession, "missing_asset", "windows-amd64 daemon asset missing from version metadata")
-		ui.Errorf("Windows daemon asset missing from version metadata.")
-		return 1
-	}
-
 	if err := os.MkdirAll(opts.installDir, 0o755); err != nil {
 		failSession(ctx, api, activeSession, "install_dir_failed", err.Error())
 		ui.Errorf("Could not create install directory %s: %v", opts.installDir, err)
@@ -612,24 +619,19 @@ func runInstaller(ctx context.Context, ui installerUI, opts installerOptions, de
 	agentctlPath := filepath.Join(opts.installDir, "gstreco-tally-agentctl.exe")
 	agentPath := filepath.Join(opts.installDir, "gstreco-tally-agent.exe")
 
-	ui.Infof("Downloading the latest agent binaries…")
-	if err := downloadAsset(ctx, deps.httpClient, agentctlAsset.URL, agentctlPath, agentctlAsset.SHA256); err != nil {
-		failSession(ctx, api, activeSession, "download_failed", err.Error())
-		ui.Errorf("Could not download agentctl: %v", err)
-		return 1
-	}
-	if err := downloadAsset(ctx, deps.httpClient, daemonAsset.URL, agentPath, daemonAsset.SHA256); err != nil {
-		failSession(ctx, api, activeSession, "download_failed", err.Error())
-		ui.Errorf("Could not download the daemon: %v", err)
+	// Pairing may take minutes. Recheck before replacing either binary.
+	if err := checkInstalledVersions(ctx, deps.runCommand, opts.installDir, versionMeta.Latest); err != nil {
+		failSession(ctx, api, activeSession, "unsafe_version", err.Error())
+		ui.Errorf("Agent safety check failed: %v", err)
 		return 1
 	}
 
 	if activeSession != nil {
 		_ = api.Update(ctx, activeSession.ID, activeSession.Token, "installing_service", "", "")
 	}
-	if err := ensureServiceHealthy(ctx, deps.runCommand, agentPath); err != nil {
-		failSession(ctx, api, activeSession, "service_repair_failed", err.Error())
-		ui.Errorf("Could not install or repair the Windows service: %v", err)
+	if err := installBinariesTransactional(ctx, ui, deps, agentctlAsset, daemonAsset, agentctlPath, agentPath); err != nil {
+		failSession(ctx, api, activeSession, "install_failed", err.Error())
+		ui.Errorf("Could not install agent binaries: %v", err)
 		return 1
 	}
 
@@ -1106,7 +1108,9 @@ func replaceDownloadedFile(tempPath, dest string) error {
 	movedExisting := false
 
 	if _, err := os.Stat(dest); err == nil {
-		_ = os.Remove(backupPath)
+		if err := os.Remove(backupPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove stale backup %s: %w", backupPath, err)
+		}
 		if err := os.Rename(dest, backupPath); err != nil {
 			return fmt.Errorf("move existing %s aside: %w", dest, err)
 		}
@@ -1133,7 +1137,9 @@ func replaceDownloadedFile(tempPath, dest string) error {
 		return err
 	}
 	if movedExisting {
-		_ = os.Remove(backupPath)
+		if err := os.Remove(backupPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove stale backup %s: %w", backupPath, err)
+		}
 	}
 	return nil
 }
