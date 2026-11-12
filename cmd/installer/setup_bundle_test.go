@@ -81,7 +81,7 @@ func TestRunInstaller_SetupBundleClaimsPairCodeWithoutBrowser(t *testing.T) {
 
 	var claimed []pair.Options
 	var commands [][]string
-	deps := defaultInstallerDeps()
+	deps := testInstallerDeps()
 	deps.isAdmin = func() (bool, error) { return true, nil }
 	deps.httpClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -113,6 +113,8 @@ func TestRunInstaller_SetupBundleClaimsPairCodeWithoutBrowser(t *testing.T) {
 	// Press Enter at the port prompt → default 9000. The --code stands in for
 	// the code that would normally be read from the installer's filename.
 	ui := &fakeUI{lines: []string{""}}
+	prepareExistingInstallFixture(t, tmp, &deps)
+
 	exitCode := runInstaller(context.Background(), ui, installerOptions{
 		server:     "https://example.com",
 		configPath: cfgPath,
@@ -149,7 +151,7 @@ func TestRunInstaller_AlreadyPairedUpdatesSilently(t *testing.T) {
 
 	var claimCalls int
 	var commands [][]string
-	deps := defaultInstallerDeps()
+	deps := testInstallerDeps()
 	deps.isAdmin = func() (bool, error) { return true, nil }
 	deps.httpClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -181,6 +183,8 @@ func TestRunInstaller_AlreadyPairedUpdatesSilently(t *testing.T) {
 	// No code, already paired, no --add-tenant: a prompt-less update. fakeUI has
 	// no queued lines/confirms, so any prompt would surface as wrong behavior.
 	ui := &fakeUI{}
+	prepareExistingInstallFixture(t, tmp, &deps)
+
 	exitCode := runInstaller(context.Background(), ui, installerOptions{
 		server:     "https://example.com",
 		configPath: cfgPath,
