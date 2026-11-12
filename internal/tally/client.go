@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf16"
+	"unicode/utf8"
 )
 
 // DefaultEndpoint is where Tally Prime's embedded HTTP server listens by
@@ -108,6 +110,31 @@ func (c *Client) Endpoint() string { return c.endpoint }
 // so we omit it. The request body must be valid XML; BuildDayBookXML
 // produces compliant output.
 func (c *Client) PostXML(ctx context.Context, body []byte) ([]byte, error) {
+	return c.postXML(ctx, body, "text/xml")
+}
+
+// PostXMLUnicode requests Tally's documented UTF-16 response path for the
+// strict audit lane. Encoding the request is lossless; the response parser
+// still refuses malformed bytes rather than repairing source evidence.
+func (c *Client) PostXMLUnicode(ctx context.Context, body []byte) ([]byte, error) {
+	if !utf8.Valid(body) {
+		return nil, fmt.Errorf("tally: request is not valid UTF-8")
+	}
+	if len(body) == 0 {
+		return nil, fmt.Errorf("tally: empty request body")
+	}
+	units := utf16.Encode([]rune(string(body)))
+	wire := make([]byte, 2+len(units)*2)
+	wire[0] = 0xff
+	wire[1] = 0xfe
+	for i, u := range units {
+		wire[2+i*2] = byte(u)
+		wire[3+i*2] = byte(u >> 8)
+	}
+	return c.postXML(ctx, wire, "UTF-16")
+}
+
+func (c *Client) postXML(ctx context.Context, body []byte, contentType string) ([]byte, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("tally: nil context")
 	}
@@ -119,7 +146,7 @@ func (c *Client) PostXML(ctx context.Context, body []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("tally: build request: %w", err)
 	}
-	req.Header.Set("Content-Type", "text/xml")
+	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("User-Agent", "gstreco-tally-agent")
 
 	resp, err := c.http.Do(req)
