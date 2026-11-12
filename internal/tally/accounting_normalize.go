@@ -91,6 +91,11 @@ func NormalizeJournalWith(v RawVoucher, opts AccountingNormalizeOptions) (*Journ
 	if partyGSTIN != "" {
 		row.PartyGSTIN = &partyGSTIN
 	}
+	// Do not select a bill reference as a replacement for the header. Both
+	// are source evidence; document selection belongs to the server.
+	if reference := strings.TrimSpace(v.Reference); reference != "" {
+		row.VoucherReference = &reference
+	}
 	if len(refs) > 0 {
 		row.AgainstInvoiceRefs = refs
 	}

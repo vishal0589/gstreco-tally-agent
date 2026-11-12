@@ -31,6 +31,9 @@ type JournalVoucherEntry struct {
 }
 
 type JournalVoucherRow struct {
+	// VoucherReference is the source header REFERENCE, kept separately from
+	// bill allocations even when they name a different or older document.
+	VoucherReference   *string                `json:"voucher_reference,omitempty"`
 	TallyVoucherGUID   *string                `json:"tally_voucher_guid,omitempty"`
 	VoucherNumber      string                 `json:"voucher_number"`
 	VoucherDate        string                 `json:"voucher_date"` // YYYY-MM-DD
