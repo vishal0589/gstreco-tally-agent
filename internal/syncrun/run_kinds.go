@@ -676,7 +676,15 @@ func runTaxLedgerVoucherSync(
 
 	emit("fetching", fmt.Sprintf("fetching vouchers touching %d tax ledgers for %q (%s)",
 		len(ledgerSet), req.TallyCompany, window))
-	voucherXML, err := tallyClient.PostXML(ctx, voucherEnv)
+	// The real HTTP client uses Tally's documented Unicode transport. Keep
+	// PostXML-only adapters supported; parser safety is unchanged either way.
+	postVouchers := tallyClient.PostXML
+	if unicodeClient, ok := tallyClient.(interface {
+		PostXMLUnicode(context.Context, []byte) ([]byte, error)
+	}); ok {
+		postVouchers = unicodeClient.PostXMLUnicode
+	}
+	voucherXML, err := postVouchers(ctx, voucherEnv)
 	if err != nil {
 		return res, fmt.Errorf("tally fetch vouchers: %w", err)
 	}
